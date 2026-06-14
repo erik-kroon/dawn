@@ -13,27 +13,35 @@ import type {
 } from "@dawn/domain";
 import type {
   ActorTeam,
+  BankAccount,
+  BankConnection,
+  BankingUseCaseRepository,
   IdempotencyResult,
+  ProviderSyncRun,
   ReviewWorkspaceData,
   TransactionImportSession,
-  TransactionReviewRepository,
 } from "@dawn/app";
+import { createMockBankingProvider } from "@dawn/integrations";
 
-class MemoryTransactionReviewRepository implements TransactionReviewRepository {
+class MemoryTransactionReviewRepository implements BankingUseCaseRepository {
   auditEvents: unknown[] = [];
   outboxEvents: unknown[] = [];
+  bankAccounts = new Map<string, BankAccount>();
+  bankConnections = new Map<string, BankConnection>();
   categories = new Map<string, Category>();
   accounts = new Map<string, LedgerAccount>();
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   importSessions: TransactionImportSession[] = [];
   invites = new Map<string, TeamInvite>();
   memberships = new Map<string, TeamRole>();
+  providerObjects = new Map<string, Record<string, unknown>>();
+  syncRuns: ProviderSyncRun[] = [];
   teams = new Map<string, string>();
   transactions = new Map<string, Transaction>();
   users = new Map<string, { email: string; name: string }>();
 
   async withTransaction<T>(
-    callback: (repository: TransactionReviewRepository) => Promise<T>,
+    callback: (repository: BankingUseCaseRepository) => Promise<T>,
   ): Promise<T> {
     return callback(this);
   }
@@ -111,6 +119,16 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
     return (
       [...this.transactions.values()].find(
         (transaction) => transaction.teamId === teamId && transaction.duplicateKey === duplicateKey,
+      ) ?? null
+    );
+  }
+
+  async getTransactionByProviderTransactionId(teamId: string, providerTransactionId: string) {
+    return (
+      [...this.transactions.values()].find(
+        (transaction) =>
+          transaction.teamId === teamId &&
+          transaction.providerTransactionId === providerTransactionId,
       ) ?? null
     );
   }
@@ -240,6 +258,150 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
     });
   }
 
+  async listBankConnectionSummaries(teamId: string) {
+    return [...this.bankConnections.values()]
+      .filter((connection) => connection.teamId === teamId)
+      .map((connection) => ({
+        connection,
+        accounts: [...this.bankAccounts.values()].filter(
+          (account) => account.connectionId === connection.id,
+        ),
+        latestSyncRun:
+          [...this.syncRuns].reverse().find((syncRun) => syncRun.connectionId === connection.id) ??
+          null,
+      }));
+  }
+
+  async getBankConnectionForTeam(teamId: string, connectionId: string) {
+    const connection = this.bankConnections.get(connectionId);
+    return connection?.teamId === teamId ? connection : null;
+  }
+
+  async upsertBankConnection(
+    input: Parameters<BankingUseCaseRepository["upsertBankConnection"]>[0],
+  ) {
+    const existing = [...this.bankConnections.values()].find(
+      (connection) =>
+        connection.teamId === input.teamId &&
+        connection.provider === input.providerConnection.provider &&
+        connection.providerConnectionId === input.providerConnection.providerConnectionId,
+    );
+    const connection = {
+      id: existing?.id ?? `conn_${this.bankConnections.size + 1}`,
+      teamId: input.teamId,
+      provider: input.providerConnection.provider,
+      providerConnectionId: input.providerConnection.providerConnectionId,
+      institutionName: input.providerConnection.institutionName,
+      status: "connected" as const,
+      lastSyncAt: existing?.lastSyncAt ?? null,
+      createdAt: existing?.createdAt ?? "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.bankConnections.set(connection.id, connection);
+    return connection;
+  }
+
+  async upsertBankAccount(input: Parameters<BankingUseCaseRepository["upsertBankAccount"]>[0]) {
+    const existing = [...this.bankAccounts.values()].find(
+      (account) =>
+        account.connectionId === input.connectionId &&
+        account.providerAccountId === input.providerAccount.providerAccountId,
+    );
+    const ledgerAccountId = existing?.ledgerAccountId ?? `acct_${this.accounts.size + 1}`;
+
+    if (!existing) {
+      this.accounts.set(ledgerAccountId, {
+        id: ledgerAccountId,
+        teamId: input.teamId,
+        name: input.providerAccount.name,
+        currency: input.providerAccount.currency,
+        type: input.providerAccount.type,
+      });
+    }
+
+    const account = {
+      id: existing?.id ?? `bank_acct_${this.bankAccounts.size + 1}`,
+      teamId: input.teamId,
+      connectionId: input.connectionId,
+      ledgerAccountId,
+      providerAccountId: input.providerAccount.providerAccountId,
+      name: input.providerAccount.name,
+      currency: input.providerAccount.currency,
+      type: input.providerAccount.type,
+      currentBalance: input.providerAccount.currentBalance,
+      status: "active" as const,
+    };
+    this.bankAccounts.set(account.id, account);
+    return account;
+  }
+
+  async createProviderSyncRun(input: { teamId: string; connectionId: string }) {
+    const syncRun = {
+      id: `sync_${this.syncRuns.length + 1}`,
+      teamId: input.teamId,
+      connectionId: input.connectionId,
+      status: "running" as const,
+      startedAt: "2026-06-15T10:00:00.000Z",
+      completedAt: null,
+      accountsSynced: 0,
+      transactionsImported: 0,
+      duplicateCount: 0,
+      error: null,
+    };
+    this.syncRuns.push(syncRun);
+    return syncRun;
+  }
+
+  async finishProviderSyncRun(
+    input: Parameters<BankingUseCaseRepository["finishProviderSyncRun"]>[0],
+  ) {
+    const existing = this.syncRuns.find((syncRun) => syncRun.id === input.syncRunId);
+
+    if (!existing) {
+      throw new Error("Sync run not found");
+    }
+
+    const syncRun = {
+      ...existing,
+      status: input.status,
+      completedAt: "2026-06-15T10:01:00.000Z",
+      accountsSynced: input.accountsSynced,
+      transactionsImported: input.transactionsImported,
+      duplicateCount: input.duplicateCount,
+      error: input.error ?? null,
+    };
+    this.syncRuns.splice(this.syncRuns.indexOf(existing), 1, syncRun);
+    return syncRun;
+  }
+
+  async markBankConnectionSynced(
+    input: Parameters<BankingUseCaseRepository["markBankConnectionSynced"]>[0],
+  ) {
+    const existing = this.bankConnections.get(input.connectionId);
+
+    if (!existing) {
+      throw new Error("Connection not found");
+    }
+
+    const connection = {
+      ...existing,
+      status: input.status,
+      lastSyncAt: input.syncedAt.toISOString(),
+      updatedAt: input.syncedAt.toISOString(),
+    };
+    this.bankConnections.set(connection.id, connection);
+    return connection;
+  }
+
+  async upsertProviderObject(
+    input: Parameters<BankingUseCaseRepository["upsertProviderObject"]>[0],
+  ) {
+    this.providerObjects.set(
+      `${input.provider}:${input.providerObjectType}:${input.providerObjectId}`,
+      input.rawPayload,
+    );
+  }
+
   async createTeamInvite(input: {
     teamId: string;
     email: string;
@@ -336,7 +498,7 @@ function testContext(user?: { id: string; email: string }) {
   };
 }
 
-async function createTestRouter(repository: TransactionReviewRepository) {
+async function createTestRouter(repository: BankingUseCaseRepository) {
   process.env.DATABASE_URL ??= "postgres://test";
   process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";
   process.env.BETTER_AUTH_URL ??= "http://localhost:3000";
@@ -345,7 +507,10 @@ async function createTestRouter(repository: TransactionReviewRepository) {
   process.env.CORS_ORIGIN ??= "http://localhost:3001";
 
   const { createAppRouter } = await import("./routers/index");
-  return createAppRouter({ transactionReviewRepository: repository });
+  return createAppRouter({
+    transactionReviewRepository: repository,
+    bankingProvider: createMockBankingProvider(),
+  });
 }
 
 describe("appRouter", () => {
@@ -622,5 +787,63 @@ describe("appRouter", () => {
     expect(repository.importSessions).toHaveLength(1);
     expect(repository.auditEvents).toHaveLength(1);
     expect(repository.outboxEvents).toHaveLength(1);
+  });
+
+  test("connects and syncs a mock bank provider through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "owner");
+    const router = await createTestRouter(repository);
+
+    const connected = await call(
+      router.banking.connectMock,
+      { teamId: "team_1", idempotencyKey: "connect_1" },
+      {
+        context: testContext({ id: "user_1", email: "owner@example.com" }),
+      },
+    );
+    const firstSync = await call(
+      router.banking.sync,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "sync_1",
+      },
+      {
+        context: testContext({ id: "user_1", email: "owner@example.com" }),
+      },
+    );
+    const secondSync = await call(
+      router.banking.sync,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "sync_2",
+      },
+      {
+        context: testContext({ id: "user_1", email: "owner@example.com" }),
+      },
+    );
+    const list = await call(
+      router.banking.list,
+      { teamId: "team_1" },
+      {
+        context: testContext({ id: "user_1", email: "owner@example.com" }),
+      },
+    );
+
+    expect(connected.connection.provider).toBe("mock-bank");
+    expect(firstSync.accounts).toHaveLength(2);
+    expect(firstSync.transactions).toHaveLength(2);
+    expect(secondSync.transactions).toHaveLength(0);
+    expect(secondSync.duplicateCount).toBe(2);
+    expect(list.connections[0]?.latestSyncRun).toMatchObject({
+      status: "completed",
+      transactionsImported: 0,
+      duplicateCount: 2,
+    });
+    expect(repository.providerObjects.get("mock-bank:connection:mock_conn_team_1")).toMatchObject({
+      mock: true,
+    });
   });
 });

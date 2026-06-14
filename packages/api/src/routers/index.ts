@@ -4,9 +4,11 @@ import {
   AppError,
   acceptTeamInvite,
   commitCsvTransactionImport,
+  connectMockBankConnection,
   createLedgerTransaction,
   createTeam,
   inviteTeamMember,
+  listBankConnections,
   listLedgerSummary,
   listTeamDirectory,
   listTeams,
@@ -14,16 +16,19 @@ import {
   listTransactionReviewWorkspace,
   previewCsvTransactionImport,
   reviewTransaction,
-  type TransactionReviewRepository,
+  syncBankConnection,
+  type BankingUseCaseRepository,
   updateTeamMemberRole,
 } from "@dawn/app";
 import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
+import { createMockBankingProvider, type BankingProvider } from "@dawn/integrations";
 import { z } from "zod";
 
 import { protectedProcedure, publicProcedure } from "../index";
 
 export type AppRouterDependencies = {
-  transactionReviewRepository: TransactionReviewRepository;
+  transactionReviewRepository: BankingUseCaseRepository;
+  bankingProvider: BankingProvider;
 };
 
 const reviewTransactionInput = z.object({
@@ -46,6 +51,17 @@ const ledgerSummaryInput = z
     to: z.iso.datetime().optional(),
   })
   .optional();
+
+const bankConnectionInput = z.object({
+  teamId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const syncBankConnectionInput = z.object({
+  teamId: z.string().min(1),
+  connectionId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
 
 const createLedgerTransactionInput = z.object({
   teamId: z.string().min(1),
@@ -140,11 +156,12 @@ function mapAppError(error: unknown): never {
 function createDefaultDependencies(): AppRouterDependencies {
   return {
     transactionReviewRepository: new DrizzleTransactionReviewRepository(),
+    bankingProvider: createMockBankingProvider(),
   };
 }
 
 export function createAppRouter(dependencies: AppRouterDependencies = createDefaultDependencies()) {
-  const { transactionReviewRepository } = dependencies;
+  const { bankingProvider, transactionReviewRepository } = dependencies;
 
   return {
     healthCheck: publicProcedure.handler(() => {
@@ -341,6 +358,55 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                   note: split.note ?? null,
                 })),
               },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    banking: {
+      list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
+        try {
+          return await listBankConnections(transactionReviewRepository, {
+            actor: { id: context.session.user.id, type: "user" },
+            requestId: context.requestId,
+            teamId: input?.teamId,
+          });
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+      connectMock: protectedProcedure
+        .input(bankConnectionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await connectMockBankConnection(
+              transactionReviewRepository,
+              bankingProvider,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      sync: protectedProcedure
+        .input(syncBankConnectionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await syncBankConnection(
+              transactionReviewRepository,
+              bankingProvider,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
             );
           } catch (error) {
             mapAppError(error);

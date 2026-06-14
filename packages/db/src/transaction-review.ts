@@ -1,10 +1,15 @@
 import type {
   ActorTeam,
+  BankAccount,
+  BankConnection,
+  BankConnectionSummary,
+  BankingRepository,
   CsvTransactionImportMapping,
   IdempotencyResult,
   JobRun,
   OutboxDispatchRepository,
   OutboxEvent,
+  ProviderSyncRun,
   ReviewWorkspaceData,
   TransactionImportSession,
   TransactionReviewRepository,
@@ -29,7 +34,7 @@ import * as schema from "./schema";
 type Database = typeof db;
 type TransactionClient = Parameters<Parameters<Database["transaction"]>[0]>[0];
 type QueryClient = Database | TransactionClient;
-type DrizzleRepository = TransactionReviewRepository & OutboxDispatchRepository;
+type DrizzleRepository = TransactionReviewRepository & OutboxDispatchRepository & BankingRepository;
 
 export class DrizzleTransactionReviewRepository implements DrizzleRepository {
   constructor(private readonly client: QueryClient = db) {}
@@ -224,6 +229,186 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return account ? mapLedgerAccount(account) : null;
   }
 
+  async listBankConnectionSummaries(teamId: string): Promise<BankConnectionSummary[]> {
+    const [connections, accounts, syncRuns] = await Promise.all([
+      this.client
+        .select()
+        .from(schema.bankConnection)
+        .where(eq(schema.bankConnection.teamId, teamId))
+        .orderBy(desc(schema.bankConnection.createdAt)),
+      this.client.select().from(schema.bankAccount).where(eq(schema.bankAccount.teamId, teamId)),
+      this.client
+        .select()
+        .from(schema.providerSyncRun)
+        .where(eq(schema.providerSyncRun.teamId, teamId))
+        .orderBy(desc(schema.providerSyncRun.startedAt)),
+    ]);
+
+    return connections.map((connection) => ({
+      connection: mapBankConnection(connection),
+      accounts: accounts
+        .filter((account) => account.connectionId === connection.id)
+        .map(mapBankAccount),
+      latestSyncRun: syncRuns.find((syncRun) => syncRun.connectionId === connection.id)
+        ? mapProviderSyncRun(syncRuns.find((syncRun) => syncRun.connectionId === connection.id)!)
+        : null,
+    }));
+  }
+
+  async getBankConnectionForTeam(teamId: string, connectionId: string) {
+    const [connection] = await this.client
+      .select()
+      .from(schema.bankConnection)
+      .where(
+        and(eq(schema.bankConnection.teamId, teamId), eq(schema.bankConnection.id, connectionId)),
+      )
+      .limit(1);
+
+    return connection ? mapBankConnection(connection) : null;
+  }
+
+  async upsertBankConnection(input: {
+    teamId: string;
+    providerConnection: {
+      provider: BankConnection["provider"];
+      providerConnectionId: string;
+      institutionName: string;
+      status: "connected";
+      rawPayload: Record<string, unknown>;
+    };
+  }) {
+    const existing = await this.client
+      .select()
+      .from(schema.bankConnection)
+      .where(
+        and(
+          eq(schema.bankConnection.teamId, input.teamId),
+          eq(schema.bankConnection.provider, input.providerConnection.provider),
+          eq(
+            schema.bankConnection.providerConnectionId,
+            input.providerConnection.providerConnectionId,
+          ),
+        ),
+      )
+      .limit(1);
+
+    if (existing[0]) {
+      const [connection] = await this.client
+        .update(schema.bankConnection)
+        .set({
+          institutionName: input.providerConnection.institutionName,
+          status: input.providerConnection.status,
+          rawPayload: input.providerConnection.rawPayload,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.bankConnection.id, existing[0].id))
+        .returning();
+
+      if (!connection) {
+        throw new Error("Bank connection was not updated");
+      }
+
+      return mapBankConnection(connection);
+    }
+
+    const [connection] = await this.client
+      .insert(schema.bankConnection)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        provider: input.providerConnection.provider,
+        providerConnectionId: input.providerConnection.providerConnectionId,
+        institutionName: input.providerConnection.institutionName,
+        status: input.providerConnection.status,
+        rawPayload: input.providerConnection.rawPayload,
+      })
+      .returning();
+
+    if (!connection) {
+      throw new Error("Bank connection was not created");
+    }
+
+    return mapBankConnection(connection);
+  }
+
+  async upsertBankAccount(input: {
+    teamId: string;
+    connectionId: string;
+    providerAccount: {
+      providerAccountId: string;
+      name: string;
+      currency: string;
+      type: BankAccount["type"];
+      currentBalance: BankAccount["currentBalance"];
+      rawPayload: Record<string, unknown>;
+    };
+  }) {
+    const [existing] = await this.client
+      .select()
+      .from(schema.bankAccount)
+      .where(
+        and(
+          eq(schema.bankAccount.connectionId, input.connectionId),
+          eq(schema.bankAccount.providerAccountId, input.providerAccount.providerAccountId),
+        ),
+      )
+      .limit(1);
+
+    if (existing) {
+      const [account] = await this.client
+        .update(schema.bankAccount)
+        .set({
+          name: input.providerAccount.name,
+          currency: input.providerAccount.currency,
+          type: input.providerAccount.type,
+          currentBalanceMinor: input.providerAccount.currentBalance.amountMinor,
+          rawPayload: input.providerAccount.rawPayload,
+          status: "active",
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.bankAccount.id, existing.id))
+        .returning();
+
+      if (!account) {
+        throw new Error("Bank account was not updated");
+      }
+
+      return mapBankAccount(account);
+    }
+
+    const ledgerAccountId = crypto.randomUUID();
+
+    await this.client.insert(schema.ledgerAccount).values({
+      id: ledgerAccountId,
+      teamId: input.teamId,
+      name: input.providerAccount.name,
+      currency: input.providerAccount.currency,
+      type: input.providerAccount.type,
+    });
+
+    const [account] = await this.client
+      .insert(schema.bankAccount)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        connectionId: input.connectionId,
+        ledgerAccountId,
+        providerAccountId: input.providerAccount.providerAccountId,
+        name: input.providerAccount.name,
+        currency: input.providerAccount.currency,
+        type: input.providerAccount.type,
+        currentBalanceMinor: input.providerAccount.currentBalance.amountMinor,
+        rawPayload: input.providerAccount.rawPayload,
+      })
+      .returning();
+
+    if (!account) {
+      throw new Error("Bank account was not created");
+    }
+
+    return mapBankAccount(account);
+  }
+
   async getTransactionByDuplicateKey(teamId: string, duplicateKey: string) {
     const [transaction] = await this.client
       .select()
@@ -237,6 +422,142 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       .limit(1);
 
     return transaction ? mapTransaction(transaction) : null;
+  }
+
+  async getTransactionByProviderTransactionId(teamId: string, providerTransactionId: string) {
+    const [transaction] = await this.client
+      .select()
+      .from(schema.transaction)
+      .where(
+        and(
+          eq(schema.transaction.teamId, teamId),
+          eq(schema.transaction.providerTransactionId, providerTransactionId),
+        ),
+      )
+      .limit(1);
+
+    return transaction ? mapTransaction(transaction) : null;
+  }
+
+  async createProviderSyncRun(input: { teamId: string; connectionId: string }) {
+    const [syncRun] = await this.client
+      .insert(schema.providerSyncRun)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        connectionId: input.connectionId,
+        status: "running",
+      })
+      .returning();
+
+    if (!syncRun) {
+      throw new Error("Provider sync run was not created");
+    }
+
+    return mapProviderSyncRun(syncRun);
+  }
+
+  async finishProviderSyncRun(input: {
+    syncRunId: string;
+    status: "completed" | "failed";
+    accountsSynced: number;
+    transactionsImported: number;
+    duplicateCount: number;
+    error?: string | null;
+  }) {
+    const [syncRun] = await this.client
+      .update(schema.providerSyncRun)
+      .set({
+        status: input.status,
+        completedAt: new Date(),
+        accountsSynced: input.accountsSynced,
+        transactionsImported: input.transactionsImported,
+        duplicateCount: input.duplicateCount,
+        error: input.error ?? null,
+      })
+      .where(eq(schema.providerSyncRun.id, input.syncRunId))
+      .returning();
+
+    if (!syncRun) {
+      throw new Error("Provider sync run was not updated");
+    }
+
+    return mapProviderSyncRun(syncRun);
+  }
+
+  async markBankConnectionSynced(input: {
+    connectionId: string;
+    syncedAt: Date;
+    status: BankConnection["status"];
+  }) {
+    const [connection] = await this.client
+      .update(schema.bankConnection)
+      .set({
+        lastSyncAt: input.syncedAt,
+        status: input.status,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.bankConnection.id, input.connectionId))
+      .returning();
+
+    if (!connection) {
+      throw new Error("Bank connection was not updated");
+    }
+
+    return mapBankConnection(connection);
+  }
+
+  async upsertProviderObject(input: {
+    teamId: string;
+    provider: BankConnection["provider"];
+    providerObjectType: "connection" | "account" | "transaction";
+    providerObjectId: string;
+    connectionId?: string | null;
+    bankAccountId?: string | null;
+    internalEntityType?: string | null;
+    internalEntityId?: string | null;
+    rawPayload: Record<string, unknown>;
+  }) {
+    const [existing] = await this.client
+      .select()
+      .from(schema.providerObject)
+      .where(
+        and(
+          eq(schema.providerObject.teamId, input.teamId),
+          eq(schema.providerObject.provider, input.provider),
+          eq(schema.providerObject.providerObjectType, input.providerObjectType),
+          eq(schema.providerObject.providerObjectId, input.providerObjectId),
+        ),
+      )
+      .limit(1);
+
+    if (existing) {
+      await this.client
+        .update(schema.providerObject)
+        .set({
+          connectionId: input.connectionId ?? null,
+          bankAccountId: input.bankAccountId ?? null,
+          internalEntityType: input.internalEntityType ?? null,
+          internalEntityId: input.internalEntityId ?? null,
+          rawPayload: input.rawPayload,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.providerObject.id, existing.id));
+      return;
+    }
+
+    await this.client.insert(schema.providerObject).values({
+      id: crypto.randomUUID(),
+      teamId: input.teamId,
+      provider: input.provider,
+      providerObjectType: input.providerObjectType,
+      providerObjectId: input.providerObjectId,
+      connectionId: input.connectionId ?? null,
+      bankAccountId: input.bankAccountId ?? null,
+      internalEntityType: input.internalEntityType ?? null,
+      internalEntityId: input.internalEntityId ?? null,
+      rawPayload: input.rawPayload,
+    });
   }
 
   async listTransactionsForReport(input: {
@@ -760,6 +1081,38 @@ function mapLedgerAccount(account: typeof schema.ledgerAccount.$inferSelect): Le
   };
 }
 
+function mapBankConnection(connection: typeof schema.bankConnection.$inferSelect): BankConnection {
+  return {
+    id: connection.id,
+    teamId: connection.teamId,
+    provider: connection.provider as BankConnection["provider"],
+    providerConnectionId: connection.providerConnectionId,
+    institutionName: connection.institutionName,
+    status: connection.status as BankConnection["status"],
+    lastSyncAt: connection.lastSyncAt?.toISOString() ?? null,
+    createdAt: connection.createdAt.toISOString(),
+    updatedAt: connection.updatedAt.toISOString(),
+  };
+}
+
+function mapBankAccount(account: typeof schema.bankAccount.$inferSelect): BankAccount {
+  return {
+    id: account.id,
+    teamId: account.teamId,
+    connectionId: account.connectionId,
+    ledgerAccountId: account.ledgerAccountId,
+    providerAccountId: account.providerAccountId,
+    name: account.name,
+    currency: account.currency,
+    type: account.type as BankAccount["type"],
+    currentBalance: {
+      amountMinor: account.currentBalanceMinor,
+      currency: account.currency,
+    },
+    status: account.status as BankAccount["status"],
+  };
+}
+
 function mapTransaction(transaction: typeof schema.transaction.$inferSelect): Transaction {
   return {
     id: transaction.id,
@@ -812,6 +1165,21 @@ function mapOutboxEvent(event: typeof schema.outboxEvent.$inferSelect): OutboxEv
     processedAt: event.processedAt?.toISOString() ?? null,
     lastError: event.lastError,
     nextAttemptAt: event.nextAttemptAt?.toISOString() ?? null,
+  };
+}
+
+function mapProviderSyncRun(syncRun: typeof schema.providerSyncRun.$inferSelect): ProviderSyncRun {
+  return {
+    id: syncRun.id,
+    teamId: syncRun.teamId,
+    connectionId: syncRun.connectionId,
+    status: syncRun.status as ProviderSyncRun["status"],
+    startedAt: syncRun.startedAt.toISOString(),
+    completedAt: syncRun.completedAt?.toISOString() ?? null,
+    accountsSynced: syncRun.accountsSynced,
+    transactionsImported: syncRun.transactionsImported,
+    duplicateCount: syncRun.duplicateCount,
+    error: syncRun.error,
   };
 }
 

@@ -97,6 +97,67 @@ export const ledgerAccount = pgTable(
   ],
 );
 
+export const bankConnection = pgTable(
+  "bank_connection",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    providerConnectionId: text("provider_connection_id").notNull(),
+    institutionName: text("institution_name").notNull(),
+    status: text("status").default("connected").notNull(),
+    lastSyncAt: timestamp("last_sync_at"),
+    rawPayload: jsonb("raw_payload").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("bank_connection_provider_idx").on(
+      table.teamId,
+      table.provider,
+      table.providerConnectionId,
+    ),
+    index("bank_connection_team_status_idx").on(table.teamId, table.status),
+  ],
+);
+
+export const bankAccount = pgTable(
+  "bank_account",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    connectionId: text("connection_id")
+      .notNull()
+      .references(() => bankConnection.id, { onDelete: "cascade" }),
+    ledgerAccountId: text("ledger_account_id")
+      .notNull()
+      .references(() => ledgerAccount.id, { onDelete: "cascade" }),
+    providerAccountId: text("provider_account_id").notNull(),
+    name: text("name").notNull(),
+    currency: text("currency").notNull(),
+    type: text("type").notNull(),
+    currentBalanceMinor: integer("current_balance_minor").notNull(),
+    status: text("status").default("active").notNull(),
+    rawPayload: jsonb("raw_payload").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("bank_account_provider_idx").on(table.connectionId, table.providerAccountId),
+    index("bank_account_team_idx").on(table.teamId),
+  ],
+);
+
 export const counterparty = pgTable(
   "counterparty",
   {
@@ -306,6 +367,66 @@ export const jobRun = pgTable(
   ],
 );
 
+export const providerSyncRun = pgTable(
+  "provider_sync_run",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    connectionId: text("connection_id")
+      .notNull()
+      .references(() => bankConnection.id, { onDelete: "cascade" }),
+    status: text("status").default("running").notNull(),
+    startedAt: timestamp("started_at").defaultNow().notNull(),
+    completedAt: timestamp("completed_at"),
+    accountsSynced: integer("accounts_synced").default(0).notNull(),
+    transactionsImported: integer("transactions_imported").default(0).notNull(),
+    duplicateCount: integer("duplicate_count").default(0).notNull(),
+    error: text("error"),
+  },
+  (table) => [
+    index("provider_sync_run_connection_idx").on(table.connectionId, table.startedAt),
+    index("provider_sync_run_status_idx").on(table.status, table.startedAt),
+  ],
+);
+
+export const providerObject = pgTable(
+  "provider_object",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    providerObjectType: text("provider_object_type").notNull(),
+    providerObjectId: text("provider_object_id").notNull(),
+    connectionId: text("connection_id").references(() => bankConnection.id, {
+      onDelete: "set null",
+    }),
+    bankAccountId: text("bank_account_id").references(() => bankAccount.id, {
+      onDelete: "set null",
+    }),
+    internalEntityType: text("internal_entity_type"),
+    internalEntityId: text("internal_entity_id"),
+    rawPayload: jsonb("raw_payload").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("provider_object_provider_idx").on(
+      table.teamId,
+      table.provider,
+      table.providerObjectType,
+      table.providerObjectId,
+    ),
+    index("provider_object_internal_idx").on(table.internalEntityType, table.internalEntityId),
+  ],
+);
+
 export const idempotencyKey = pgTable(
   "idempotency_key",
   {
@@ -335,12 +456,16 @@ export const teamRelations = relations(team, ({ many }) => ({
   invites: many(teamInvite),
   categories: many(transactionCategory),
   accounts: many(ledgerAccount),
+  bankConnections: many(bankConnection),
+  bankAccounts: many(bankAccount),
   counterparties: many(counterparty),
   tags: many(transactionTag),
   imports: many(transactionImportSession),
   transactions: many(transaction),
   outboxEvents: many(outboxEvent),
   jobRuns: many(jobRun),
+  providerSyncRuns: many(providerSyncRun),
+  providerObjects: many(providerObject),
 }));
 
 export const teamMembershipRelations = relations(teamMembership, ({ one }) => ({

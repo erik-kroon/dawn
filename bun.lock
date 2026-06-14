@@ -112,6 +112,7 @@
         "@dawn/auth": "workspace:*",
         "@dawn/db": "workspace:*",
         "@dawn/env": "workspace:*",
+        "@dawn/integrations": "workspace:*",
         "@orpc/client": "catalog:",
         "@orpc/openapi": "catalog:",
         "@orpc/server": "catalog:",
@@ -129,6 +130,7 @@
       "name": "@dawn/app",
       "dependencies": {
         "@dawn/domain": "workspace:*",
+        "@dawn/integrations": "workspace:*",
         "@dawn/jobs": "workspace:*",
         "@dawn/sync": "workspace:*",
       },
@@ -209,6 +211,16 @@
         "@dawn/config": "workspace:*",
         "@typescript/native-preview": "catalog:",
         "alchemy": "catalog:",
+        "typescript": "catalog:",
+      },
+    },
+    "packages/integrations": {
+      "name": "@dawn/integrations",
+      "dependencies": {
+        "@dawn/domain": "workspace:*",
+      },
+      "devDependencies": {
+        "@dawn/config": "workspace:*",
         "typescript": "catalog:",
       },
     },
@@ -446,6 +458,8 @@
     "@dawn/env": ["@dawn/env@workspace:packages/env"],
 
     "@dawn/infra": ["@dawn/infra@workspace:packages/infra"],
+
+    "@dawn/integrations": ["@dawn/integrations@workspace:packages/integrations"],
 
     "@dawn/jobs": ["@dawn/jobs@workspace:packages/jobs"],
 

@@ -43,6 +43,13 @@
       "when": 1781479669942,
       "tag": "0005_swift_pride",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1781480790594,
+      "tag": "0006_wise_firebrand",
+      "breakpoints": true
     }
   ]
 }

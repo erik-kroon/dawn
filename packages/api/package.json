@@ -15,6 +15,7 @@
     "@dawn/auth": "workspace:*",
     "@dawn/db": "workspace:*",
     "@dawn/env": "workspace:*",
+    "@dawn/integrations": "workspace:*",
     "@orpc/client": "catalog:",
     "@orpc/openapi": "catalog:",
     "@orpc/server": "catalog:",

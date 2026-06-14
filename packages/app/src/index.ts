@@ -4,6 +4,7 @@ import type {
   CsvTransactionColumnMapping,
   LedgerAccount,
   LedgerTransactionDraft,
+  Money,
   Permission,
   ReportTotals,
   Team,
@@ -13,6 +14,13 @@ import type {
   TeamRole,
   Transaction,
 } from "@dawn/domain";
+import type {
+  BankingProvider,
+  BankingProviderAccount,
+  BankingProviderConnection,
+  BankingProviderName,
+  BankingProviderTransaction,
+} from "@dawn/integrations";
 import type { DawnQueueMessage, OutboxEventForJob } from "@dawn/jobs";
 import type { TransactionSyncResponse } from "@dawn/sync";
 import {
@@ -25,6 +33,7 @@ import {
   permissionsForRole,
   roleHasPermission,
 } from "@dawn/domain";
+import { providerTransactionToLedgerDraft } from "@dawn/integrations";
 import { dawnQueueNames, nextOutboxRetryAt, outboxEventToQueueMessages } from "@dawn/jobs";
 import { buildTransactionSyncResponse } from "@dawn/sync";
 
@@ -181,6 +190,79 @@ export type TransactionImportSession = {
   invalidCount: number;
 };
 
+export type BankConnectionStatus = "connected" | "disconnected" | "error";
+
+export type BankConnection = {
+  id: string;
+  teamId: string;
+  provider: BankingProviderName;
+  providerConnectionId: string;
+  institutionName: string;
+  status: BankConnectionStatus;
+  lastSyncAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BankAccount = {
+  id: string;
+  teamId: string;
+  connectionId: string;
+  ledgerAccountId: string;
+  providerAccountId: string;
+  name: string;
+  currency: string;
+  type: LedgerAccount["type"];
+  currentBalance: Money;
+  status: "active" | "inactive";
+};
+
+export type ProviderSyncRunStatus = "running" | "completed" | "failed";
+
+export type ProviderSyncRun = {
+  id: string;
+  teamId: string;
+  connectionId: string;
+  status: ProviderSyncRunStatus;
+  startedAt: string;
+  completedAt?: string | null;
+  accountsSynced: number;
+  transactionsImported: number;
+  duplicateCount: number;
+  error?: string | null;
+};
+
+export type BankConnectionSummary = {
+  connection: BankConnection;
+  accounts: BankAccount[];
+  latestSyncRun?: ProviderSyncRun | null;
+};
+
+export type ConnectMockBankConnectionCommand = {
+  teamId: string;
+  idempotencyKey: string;
+};
+
+export type ConnectMockBankConnectionResult = {
+  connection: BankConnection;
+  replayed: boolean;
+};
+
+export type SyncBankConnectionCommand = {
+  teamId: string;
+  connectionId: string;
+  idempotencyKey: string;
+};
+
+export type SyncBankConnectionResult = {
+  connection: BankConnection;
+  accounts: BankAccount[];
+  syncRun: ProviderSyncRun;
+  transactions: Transaction[];
+  duplicateCount: number;
+  replayed: boolean;
+};
+
 export type OutboxEventStatus = "pending" | "dispatching" | "dispatched" | "failed";
 
 export type OutboxEvent = OutboxEventForJob & {
@@ -230,6 +312,51 @@ export type CommitCsvTransactionImportResult = {
   preview: CsvTransactionImportPreview;
   replayed: boolean;
 };
+
+export type BankingRepository = {
+  listBankConnectionSummaries(teamId: string): Promise<BankConnectionSummary[]>;
+  getBankConnectionForTeam(teamId: string, connectionId: string): Promise<BankConnection | null>;
+  upsertBankConnection(input: {
+    teamId: string;
+    providerConnection: BankingProviderConnection;
+  }): Promise<BankConnection>;
+  upsertBankAccount(input: {
+    teamId: string;
+    connectionId: string;
+    providerAccount: BankingProviderAccount;
+  }): Promise<BankAccount>;
+  getTransactionByProviderTransactionId(
+    teamId: string,
+    providerTransactionId: string,
+  ): Promise<Transaction | null>;
+  createProviderSyncRun(input: { teamId: string; connectionId: string }): Promise<ProviderSyncRun>;
+  finishProviderSyncRun(input: {
+    syncRunId: string;
+    status: Exclude<ProviderSyncRunStatus, "running">;
+    accountsSynced: number;
+    transactionsImported: number;
+    duplicateCount: number;
+    error?: string | null;
+  }): Promise<ProviderSyncRun>;
+  markBankConnectionSynced(input: {
+    connectionId: string;
+    syncedAt: Date;
+    status: BankConnectionStatus;
+  }): Promise<BankConnection>;
+  upsertProviderObject(input: {
+    teamId: string;
+    provider: BankingProviderName;
+    providerObjectType: "connection" | "account" | "transaction";
+    providerObjectId: string;
+    connectionId?: string | null;
+    bankAccountId?: string | null;
+    internalEntityType?: string | null;
+    internalEntityId?: string | null;
+    rawPayload: Record<string, unknown>;
+  }): Promise<void>;
+};
+
+export type BankingUseCaseRepository = TransactionReviewRepository & BankingRepository;
 
 export type OutboxDispatchRepository = {
   withTransaction<T>(callback: (repository: OutboxDispatchRepository) => Promise<T>): Promise<T>;
@@ -374,6 +501,8 @@ export type TransactionReviewRepository = {
 const reviewTransactionOperation = "transaction.review";
 const createLedgerTransactionOperation = "ledger.transaction.create";
 const commitCsvTransactionImportOperation = "csv_transaction_import.commit";
+const connectMockBankConnectionOperation = "banking.connection.mock.connect";
+const syncBankConnectionOperation = "banking.connection.sync";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
@@ -793,6 +922,395 @@ export function createLedgerTransactionFingerprint(command: CreateLedgerTransact
     providerTransactionId: draft.providerTransactionId ?? null,
     splits: draft.splits ?? [],
     tagIds: draft.tagIds ?? [],
+  });
+}
+
+export async function listBankConnections(
+  repository: BankingUseCaseRepository,
+  context: TransactionReviewContext,
+  input: { teamId?: string } = {},
+): Promise<{ teamId: string; connections: BankConnectionSummary[] }> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: input.teamId ?? context.teamId },
+    "transactions.read",
+    "You cannot read bank connections for this team",
+  );
+
+  return {
+    teamId: access.teamId,
+    connections: await repository.listBankConnectionSummaries(access.teamId),
+  };
+}
+
+export async function connectMockBankConnection(
+  repository: BankingUseCaseRepository,
+  provider: BankingProvider,
+  context: TransactionReviewContext,
+  command: ConnectMockBankConnectionCommand,
+): Promise<ConnectMockBankConnectionResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const bankingRepository = transactionRepository as BankingUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Bank connection not found");
+
+    await resolveTeamAccess(
+      bankingRepository,
+      { ...context, teamId: command.teamId },
+      "bank_connections.manage",
+      "You cannot connect bank providers for this team",
+    );
+
+    const fingerprint = connectMockBankConnectionFingerprint(command, provider.provider);
+    const replayed = await bankingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      connectMockBankConnectionOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different bank connection",
+        );
+      }
+
+      return { ...(replayed.result as ConnectMockBankConnectionResult), replayed: true };
+    }
+
+    const providerConnection = await provider.createConnection({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+    });
+    const connection = await bankingRepository.upsertBankConnection({
+      teamId: command.teamId,
+      providerConnection,
+    });
+
+    await bankingRepository.upsertProviderObject({
+      teamId: command.teamId,
+      provider: provider.provider,
+      providerObjectType: "connection",
+      providerObjectId: providerConnection.providerConnectionId,
+      connectionId: connection.id,
+      internalEntityType: "bank_connection",
+      internalEntityId: connection.id,
+      rawPayload: providerConnection.rawPayload,
+    });
+
+    await bankingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "bank_connection.connected",
+      entityType: "bank_connection",
+      entityId: connection.id,
+      metadata: {
+        provider: provider.provider,
+        providerConnectionId: providerConnection.providerConnectionId,
+      },
+    });
+
+    await bankingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "bank_connection.connected",
+      version: 1,
+      payload: {
+        connectionId: connection.id,
+        provider: provider.provider,
+      },
+    });
+
+    const result = { connection, replayed: false };
+
+    await bankingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: connectMockBankConnectionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function syncBankConnection(
+  repository: BankingUseCaseRepository,
+  provider: BankingProvider,
+  context: TransactionReviewContext,
+  command: SyncBankConnectionCommand,
+): Promise<SyncBankConnectionResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const bankingRepository = transactionRepository as BankingUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Bank connection not found");
+
+    await resolveTeamAccess(
+      bankingRepository,
+      { ...context, teamId: command.teamId },
+      "bank_connections.manage",
+      "You cannot sync bank providers for this team",
+    );
+
+    const fingerprint = syncBankConnectionFingerprint(command, provider.provider);
+    const replayed = await bankingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      syncBankConnectionOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different bank sync",
+        );
+      }
+
+      return { ...(replayed.result as SyncBankConnectionResult), replayed: true };
+    }
+
+    const connection = await bankingRepository.getBankConnectionForTeam(
+      command.teamId,
+      command.connectionId,
+    );
+
+    if (!connection || connection.provider !== provider.provider) {
+      throw new AppError("NOT_FOUND", "Bank connection not found");
+    }
+
+    const providerConnection = persistedProviderConnection(connection);
+    const providerAccounts = await provider.listAccounts(providerConnection);
+    const syncRun = await bankingRepository.createProviderSyncRun({
+      teamId: command.teamId,
+      connectionId: connection.id,
+    });
+    const accounts: BankAccount[] = [];
+    const transactions: Transaction[] = [];
+    let duplicateCount = 0;
+
+    for (const providerAccount of providerAccounts) {
+      const account = await bankingRepository.upsertBankAccount({
+        teamId: command.teamId,
+        connectionId: connection.id,
+        providerAccount,
+      });
+      accounts.push(account);
+
+      await bankingRepository.upsertProviderObject({
+        teamId: command.teamId,
+        provider: provider.provider,
+        providerObjectType: "account",
+        providerObjectId: providerAccount.providerAccountId,
+        connectionId: connection.id,
+        bankAccountId: account.id,
+        internalEntityType: "bank_account",
+        internalEntityId: account.id,
+        rawPayload: providerAccount.rawPayload,
+      });
+
+      const providerTransactions = await provider.syncAccount({
+        connection: providerConnection,
+        account: providerAccount,
+      });
+
+      for (const providerTransaction of providerTransactions) {
+        const transaction = await importProviderTransaction({
+          repository: bankingRepository,
+          provider,
+          connection,
+          bankAccount: account,
+          providerTransaction,
+        });
+
+        if (transaction) {
+          transactions.push(transaction);
+        } else {
+          duplicateCount += 1;
+        }
+      }
+    }
+
+    const completedSyncRun = await bankingRepository.finishProviderSyncRun({
+      syncRunId: syncRun.id,
+      status: "completed",
+      accountsSynced: accounts.length,
+      transactionsImported: transactions.length,
+      duplicateCount,
+      error: null,
+    });
+    const syncedConnection = await bankingRepository.markBankConnectionSynced({
+      connectionId: connection.id,
+      syncedAt: new Date(completedSyncRun.completedAt ?? completedSyncRun.startedAt),
+      status: "connected",
+    });
+
+    await bankingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "bank_connection.synced",
+      entityType: "bank_connection",
+      entityId: connection.id,
+      metadata: {
+        provider: provider.provider,
+        accountsSynced: accounts.length,
+        transactionsImported: transactions.length,
+        duplicateCount,
+      },
+    });
+
+    await bankingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "bank_connection.synced",
+      version: 1,
+      payload: {
+        connectionId: connection.id,
+        transactionIds: transactions.map((transaction) => transaction.id),
+      },
+    });
+
+    const result = {
+      connection: syncedConnection,
+      accounts,
+      syncRun: completedSyncRun,
+      transactions,
+      duplicateCount,
+      replayed: false,
+    };
+
+    await bankingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: syncBankConnectionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+async function importProviderTransaction(input: {
+  repository: BankingUseCaseRepository;
+  provider: BankingProvider;
+  connection: BankConnection;
+  bankAccount: BankAccount;
+  providerTransaction: BankingProviderTransaction;
+}) {
+  const draft = providerTransactionToLedgerDraft({
+    teamId: input.connection.teamId,
+    ledgerAccountId: input.bankAccount.ledgerAccountId,
+    provider: input.provider.provider,
+    providerConnectionId: input.connection.providerConnectionId,
+    transaction: input.providerTransaction,
+  });
+  const providerTransactionId = draft.providerTransactionId;
+
+  if (!providerTransactionId) {
+    throw new AppError("CONFLICT", "Provider transaction id is required");
+  }
+
+  const providerDuplicate = await input.repository.getTransactionByProviderTransactionId(
+    draft.teamId,
+    providerTransactionId,
+  );
+
+  if (providerDuplicate) {
+    await input.repository.upsertProviderObject({
+      teamId: draft.teamId,
+      provider: input.provider.provider,
+      providerObjectType: "transaction",
+      providerObjectId: providerTransactionId,
+      connectionId: input.connection.id,
+      bankAccountId: input.bankAccount.id,
+      internalEntityType: "transaction",
+      internalEntityId: providerDuplicate.id,
+      rawPayload: input.providerTransaction.rawPayload,
+    });
+    return null;
+  }
+
+  const duplicateKey = ledgerDuplicateKey(draft);
+  const duplicate = await input.repository.getTransactionByDuplicateKey(draft.teamId, duplicateKey);
+
+  if (duplicate) {
+    await input.repository.upsertProviderObject({
+      teamId: draft.teamId,
+      provider: input.provider.provider,
+      providerObjectType: "transaction",
+      providerObjectId: providerTransactionId,
+      connectionId: input.connection.id,
+      bankAccountId: input.bankAccount.id,
+      internalEntityType: "transaction",
+      internalEntityId: duplicate.id,
+      rawPayload: input.providerTransaction.rawPayload,
+    });
+    return null;
+  }
+
+  const transaction = await input.repository.createLedgerTransactionForTeam({
+    draft,
+    duplicateKey,
+  });
+
+  await input.repository.upsertProviderObject({
+    teamId: draft.teamId,
+    provider: input.provider.provider,
+    providerObjectType: "transaction",
+    providerObjectId: providerTransactionId,
+    connectionId: input.connection.id,
+    bankAccountId: input.bankAccount.id,
+    internalEntityType: "transaction",
+    internalEntityId: transaction.id,
+    rawPayload: input.providerTransaction.rawPayload,
+  });
+
+  return transaction;
+}
+
+function persistedProviderConnection(connection: BankConnection): BankingProviderConnection {
+  if (connection.status !== "connected") {
+    throw new AppError("CONFLICT", "Bank connection is not connected");
+  }
+
+  return {
+    provider: connection.provider,
+    providerConnectionId: connection.providerConnectionId,
+    institutionName: connection.institutionName,
+    status: "connected",
+    rawPayload: {},
+  };
+}
+
+export function connectMockBankConnectionFingerprint(
+  command: ConnectMockBankConnectionCommand,
+  provider: BankingProviderName,
+) {
+  return JSON.stringify({
+    teamId: command.teamId,
+    provider,
+  });
+}
+
+export function syncBankConnectionFingerprint(
+  command: SyncBankConnectionCommand,
+  provider: BankingProviderName,
+) {
+  return JSON.stringify({
+    teamId: command.teamId,
+    connectionId: command.connectionId,
+    provider,
   });
 }
 

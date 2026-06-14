@@ -92,7 +92,8 @@ function createSyncInvalidationJob(event: OutboxEventForJob): SyncInvalidationJo
   if (
     event.type !== "transaction.created" &&
     event.type !== "transaction.reviewed" &&
-    event.type !== "transaction_import.committed"
+    event.type !== "transaction_import.committed" &&
+    event.type !== "bank_connection.synced"
   ) {
     return null;
   }

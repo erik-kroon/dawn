@@ -69,6 +69,12 @@ function RouteComponent() {
     enabled: Boolean(currentTeamId),
   });
   const canManageTeam = transactionReview.data?.permissions.includes("team.manage") ?? false;
+  const canManageBankConnections =
+    transactionReview.data?.permissions.includes("bank_connections.manage") ?? false;
+  const banking = useQuery({
+    ...orpc.banking.list.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
   const teamDirectory = useQuery({
     ...orpc.teams.directory.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: canManageTeam && Boolean(currentTeamId),
@@ -112,6 +118,22 @@ function RouteComponent() {
     }),
   );
   const csvPreviewMutation = useMutation(orpc.csvImport.preview.mutationOptions());
+  const connectMockBankMutation = useMutation(
+    orpc.banking.connectMock.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.banking.list.queryKey() });
+      },
+    }),
+  );
+  const syncBankConnectionMutation = useMutation(
+    orpc.banking.sync.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.banking.list.queryKey() });
+        await queryClient.invalidateQueries({ queryKey: orpc.ledger.summary.queryKey() });
+        await transactionSync.refetch();
+      },
+    }),
+  );
   const csvCommitMutation = useMutation(
     orpc.csvImport.commit.mutationOptions({
       onSuccess: async () => {
@@ -326,6 +348,99 @@ function RouteComponent() {
             <p className="mt-2 text-sm text-destructive">
               {updateTeamMemberRoleMutation.error.message}
             </p>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Bank connections</CardTitle>
+          <CardDescription>
+            Mock provider sync normalizes accounts and transactions through the same ledger,
+            duplicate, raw payload, audit, and outbox path real providers will use.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {transactionReview.data ? (
+            <div className="grid gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm text-muted-foreground">
+                  {banking.data?.connections.length ?? 0} connections ·{" "}
+                  {banking.data?.connections.reduce(
+                    (total, connection) => total + connection.accounts.length,
+                    0,
+                  ) ?? 0}{" "}
+                  accounts
+                </p>
+                <Button
+                  disabled={
+                    !canManageBankConnections ||
+                    connectMockBankMutation.isPending ||
+                    !transactionReview.data.teamId
+                  }
+                  onClick={() =>
+                    connectMockBankMutation.mutate({
+                      teamId: transactionReview.data.teamId,
+                      idempotencyKey: crypto.randomUUID(),
+                    })
+                  }
+                >
+                  Connect mock bank
+                </Button>
+              </div>
+              {banking.data?.connections.map(({ connection, accounts, latestSyncRun }) => (
+                <div className="grid gap-3 border p-3" key={connection.id}>
+                  <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <p className="font-medium">{connection.institutionName}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {connection.provider} · {connection.status}
+                        {connection.lastSyncAt ? ` · synced ${connection.lastSyncAt}` : ""}
+                      </p>
+                    </div>
+                    <Button
+                      disabled={!canManageBankConnections || syncBankConnectionMutation.isPending}
+                      onClick={() =>
+                        syncBankConnectionMutation.mutate({
+                          teamId: connection.teamId,
+                          connectionId: connection.id,
+                          idempotencyKey: crypto.randomUUID(),
+                        })
+                      }
+                      variant="outline"
+                    >
+                      Sync now
+                    </Button>
+                  </div>
+                  <div className="grid gap-2 md:grid-cols-2">
+                    {accounts.map((account) => (
+                      <div className="border p-2 text-sm" key={account.id}>
+                        <p className="font-medium">{account.name}</p>
+                        <p className="text-muted-foreground">
+                          {account.providerAccountId} · {account.currency} ·{" "}
+                          {formatMoney(account.currentBalance)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  {latestSyncRun ? (
+                    <p className="text-sm text-muted-foreground">
+                      Last run: {latestSyncRun.status} · {latestSyncRun.accountsSynced} accounts ·{" "}
+                      {latestSyncRun.transactionsImported} imported · {latestSyncRun.duplicateCount}{" "}
+                      duplicates
+                    </p>
+                  ) : null}
+                </div>
+              ))}
+              {connectMockBankMutation.error ? (
+                <p className="text-sm text-destructive">{connectMockBankMutation.error.message}</p>
+              ) : null}
+              {syncBankConnectionMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {syncBankConnectionMutation.error.message}
+                </p>
+              ) : null}
+            </div>
           ) : null}
         </CardContent>
       </Card>

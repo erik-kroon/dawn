@@ -47,6 +47,35 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps bank sync outbox events to transaction invalidation input", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "bank_connection.synced",
+        payload: { transactionIds: ["txn_1", "txn_2"] },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "bank_connection.synced",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "sync.invalidate",
+        teamId: "team_1",
+        collection: "transactions",
+        cursor: null,
+        changedIds: ["txn_1", "txn_2"],
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "sync:transactions:outbox_1",
+      },
+    ]);
+  });
+
   test("calculates capped exponential retry delays", () => {
     const now = new Date("2026-06-15T10:00:00.000Z");
 
