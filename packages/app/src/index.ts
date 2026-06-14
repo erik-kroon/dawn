@@ -1,5 +1,5 @@
 import type { Actor, Category, Team, TeamRole, Transaction } from "@dawn/domain";
-import { roleHasPermission } from "@dawn/domain";
+import { applyTransactionReview, roleHasPermission } from "@dawn/domain";
 
 export type AppErrorCode = "FORBIDDEN" | "NOT_FOUND" | "CONFLICT";
 
@@ -35,6 +35,7 @@ export type ReviewWorkspace = {
 };
 
 export type ReviewTransactionCommand = {
+  teamId: string;
   transactionId: string;
   categoryId: string;
   idempotencyKey: string;
@@ -45,6 +46,11 @@ export type ReviewTransactionResult = {
   replayed: boolean;
 };
 
+export type IdempotencyResult<T> = {
+  fingerprint: string;
+  result: T;
+};
+
 export type TransactionReviewRepository = {
   withTransaction<T>(callback: (repository: TransactionReviewRepository) => Promise<T>): Promise<T>;
   ensureDefaultWorkspace(actor: Actor): Promise<{ teamId: string }>;
@@ -52,35 +58,38 @@ export type TransactionReviewRepository = {
   createTeam(input: { actor: Actor; name: string }): Promise<ActorTeam>;
   listWorkspace(actor: Actor, teamId: string): Promise<ReviewWorkspace>;
   getMembership(actor: Actor, teamId: string): Promise<{ role: TeamRole } | null>;
-  getTransaction(transactionId: string): Promise<Transaction | null>;
-  getCategory(categoryId: string): Promise<Category | null>;
+  getTransactionForTeam(teamId: string, transactionId: string): Promise<Transaction | null>;
+  getCategoryForTeam(teamId: string, categoryId: string): Promise<Category | null>;
   getIdempotencyResult(
     teamId: string,
     actorId: string,
     key: string,
-  ): Promise<ReviewTransactionResult | null>;
-  updateTransactionReview(input: {
+  ): Promise<IdempotencyResult<ReviewTransactionResult> | null>;
+  updateTransactionReviewForTeam(input: {
+    teamId: string;
     transactionId: string;
     categoryId: string;
+    reviewState: Transaction["reviewState"];
   }): Promise<Transaction>;
   appendAuditEvent(input: {
     teamId: string;
     actorId: string;
     requestId: string;
     transactionId: string;
-    categoryId: string;
+    metadata: Record<string, unknown>;
   }): Promise<void>;
   appendOutboxEvent(input: {
     teamId: string;
     actorId: string;
     requestId: string;
     transactionId: string;
-    categoryId: string;
+    payload: Record<string, unknown>;
   }): Promise<void>;
   saveIdempotencyResult(input: {
     teamId: string;
     actorId: string;
     key: string;
+    fingerprint: string;
     result: ReviewTransactionResult;
   }): Promise<void>;
 };
@@ -136,68 +145,93 @@ export async function reviewTransaction(
   command: ReviewTransactionCommand,
 ): Promise<ReviewTransactionResult> {
   return repository.withTransaction(async (transactionRepository) => {
-    const transaction = await transactionRepository.getTransaction(command.transactionId);
-
-    if (!transaction) {
+    if (context.teamId && command.teamId !== context.teamId) {
       throw new AppError("NOT_FOUND", "Transaction not found");
     }
 
-    if (context.teamId && transaction.teamId !== context.teamId) {
-      throw new AppError("NOT_FOUND", "Transaction not found");
-    }
-
-    const membership = await transactionRepository.getMembership(context.actor, transaction.teamId);
+    const membership = await transactionRepository.getMembership(context.actor, command.teamId);
 
     if (!membership || !roleHasPermission(membership.role, "transactions:review")) {
       throw new AppError("FORBIDDEN", "You cannot review transactions for this team");
     }
 
-    const category = await transactionRepository.getCategory(command.categoryId);
-
-    if (!category || category.teamId !== transaction.teamId) {
-      throw new AppError("NOT_FOUND", "Category not found");
-    }
+    const fingerprint = transactionReviewFingerprint(command);
 
     const replayed = await transactionRepository.getIdempotencyResult(
-      transaction.teamId,
+      command.teamId,
       context.actor.id,
       command.idempotencyKey,
     );
 
     if (replayed) {
-      return { ...replayed, replayed: true };
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError("CONFLICT", "Idempotency key was already used for a different review");
+      }
+
+      return { ...replayed.result, replayed: true };
     }
 
-    const updatedTransaction = await transactionRepository.updateTransactionReview({
+    const transaction = await transactionRepository.getTransactionForTeam(
+      command.teamId,
+      command.transactionId,
+    );
+
+    if (!transaction) {
+      throw new AppError("NOT_FOUND", "Transaction not found");
+    }
+
+    const category = await transactionRepository.getCategoryForTeam(
+      command.teamId,
+      command.categoryId,
+    );
+
+    if (!category) {
+      throw new AppError("NOT_FOUND", "Category not found");
+    }
+
+    const reviewChange = applyTransactionReview(transaction, category);
+
+    const updatedTransaction = await transactionRepository.updateTransactionReviewForTeam({
+      teamId: command.teamId,
       transactionId: transaction.id,
-      categoryId: category.id,
+      categoryId: reviewChange.transaction.categoryId ?? category.id,
+      reviewState: reviewChange.transaction.reviewState,
     });
 
     await transactionRepository.appendAuditEvent({
-      teamId: transaction.teamId,
+      teamId: command.teamId,
       actorId: context.actor.id,
       requestId: context.requestId,
       transactionId: transaction.id,
-      categoryId: category.id,
+      metadata: reviewChange.auditMetadata,
     });
 
     await transactionRepository.appendOutboxEvent({
-      teamId: transaction.teamId,
+      teamId: command.teamId,
       actorId: context.actor.id,
       requestId: context.requestId,
       transactionId: transaction.id,
-      categoryId: category.id,
+      payload: reviewChange.outboxPayload,
     });
 
     const result = { transaction: updatedTransaction, replayed: false };
 
     await transactionRepository.saveIdempotencyResult({
-      teamId: transaction.teamId,
+      teamId: command.teamId,
       actorId: context.actor.id,
       key: command.idempotencyKey,
+      fingerprint,
       result,
     });
 
     return result;
+  });
+}
+
+export function transactionReviewFingerprint(command: ReviewTransactionCommand) {
+  return JSON.stringify({
+    teamId: command.teamId,
+    transactionId: command.transactionId,
+    categoryId: command.categoryId,
   });
 }

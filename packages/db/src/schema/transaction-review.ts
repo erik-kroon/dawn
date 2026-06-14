@@ -121,6 +121,7 @@ export const idempotencyKey = pgTable(
     actorId: text("actor_id").notNull(),
     key: text("key").notNull(),
     operation: text("operation").notNull(),
+    fingerprint: text("fingerprint").notNull(),
     result: jsonb("result").$type<Record<string, unknown>>().notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },

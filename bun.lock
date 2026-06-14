@@ -61,6 +61,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@dawn/api": "workspace:*",
+        "@dawn/domain": "workspace:*",
         "@dawn/env": "workspace:*",
         "@dawn/ui": "workspace:*",
         "@hookform/resolvers": "^5.2.2",

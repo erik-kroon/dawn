@@ -6,6 +6,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@dawn/ui/components/card";
+import { formatMoney, type Money } from "@dawn/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -196,7 +197,7 @@ type TransactionReviewRowProps = {
     id: string;
     description: string;
     postedAt: string;
-    money: { amountMinor: number; currency: string };
+    money: Money;
     categoryId: string | null;
     reviewState: "needs_review" | "reviewed";
   };
@@ -244,11 +245,4 @@ function TransactionReviewRow({
       </div>
     </div>
   );
-}
-
-function formatMoney(money: { amountMinor: number; currency: string }) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: money.currency,
-  }).format(money.amountMinor / 100);
 }

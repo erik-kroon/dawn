@@ -15,10 +15,10 @@ import { protectedProcedure, publicProcedure } from "../index";
 const transactionReviewRepository = new DrizzleTransactionReviewRepository();
 
 const reviewTransactionInput = z.object({
+  teamId: z.string().min(1),
   transactionId: z.string().min(1),
   categoryId: z.string().min(1),
   idempotencyKey: z.string().min(1),
-  teamId: z.string().min(1).optional(),
 });
 
 const teamContextInput = z

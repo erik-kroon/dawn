@@ -1,5 +1,6 @@
 import type {
   ActorTeam,
+  IdempotencyResult,
   ReviewTransactionResult,
   ReviewWorkspace,
   TransactionReviewRepository,
@@ -145,21 +146,26 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     return { role: membership.role as TeamRole };
   }
 
-  async getTransaction(transactionId: string) {
+  async getTransactionForTeam(teamId: string, transactionId: string) {
     const [transaction] = await this.client
       .select()
       .from(schema.transaction)
-      .where(eq(schema.transaction.id, transactionId))
+      .where(and(eq(schema.transaction.teamId, teamId), eq(schema.transaction.id, transactionId)))
       .limit(1);
 
     return transaction ? mapTransaction(transaction) : null;
   }
 
-  async getCategory(categoryId: string) {
+  async getCategoryForTeam(teamId: string, categoryId: string) {
     const [category] = await this.client
       .select()
       .from(schema.transactionCategory)
-      .where(eq(schema.transactionCategory.id, categoryId))
+      .where(
+        and(
+          eq(schema.transactionCategory.teamId, teamId),
+          eq(schema.transactionCategory.id, categoryId),
+        ),
+      )
       .limit(1);
 
     return category ? mapCategory(category) : null;
@@ -167,7 +173,10 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
 
   async getIdempotencyResult(teamId: string, actorId: string, key: string) {
     const [record] = await this.client
-      .select({ result: schema.idempotencyKey.result })
+      .select({
+        fingerprint: schema.idempotencyKey.fingerprint,
+        result: schema.idempotencyKey.result,
+      })
       .from(schema.idempotencyKey)
       .where(
         and(
@@ -179,14 +188,33 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
       )
       .limit(1);
 
-    return record ? (record.result as ReviewTransactionResult) : null;
+    return record
+      ? ({
+          fingerprint: record.fingerprint,
+          result: record.result as ReviewTransactionResult,
+        } satisfies IdempotencyResult<ReviewTransactionResult>)
+      : null;
   }
 
-  async updateTransactionReview(input: { transactionId: string; categoryId: string }) {
+  async updateTransactionReviewForTeam(input: {
+    teamId: string;
+    transactionId: string;
+    categoryId: string;
+    reviewState: Transaction["reviewState"];
+  }) {
     const [transaction] = await this.client
       .update(schema.transaction)
-      .set({ categoryId: input.categoryId, reviewState: "reviewed", updatedAt: new Date() })
-      .where(eq(schema.transaction.id, input.transactionId))
+      .set({
+        categoryId: input.categoryId,
+        reviewState: input.reviewState,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.transaction.teamId, input.teamId),
+          eq(schema.transaction.id, input.transactionId),
+        ),
+      )
       .returning();
 
     if (!transaction) {
@@ -201,7 +229,7 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     actorId: string;
     requestId: string;
     transactionId: string;
-    categoryId: string;
+    metadata: Record<string, unknown>;
   }) {
     await this.client.insert(schema.auditLog).values({
       id: crypto.randomUUID(),
@@ -211,7 +239,7 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
       action: "transaction.reviewed",
       entityType: "transaction",
       entityId: input.transactionId,
-      metadata: { categoryId: input.categoryId },
+      metadata: input.metadata,
     });
   }
 
@@ -220,7 +248,7 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     actorId: string;
     requestId: string;
     transactionId: string;
-    categoryId: string;
+    payload: Record<string, unknown>;
   }) {
     await this.client.insert(schema.outboxEvent).values({
       id: crypto.randomUUID(),
@@ -228,10 +256,9 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
       type: "transaction.reviewed",
       version: 1,
       payload: {
+        ...input.payload,
         actorId: input.actorId,
         requestId: input.requestId,
-        transactionId: input.transactionId,
-        categoryId: input.categoryId,
       },
     });
   }
@@ -240,6 +267,7 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     teamId: string;
     actorId: string;
     key: string;
+    fingerprint: string;
     result: ReviewTransactionResult;
   }) {
     await this.client.insert(schema.idempotencyKey).values({
@@ -248,6 +276,7 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
       actorId: input.actorId,
       key: input.key,
       operation,
+      fingerprint: input.fingerprint,
       result: input.result,
     });
   }
