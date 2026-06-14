@@ -1,0 +1,19 @@
+{
+  "name": "@dawn/domain",
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./src/index.ts"
+    },
+    "./*": {
+      "default": "./src/*.ts"
+    }
+  },
+  "scripts": {
+    "check-types": "tsgo --noEmit"
+  },
+  "devDependencies": {
+    "@dawn/config": "workspace:*",
+    "typescript": "catalog:"
+  }
+}

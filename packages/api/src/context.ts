@@ -1,0 +1,19 @@
+import { auth } from "@dawn/auth";
+import type { Context as HonoContext } from "hono";
+
+export type CreateContextOptions = {
+  context: HonoContext;
+};
+
+export async function createContext({ context }: CreateContextOptions) {
+  const session = await auth.api.getSession({
+    headers: context.req.raw.headers,
+  });
+  return {
+    auth: null,
+    requestId: context.req.header("x-request-id") ?? crypto.randomUUID(),
+    session,
+  };
+}
+
+export type Context = Awaited<ReturnType<typeof createContext>>;

@@ -1,0 +1,3 @@
+{
+  "extends": "@dawn/config/tsconfig.base.json"
+}
