@@ -1,14 +1,14 @@
 {
   "stage": "interview",
-  "title": "Stealth End-to-End Orchestration",
-  "goalSlug": "stealth-end-to-end-orchestration",
+  "title": "Dawn End-to-End Orchestration",
+  "goalSlug": "Dawn-end-to-end-orchestration",
   "questions": [
     {
       "id": "scope_boundary",
       "prompt": "What implementation scope should this goal treat as required before it can be marked complete?",
       "description": "The source docs describe a full Cloudflare-first business operating system. The grill settled that milestones are allowed, but completion should remain full end-to-end delivery.",
       "answerMode": "multi-custom",
-      "recommendedAnswer": "Require all core Dawn/Stealth slices from the authoritative docs: ADR baseline, team/permissions, domain/app layers, Postgres/Drizzle authoritative data, audit/idempotency/outbox, ledger, CSV/banking sync, documents/R2/inbox/extraction/matching, invoicing/payments/recurrence, projects/time tracking, reports/insights, TanStack DB sync/realtime, TanStack AI assistant/tools/approval/evals, automations, integrations, public API/webhooks, desktop improvements, observability, operations, and production gates. Allow milestone commits, but do not mark complete while required slices remain incomplete.",
+      "recommendedAnswer": "Require all core Dawn slices from the authoritative docs: ADR baseline, team/permissions, domain/app layers, Postgres/Drizzle authoritative data, audit/idempotency/outbox, ledger, CSV/banking sync, documents/R2/inbox/extraction/matching, invoicing/payments/recurrence, projects/time tracking, reports/insights, TanStack DB sync/realtime, TanStack AI assistant/tools/approval/evals, automations, integrations, public API/webhooks, desktop improvements, observability, operations, and production gates. Allow milestone commits, but do not mark complete while required slices remain incomplete.",
       "recommendedOptionIds": [
         "full_end_state",
         "milestone_commits",

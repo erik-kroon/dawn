@@ -1,33 +1,33 @@
-# Dawn End-to-End Orchestration Plan
+# Dawn End-to-End Implementation Plan
 
 ## Solution Approach
 
-Run this as an orchestration goal, not a single-thread implementation sprint. The orchestrator owns architecture coherence, worker assignment, merge review, verification, milestone commits, and `docs/work/ORCHESTRATION.md`.
+Run this as an implementation goal in the active workspace. The agent personally carries the work forward slice by slice, keeps architecture coherent, updates docs and ADRs as decisions land, verifies behavior before checkpoints, and does not spawn worker agents unless the user explicitly changes that instruction.
 
-Current baseline: accepted ADRs `0001` through `0011` already exist; `packages/domain` and `packages/app` exist; the first transaction review tracer exists across domain/app/db/api/web; `bun test packages/app/src/transaction-review.test.ts` passes; `bun run check-types` passes. The plan therefore starts by verifying the baseline and hardening the existing tracer instead of recreating it.
+Current baseline is a partially implemented Dawn repo, not a blank starter. Accepted ADRs `0001` through `0011` exist; `packages/domain` and `packages/app` exist; the transaction review tracer has active implementation across domain/app/db/api/web; implementation tracking may already exist under `docs/work`. Start by inventorying the current working tree and validating what is already true before editing further.
 
 ## Ordered Steps
 
-### 1. Bootstrap Orchestration State
+### 1. Inventory Current Work And Rebaseline
 
 Touch:
 
-- `docs/work/ORCHESTRATION.md`
+- `docs/work/ORCHESTRATION.md` or a new implementation tracking file under `docs/work`
 - `docs/work/VERTICAL-SLICES.md`
-- `goals/Dawn-end-to-end-orchestration/facts.md`
-- `goals/Dawn-end-to-end-orchestration/facts.meta.json`
+- `goals/dawn-end-to-end-orchestration/facts.md`
+- `goals/dawn-end-to-end-orchestration/facts.meta.json`
 
 Work:
 
-- Run `git status --short` and record the clean or dirty baseline.
-- Create `docs/work/ORCHESTRATION.md` with slice status, active branches/worktrees, worker prompts, verification runs, commits, blockers, and merge notes.
-- Mark ADR baseline and transaction review tracer as the startup sequence.
-- Define the worker prompt template from the accepted facts.
+- Run `git status --short` and inspect existing diffs before editing overlapping files.
+- Treat existing changes as user or prior-agent work. Preserve them and build on them.
+- Record the implementation baseline, completed slice evidence, active partial work, checks already run, blockers, and next slice in `docs/work`.
+- Use `docs/work/VERTICAL-SLICES.md` as the backlog and update progress as implementation lands.
 
 Verification:
 
 - `git status --short`
-- Manual check that `docs/work/ORCHESTRATION.md` records the baseline and does not claim incomplete work is done.
+- Manual check that implementation tracking records the current baseline and does not claim incomplete work is done.
 
 ### 2. Verify Or Update ADR Baseline
 
@@ -41,16 +41,16 @@ Touch:
 
 Work:
 
-- Review ADRs `0001` through `0011` against the PRD and accepted facts.
-- Update only if decisions are missing or contradicted by current code.
-- Add new ADRs before spreading major new decisions, especially for release gates, worker/job boundaries, or data lifecycle if existing ADRs do not cover them.
+- Review ADRs `0001` through `0011` against the PRD, accepted facts, and current code.
+- Update only if decisions are missing, contradicted by implementation, or too vague to guide the next slice.
+- Add new ADRs before spreading major new decisions, especially for release gates, worker/job boundaries, data lifecycle, security posture, or provider boundaries if existing ADRs do not cover them.
 
 Verification:
 
 - Manual ADR review against `docs/work/IMPLEMENTATION-PRD.md`.
-- Link check if a markdown checker is added during the goal.
+- Link check if a markdown checker exists or is added.
 
-### 3. Harden The Transaction Review Tracer
+### 3. Complete And Harden The Transaction Review Tracer
 
 Touch:
 
@@ -65,8 +65,8 @@ Touch:
 
 Work:
 
-- Preserve the existing tracer behavior while reshaping touched code toward the final architecture.
-- Split broad single-file domain/app code into durable modules only where it improves locality: actor/team/permission, money, transaction review, audit/outbox, idempotency.
+- Preserve the intended tracer behavior while moving touched code toward the final architecture.
+- Split broad single-file domain/app code into durable modules where it improves locality: actor/team/permission, money, transaction review, audit/outbox, idempotency.
 - Confirm transaction review enforces team membership, permissions, idempotency replay, audit, and outbox in one transaction.
 - Move UI toward Coss primitives/particles for selects, tables, forms, buttons, and feedback. Read `.agents/skills/coss/SKILL.md` and relevant primitive docs before UI changes.
 - Keep the initial sync shape visible, even if the first implementation still refreshes by query.
@@ -74,9 +74,9 @@ Work:
 Verification:
 
 - `bun test packages/app/src/transaction-review.test.ts`
+- Relevant domain tests, including money and transaction review tests if present.
 - `bun run check-types`
 - `bun run dev:server` and `bun run dev:web`, then manually review team selection and transaction review.
-- Add or update tests for any contract moved out of the current app test.
 
 ### 4. Deepen Team Context And Permissions
 
@@ -369,24 +369,19 @@ Verification:
 - Full check suite after release gates exist.
 - Tenant isolation, rate limit, file permission, webhook verification, and migration tests.
 
-## Worker And Merge Protocol
+## Implementation Protocol
 
-- Spawn workers only for tasks with low file collision risk or clear ownership boundaries.
-- Use isolated branches/worktrees named like `codex/slice-04-ledger-core` or `codex/task-outbox-dispatcher`.
-- Worker command pattern:
-
-```bash
-codex exec -C <worktree> --sandbox workspace-write -a never "<worker prompt>"
-```
-
-- Worker prompts must include accepted facts, relevant slice(s), authoritative docs, files/areas to inspect, acceptance criteria, verification commands, `ref/midday` read-only rule, no unrelated refactors, expected summary format, and commit expectation.
-- Merge one worker branch at a time.
-- Before every merge or commit, inspect the diff, verify acceptance criteria, run relevant checks, update `docs/work/ORCHESTRATION.md`, and stage paths intentionally.
+- Work in the active workspace and keep changes scoped to the current slice.
+- Before editing a file with existing changes, inspect it and preserve user or prior-agent work.
+- Prefer vertical implementation: domain/app/db/api/UI/test changes that deliver a coherent behavior.
+- Add or update ADRs before major architecture decisions spread into code.
+- Use local/test adapters and fixtures for external services until live credentials or deployed infrastructure are available.
+- Before every checkpoint or commit, inspect the diff, verify acceptance criteria, run relevant checks, update implementation tracking under `docs/work`, and stage paths intentionally.
 
 ## Risks And Open Questions
 
 - Live provider work may need unavailable banking, payment, email, AI, or Cloudflare credentials. Continue with ports, fake adapters, fixtures, and local harnesses; mark only live wiring blocked.
-- The current tracer uses narrow single-file modules and starter UI. Zero-tech-debt work should reshape touched paths carefully without broad unrelated churn.
-- The current root `bun run check` runs `oxfmt --write`, so the orchestrator should treat it as a formatting command that mutates files and inspect formatting diffs before committing.
-- The full goal is large. Completion must be tracked in `docs/work/ORCHESTRATION.md`; do not rely on memory or chat summaries.
-- `apps/worker`, `packages/jobs`, `packages/integrations`, `packages/sync`, and `packages/ai` do not exist yet and should be introduced at the slice where they first own real contracts.
+- The current repo has active implementation changes. Rebaseline from the working tree before changing overlapping files.
+- The current root `bun run check` runs `oxfmt --write`; treat it as a formatting command that mutates files and inspect formatting diffs before committing.
+- The full goal is large. Completion must be tracked in `docs/work`; do not rely on memory or chat summaries.
+- `apps/worker`, `packages/jobs`, `packages/integrations`, `packages/sync`, and `packages/ai` should be introduced at the slice where they first own real contracts.

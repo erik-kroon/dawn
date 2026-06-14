@@ -1,7 +1,7 @@
 {
   "stage": "facts",
-  "title": "Stealth End-to-End Orchestration",
-  "goalSlug": "stealth-end-to-end-orchestration",
+  "title": "Dawn End-to-End Orchestration",
+  "goalSlug": "Dawn-end-to-end-orchestration",
   "facts": [
     {
       "id": "fact-1",
@@ -13,7 +13,7 @@
     },
     {
       "id": "fact-2",
-      "text": "The goal is complete only when the full Dawn/Stealth end-state scope from AGENTS.md, CONTEXT.md, CONTEXT-MAP.md, docs/PRD.md, docs/work/IMPLEMENTATION-PRD.md, and docs/work/VERTICAL-SLICES.md is implemented with no required slice left incomplete.",
+      "text": "The goal is complete only when the full Dawn end-state scope from AGENTS.md, CONTEXT.md, CONTEXT-MAP.md, docs/PRD.md, docs/work/IMPLEMENTATION-PRD.md, and docs/work/VERTICAL-SLICES.md is implemented with no required slice left incomplete.",
       "accepted": false,
       "removed": false,
       "recommendedAutomatedVerification": false,

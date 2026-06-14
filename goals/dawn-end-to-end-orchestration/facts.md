@@ -1,0 +1,21 @@
+# Facts
+
+- This goal is an implementation goal: the agent personally implements Dawn end-to-end in the active workspace instead of acting as a worker orchestrator.
+- The agent should not spawn Codex CLI workers, create worker worktrees, or delegate implementation unless the user explicitly asks for that later.
+- The goal is complete only when the full Dawn end-state scope from AGENTS.md, CONTEXT.md, CONTEXT-MAP.md, docs/PRD.md, docs/work/IMPLEMENTATION-PRD.md, and docs/work/VERTICAL-SLICES.md is implemented with no required slice left incomplete.
+- Milestone commits or checkpoints are allowed, but a milestone does not by itself satisfy the goal unless all required slices are complete.
+- The agent starts from the current working tree, treats existing changes as user or prior-agent work, and preserves them instead of reverting or overwriting them.
+- The agent stops for user input only when work changes product scope, conflicts with an architecture non-negotiable, requires unavailable credentials or deployed infrastructure, or risks user changes.
+- The startup sequence is ADR baseline verification or update first, then transaction review tracer completion, then the remaining vertical slices in dependency order.
+- Business rules are implemented in packages/domain and packages/app; routes, UI components, workers, provider adapters, automations, and AI tools call application use cases instead of owning business logic.
+- Postgres is the authoritative store for financial and operational state; Durable Objects, TanStack DB, KV, cache, search, vectors, and browser state are coordination layers, projections, or caches.
+- Sensitive mutations enforce tenant isolation, permissions, idempotency, audit logging, and outbox event persistence before side effects run.
+- Authoritative financial calculations use exact money semantics and never use JavaScript floating point for money totals, ledger state, invoices, payments, or reports.
+- New product UI and component migrations use Coss UI primitives or particles, and the agent reads the repo-local Coss skill before writing Coss UI code.
+- The agent owns durable docs and ADR coherence, including docs/adr and implementation tracking under docs/work.
+- External service work is implemented through provider boundaries, local or test adapters, schemas, fixtures, and verification harnesses before live credentials or deployments are required.
+- The implementation posture is zero tech debt: touched areas move to the intended end-state architecture, unused compatibility paths are deleted when caller evidence supports removal, and speculative wrappers or fallback modes are avoided.
+- Delivered behavior and stable contracts have relevant tests or verification; obsolete starter tests are updated or deleted instead of preserving compatibility coverage for removed paths.
+- Milestone work is not committed until the agent has inspected the diff, verified acceptance criteria, run relevant checks, and updated implementation tracking.
+- Partial foundation commits are allowed only when independently useful, verified, documented as partial, and not a regression for future slices.
+- ref/midday is read-only reference material and is never edited by this goal.

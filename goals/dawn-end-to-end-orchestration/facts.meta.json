@@ -1,49 +1,49 @@
 [
   {
     "id": "fact-1",
-    "text": "This goal is an orchestration goal: the agent plans, spawns workers, supervises, merges, verifies, documents, and commits instead of personally implementing the whole system in one thread.",
-    "comment": "",
+    "text": "This goal is an implementation goal: the agent personally implements Dawn end-to-end in the active workspace instead of acting as a worker orchestrator.",
+    "comment": "Reworked by user request from orchestrator mode to implementor mode.",
     "recommendedAutomatedVerification": false,
     "automatedVerification": false
   },
   {
     "id": "fact-2",
-    "text": "The goal is complete only when the full Dawn/Stealth end-state scope from AGENTS.md, CONTEXT.md, CONTEXT-MAP.md, docs/PRD.md, docs/work/IMPLEMENTATION-PRD.md, and docs/work/VERTICAL-SLICES.md is implemented with no required slice left incomplete.",
+    "text": "The agent should not spawn Codex CLI workers, create worker worktrees, or delegate implementation unless the user explicitly asks for that later.",
     "comment": "",
     "recommendedAutomatedVerification": false,
     "automatedVerification": false
   },
   {
     "id": "fact-3",
-    "text": "Milestone commits are allowed, but a milestone commit does not by itself satisfy the goal unless all required slices are complete.",
+    "text": "The goal is complete only when the full Dawn end-state scope from AGENTS.md, CONTEXT.md, CONTEXT-MAP.md, docs/PRD.md, docs/work/IMPLEMENTATION-PRD.md, and docs/work/VERTICAL-SLICES.md is implemented with no required slice left incomplete.",
     "comment": "",
     "recommendedAutomatedVerification": false,
     "automatedVerification": false
   },
   {
     "id": "fact-4",
-    "text": "The orchestrator starts from the current clean committed baseline and preserves any later user changes instead of reverting or overwriting them.",
+    "text": "Milestone commits or checkpoints are allowed, but a milestone does not by itself satisfy the goal unless all required slices are complete.",
     "comment": "",
     "recommendedAutomatedVerification": false,
     "automatedVerification": false
   },
   {
     "id": "fact-5",
-    "text": "The orchestrator has high autonomy to create branches or worktrees, spawn Codex CLI workers, review and merge output, update docs, run checks, and commit verified units.",
+    "text": "The agent starts from the current working tree, treats existing changes as user or prior-agent work, and preserves them instead of reverting or overwriting them.",
     "comment": "",
     "recommendedAutomatedVerification": false,
     "automatedVerification": false
   },
   {
     "id": "fact-6",
-    "text": "The orchestrator stops for user input when work changes product scope, conflicts with an architecture non-negotiable, requires unavailable credentials or deployed infrastructure, or risks user changes.",
+    "text": "The agent stops for user input only when work changes product scope, conflicts with an architecture non-negotiable, requires unavailable credentials or deployed infrastructure, or risks user changes.",
     "comment": "",
     "recommendedAutomatedVerification": false,
     "automatedVerification": false
   },
   {
     "id": "fact-7",
-    "text": "The startup sequence is ADR baseline verification or update first, then a transaction review tracer, then broader parallelization after shared contracts are stable.",
+    "text": "The startup sequence is ADR baseline verification or update first, then transaction review tracer completion, then the remaining vertical slices in dependency order.",
     "comment": "",
     "recommendedAutomatedVerification": true,
     "automatedVerification": true
@@ -78,62 +78,55 @@
   },
   {
     "id": "fact-12",
-    "text": "New product UI and component migrations use Coss UI primitives or particles, and workers read the repo-local Coss skill before writing Coss UI code.",
+    "text": "New product UI and component migrations use Coss UI primitives or particles, and the agent reads the repo-local Coss skill before writing Coss UI code.",
     "comment": "",
     "recommendedAutomatedVerification": true,
     "automatedVerification": true
   },
   {
     "id": "fact-13",
-    "text": "Worker prompts include the exact goal, relevant slices, authoritative docs, files or areas to inspect, acceptance criteria, verification commands, no ref/midday edits, no unrelated refactors, final summary format, and commit expectation.",
-    "comment": "",
-    "recommendedAutomatedVerification": false,
-    "automatedVerification": false
-  },
-  {
-    "id": "fact-14",
-    "text": "The orchestrator owns durable docs and ADR coherence, including docs/adr and docs/work/ORCHESTRATION.md; workers only propose docs changes or make narrow docs edits when explicitly assigned.",
+    "text": "The agent owns durable docs and ADR coherence, including docs/adr and implementation tracking under docs/work.",
     "comment": "",
     "recommendedAutomatedVerification": true,
     "automatedVerification": true
   },
   {
-    "id": "fact-15",
+    "id": "fact-14",
     "text": "External service work is implemented through provider boundaries, local or test adapters, schemas, fixtures, and verification harnesses before live credentials or deployments are required.",
     "comment": "",
     "recommendedAutomatedVerification": true,
     "automatedVerification": true
   },
   {
-    "id": "fact-16",
+    "id": "fact-15",
     "text": "The implementation posture is zero tech debt: touched areas move to the intended end-state architecture, unused compatibility paths are deleted when caller evidence supports removal, and speculative wrappers or fallback modes are avoided.",
     "comment": "",
     "recommendedAutomatedVerification": true,
     "automatedVerification": true
   },
   {
-    "id": "fact-17",
+    "id": "fact-16",
     "text": "Delivered behavior and stable contracts have relevant tests or verification; obsolete starter tests are updated or deleted instead of preserving compatibility coverage for removed paths.",
     "comment": "",
     "recommendedAutomatedVerification": true,
     "automatedVerification": true
   },
   {
-    "id": "fact-18",
-    "text": "Worker output is not merged and milestone work is not committed until the orchestrator has inspected the diff, verified acceptance criteria, run relevant checks, and updated orchestration tracking.",
+    "id": "fact-17",
+    "text": "Milestone work is not committed until the agent has inspected the diff, verified acceptance criteria, run relevant checks, and updated implementation tracking.",
     "comment": "",
     "recommendedAutomatedVerification": false,
     "automatedVerification": false
   },
   {
-    "id": "fact-19",
+    "id": "fact-18",
     "text": "Partial foundation commits are allowed only when independently useful, verified, documented as partial, and not a regression for future slices.",
     "comment": "",
     "recommendedAutomatedVerification": false,
     "automatedVerification": false
   },
   {
-    "id": "fact-20",
+    "id": "fact-19",
     "text": "ref/midday is read-only reference material and is never edited by this goal.",
     "comment": "",
     "recommendedAutomatedVerification": true,
