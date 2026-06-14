@@ -3,6 +3,7 @@ import { ORPCError } from "@orpc/server";
 import {
   AppError,
   acceptTeamInvite,
+  commitCsvTransactionImport,
   createLedgerTransaction,
   createTeam,
   inviteTeamMember,
@@ -10,6 +11,7 @@ import {
   listTeamDirectory,
   listTeams,
   listTransactionReviewWorkspace,
+  previewCsvTransactionImport,
   reviewTransaction,
   type TransactionReviewRepository,
   updateTeamMemberRole,
@@ -65,6 +67,26 @@ const createLedgerTransactionInput = z.object({
     )
     .optional(),
   tagIds: z.array(z.string().min(1)).optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const csvTransactionImportMappingInput = z.object({
+  postedAt: z.string().min(1),
+  description: z.string().min(1),
+  amount: z.string().min(1),
+  currency: z.string().min(1).nullable().optional(),
+  categoryId: z.string().min(1).nullable().optional(),
+});
+
+const previewCsvTransactionImportInput = z.object({
+  teamId: z.string().min(1),
+  accountId: z.string().min(1),
+  csvText: z.string().min(1),
+  mapping: csvTransactionImportMappingInput,
+});
+
+const commitCsvTransactionImportInput = previewCsvTransactionImportInput.extend({
+  fileName: z.string().min(1).nullable().optional(),
   idempotencyKey: z.string().min(1),
 });
 
@@ -291,6 +313,57 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                   money: split.money,
                   note: split.note ?? null,
                 })),
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    csvImport: {
+      preview: protectedProcedure
+        .input(previewCsvTransactionImportInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await previewCsvTransactionImport(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                mapping: {
+                  ...input.mapping,
+                  currency: input.mapping.currency ?? null,
+                  categoryId: input.mapping.categoryId ?? null,
+                },
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      commit: protectedProcedure
+        .input(commitCsvTransactionImportInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await commitCsvTransactionImport(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                fileName: input.fileName ?? null,
+                mapping: {
+                  ...input.mapping,
+                  currency: input.mapping.currency ?? null,
+                  categoryId: input.mapping.categoryId ?? null,
+                },
               },
             );
           } catch (error) {

@@ -29,6 +29,13 @@
       "when": 1781477074794,
       "tag": "0003_far_boom_boom",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1781477571284,
+      "tag": "0004_majestic_amazoness",
+      "breakpoints": true
     }
   ]
 }

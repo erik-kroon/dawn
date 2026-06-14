@@ -16,8 +16,11 @@ import {
   createLedgerTransaction,
   type IdempotencyResult,
   type ReviewWorkspaceData,
+  type TransactionImportSession,
   type TransactionReviewRepository,
+  commitCsvTransactionImport,
   listLedgerSummary,
+  previewCsvTransactionImport,
 } from "./index";
 
 class MemoryLedgerRepository implements TransactionReviewRepository {
@@ -27,6 +30,7 @@ class MemoryLedgerRepository implements TransactionReviewRepository {
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   memberships = new Map<string, TeamRole>();
   outboxEvents: unknown[] = [];
+  importSessions: TransactionImportSession[] = [];
   transactions = new Map<string, Transaction>();
 
   async withTransaction<T>(
@@ -115,6 +119,32 @@ class MemoryLedgerRepository implements TransactionReviewRepository {
     };
     this.transactions.set(transaction.id, transaction);
     return transaction;
+  }
+
+  async createTransactionImportSession(input: {
+    teamId: string;
+    accountId: string;
+    actorId: string;
+    fileName?: string | null;
+    rowCount: number;
+    importedCount: number;
+    duplicateCount: number;
+    invalidCount: number;
+  }) {
+    const importSession = {
+      id: `import_${this.importSessions.length + 1}`,
+      teamId: input.teamId,
+      accountId: input.accountId,
+      source: "csv" as const,
+      fileName: input.fileName ?? null,
+      status: "committed" as const,
+      rowCount: input.rowCount,
+      importedCount: input.importedCount,
+      duplicateCount: input.duplicateCount,
+      invalidCount: input.invalidCount,
+    };
+    this.importSessions.push(importSession);
+    return importSession;
   }
 
   async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
@@ -310,5 +340,87 @@ describe("ledger use cases", () => {
       amountMinor: -1200,
       currency: "USD",
     });
+  });
+});
+
+describe("CSV transaction import", () => {
+  test("previews ready, duplicate, and invalid rows", async () => {
+    const repository = seededRepository("member");
+    repository.transactions.set("existing_txn", {
+      id: "existing_txn",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Figma subscription",
+      postedAt: "2026-06-14",
+      money: { amountMinor: -1200, currency: "USD" },
+      type: "expense",
+      source: "csv_import",
+      categoryId: "cat_software",
+      reviewState: "needs_review",
+      duplicateKey: "team_1:csv_import:acct_1:2026-06-14:USD:-1200:figma subscription",
+    });
+
+    const preview = await previewCsvTransactionImport(repository, context, {
+      teamId: "team_1",
+      accountId: "acct_1",
+      csvText:
+        "Date,Description,Amount\n2026-06-14,Figma subscription,-12.00\n2026-06-15,Invoice,50.00\nnot-a-date,Broken,-1.00\n",
+      mapping: {
+        postedAt: "Date",
+        description: "Description",
+        amount: "Amount",
+        categoryId: "cat_software",
+      },
+    });
+
+    expect(preview.readyCount).toBe(1);
+    expect(preview.duplicateCount).toBe(1);
+    expect(preview.invalidCount).toBe(1);
+    expect(preview.rows.map((row) => row.status)).toEqual(["duplicate", "ready", "invalid"]);
+  });
+
+  test("commits ready CSV rows with import session, audit, outbox, and idempotency", async () => {
+    const repository = seededRepository("owner");
+    const command = {
+      teamId: "team_1",
+      accountId: "acct_1",
+      fileName: "transactions.csv",
+      csvText:
+        "Date,Description,Amount\n2026-06-14,Figma subscription,-12.00\n2026-06-15,Invoice,50.00\n",
+      mapping: {
+        postedAt: "Date",
+        description: "Description",
+        amount: "Amount",
+        categoryId: "cat_software",
+      },
+      idempotencyKey: "idem_1",
+    };
+
+    const result = await commitCsvTransactionImport(repository, context, command);
+    const replay = await commitCsvTransactionImport(repository, context, command);
+
+    expect(result.importSession.importedCount).toBe(2);
+    expect(result.transactions).toHaveLength(2);
+    expect(replay.replayed).toBe(true);
+    expect(repository.importSessions).toHaveLength(1);
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.outboxEvents).toHaveLength(1);
+  });
+
+  test("blocks viewers from CSV import", async () => {
+    const repository = seededRepository("viewer");
+
+    await expect(
+      previewCsvTransactionImport(repository, context, {
+        teamId: "team_1",
+        accountId: "acct_1",
+        csvText: "Date,Description,Amount\n2026-06-14,Figma subscription,-12.00\n",
+        mapping: {
+          postedAt: "Date",
+          description: "Description",
+          amount: "Amount",
+        },
+      }),
+    ).rejects.toEqual(new AppError("FORBIDDEN", "You cannot import transactions for this team"));
   });
 });

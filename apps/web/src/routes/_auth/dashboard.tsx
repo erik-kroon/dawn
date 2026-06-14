@@ -29,6 +29,16 @@ function RouteComponent() {
   const [newTeamName, setNewTeamName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<TeamInviteRole>("member");
+  const [csvText, setCsvText] = useState("");
+  const [csvFileName, setCsvFileName] = useState<string | null>(null);
+  const [csvAccountId, setCsvAccountId] = useState("");
+  const [csvMapping, setCsvMapping] = useState({
+    postedAt: "Date",
+    description: "Description",
+    amount: "Amount",
+    currency: "",
+    categoryId: "",
+  });
 
   const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: selectedTeamId } }));
   const currentTeamId = selectedTeamId ?? teams.data?.currentTeamId;
@@ -36,6 +46,10 @@ function RouteComponent() {
   const transactionReview = useQuery(
     orpc.transactionReview.list.queryOptions({ input: { teamId: currentTeamId } }),
   );
+  const ledgerSummary = useQuery({
+    ...orpc.ledger.summary.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
   const canManageTeam = transactionReview.data?.permissions.includes("team.manage") ?? false;
   const teamDirectory = useQuery({
     ...orpc.teams.directory.queryOptions({ input: { teamId: currentTeamId } }),
@@ -78,6 +92,17 @@ function RouteComponent() {
       },
     }),
   );
+  const csvPreviewMutation = useMutation(orpc.csvImport.preview.mutationOptions());
+  const csvCommitMutation = useMutation(
+    orpc.csvImport.commit.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({
+          queryKey: orpc.transactionReview.list.queryKey(),
+        });
+        await queryClient.invalidateQueries({ queryKey: orpc.ledger.summary.queryKey() });
+      },
+    }),
+  );
 
   useEffect(() => {
     if (!teams.data || !selectedTeamId) {
@@ -91,6 +116,14 @@ function RouteComponent() {
       localStorage.setItem("dawn:selected-team-id", teams.data.currentTeamId);
     }
   }, [selectedTeamId, teams.data]);
+
+  useEffect(() => {
+    const firstAccountId = ledgerSummary.data?.accounts[0]?.id;
+
+    if (!csvAccountId && firstAccountId) {
+      setCsvAccountId(firstAccountId);
+    }
+  }, [csvAccountId, ledgerSummary.data?.accounts]);
 
   const hasProSubscription = (customerState?.activeSubscriptions?.length ?? 0) > 0;
 
@@ -279,6 +312,173 @@ function RouteComponent() {
 
       <Card>
         <CardHeader>
+          <CardTitle>CSV transaction import</CardTitle>
+          <CardDescription>
+            Imported rows use the same ledger normalization, duplicate detection, audit, and outbox
+            path as provider transactions.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {transactionReview.data ? (
+            <div className="grid gap-3">
+              <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+                <Label className="flex flex-col gap-1 text-sm">
+                  CSV file
+                  <Input
+                    accept=".csv,text/csv"
+                    type="file"
+                    onChange={async (event) => {
+                      const file = event.currentTarget.files?.[0];
+
+                      if (!file) {
+                        return;
+                      }
+
+                      setCsvFileName(file.name);
+                      setCsvText(await file.text());
+                      csvPreviewMutation.reset();
+                      csvCommitMutation.reset();
+                    }}
+                  />
+                </Label>
+                <Label className="flex flex-col gap-1 text-sm">
+                  Account
+                  <select
+                    className="h-8 min-w-40 rounded-none border bg-background px-2 text-xs"
+                    onChange={(event) => setCsvAccountId(event.target.value)}
+                    value={csvAccountId}
+                  >
+                    {ledgerSummary.data?.accounts.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.name} · {account.currency}
+                      </option>
+                    ))}
+                  </select>
+                </Label>
+              </div>
+              <div className="grid gap-2 md:grid-cols-5">
+                <Label className="flex flex-col gap-1 text-sm">
+                  Date column
+                  <Input
+                    onChange={(event) =>
+                      setCsvMapping((mapping) => ({ ...mapping, postedAt: event.target.value }))
+                    }
+                    value={csvMapping.postedAt}
+                  />
+                </Label>
+                <Label className="flex flex-col gap-1 text-sm">
+                  Description column
+                  <Input
+                    onChange={(event) =>
+                      setCsvMapping((mapping) => ({
+                        ...mapping,
+                        description: event.target.value,
+                      }))
+                    }
+                    value={csvMapping.description}
+                  />
+                </Label>
+                <Label className="flex flex-col gap-1 text-sm">
+                  Amount column
+                  <Input
+                    onChange={(event) =>
+                      setCsvMapping((mapping) => ({ ...mapping, amount: event.target.value }))
+                    }
+                    value={csvMapping.amount}
+                  />
+                </Label>
+                <Label className="flex flex-col gap-1 text-sm">
+                  Currency column
+                  <Input
+                    onChange={(event) =>
+                      setCsvMapping((mapping) => ({ ...mapping, currency: event.target.value }))
+                    }
+                    placeholder="Optional"
+                    value={csvMapping.currency}
+                  />
+                </Label>
+                <Label className="flex flex-col gap-1 text-sm">
+                  Category
+                  <select
+                    className="h-8 rounded-none border bg-background px-2 text-xs"
+                    onChange={(event) =>
+                      setCsvMapping((mapping) => ({ ...mapping, categoryId: event.target.value }))
+                    }
+                    value={csvMapping.categoryId}
+                  >
+                    <option value="">Uncategorized</option>
+                    {transactionReview.data.categories.map((category) => (
+                      <option key={category.id} value={category.id}>
+                        {category.name}
+                      </option>
+                    ))}
+                  </select>
+                </Label>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  disabled={!canImportCsv(csvText, csvAccountId, csvMapping)}
+                  onClick={() => {
+                    if (!transactionReview.data) {
+                      return;
+                    }
+
+                    csvPreviewMutation.mutate({
+                      teamId: transactionReview.data.teamId,
+                      accountId: csvAccountId,
+                      csvText,
+                      mapping: normalizedCsvMapping(csvMapping),
+                    });
+                  }}
+                  variant="outline"
+                >
+                  Preview import
+                </Button>
+                <Button
+                  disabled={
+                    csvCommitMutation.isPending ||
+                    !transactionReview.data.teamId ||
+                    (csvPreviewMutation.data?.readyCount ?? 0) === 0
+                  }
+                  onClick={() => {
+                    if (!transactionReview.data) {
+                      return;
+                    }
+
+                    csvCommitMutation.mutate({
+                      teamId: transactionReview.data.teamId,
+                      accountId: csvAccountId,
+                      csvText,
+                      fileName: csvFileName,
+                      mapping: normalizedCsvMapping(csvMapping),
+                      idempotencyKey: crypto.randomUUID(),
+                    });
+                  }}
+                >
+                  Commit ready rows
+                </Button>
+              </div>
+              {csvPreviewMutation.data ? (
+                <CsvImportPreview preview={csvPreviewMutation.data} />
+              ) : null}
+              {csvCommitMutation.data ? (
+                <p className="text-sm text-muted-foreground">
+                  Imported {csvCommitMutation.data.importSession.importedCount} transactions.
+                </p>
+              ) : null}
+              {csvPreviewMutation.error ? (
+                <p className="text-sm text-destructive">{csvPreviewMutation.error.message}</p>
+              ) : null}
+              {csvCommitMutation.error ? (
+                <p className="text-sm text-destructive">{csvCommitMutation.error.message}</p>
+              ) : null}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Transaction review tracer</CardTitle>
           <CardDescription>
             Team-scoped transaction review powered by API → app use case → domain rule → Postgres
@@ -327,6 +527,86 @@ function RouteComponent() {
 
 const teamInviteRoles = ["admin", "member", "accountant", "viewer"] as const;
 type TeamInviteRole = (typeof teamInviteRoles)[number];
+
+type CsvImportMappingState = {
+  postedAt: string;
+  description: string;
+  amount: string;
+  currency: string;
+  categoryId: string;
+};
+
+type CsvImportPreviewData = {
+  totalRows: number;
+  readyCount: number;
+  duplicateCount: number;
+  invalidCount: number;
+  rows: {
+    rowNumber: number;
+    status: "ready" | "duplicate" | "invalid";
+    errors: string[];
+    values: Record<string, string>;
+  }[];
+};
+
+function canImportCsv(csvText: string, accountId: string, mapping: CsvImportMappingState) {
+  return (
+    csvText.trim().length > 0 &&
+    accountId.length > 0 &&
+    mapping.postedAt.trim().length > 0 &&
+    mapping.description.trim().length > 0 &&
+    mapping.amount.trim().length > 0
+  );
+}
+
+function normalizedCsvMapping(mapping: CsvImportMappingState) {
+  return {
+    postedAt: mapping.postedAt.trim(),
+    description: mapping.description.trim(),
+    amount: mapping.amount.trim(),
+    currency: mapping.currency.trim() || null,
+    categoryId: mapping.categoryId || null,
+  };
+}
+
+function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
+  return (
+    <div className="grid gap-2 border p-3">
+      <div className="grid gap-2 text-sm sm:grid-cols-4">
+        <p>
+          <span className="font-medium">{preview.readyCount}</span> ready
+        </p>
+        <p>
+          <span className="font-medium">{preview.duplicateCount}</span> duplicate
+        </p>
+        <p>
+          <span className="font-medium">{preview.invalidCount}</span> invalid
+        </p>
+        <p>
+          <span className="font-medium">{preview.totalRows}</span> total
+        </p>
+      </div>
+      <div className="max-h-64 overflow-auto border">
+        {preview.rows.slice(0, 25).map((row) => (
+          <div
+            className="grid gap-2 border-b p-2 text-sm last:border-b-0 md:grid-cols-[auto_auto_1fr]"
+            key={row.rowNumber}
+          >
+            <span className="font-mono text-xs">#{row.rowNumber}</span>
+            <span className="capitalize text-muted-foreground">{row.status}</span>
+            <span>
+              {row.errors.length > 0
+                ? row.errors.join(", ")
+                : `${row.values.Description ?? row.values.description ?? "transaction"} · ${
+                    row.values.Amount ?? row.values.amount ?? ""
+                  }`}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 type TransactionReviewRowProps = {
   categories: { id: string; name: string }[];

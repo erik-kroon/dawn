@@ -1,7 +1,9 @@
 import type {
   ActorTeam,
+  CsvTransactionImportMapping,
   IdempotencyResult,
   ReviewWorkspaceData,
+  TransactionImportSession,
   TransactionReviewRepository,
 } from "@dawn/app";
 import type {
@@ -318,6 +320,42 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     return mapTransaction(transaction);
   }
 
+  async createTransactionImportSession(input: {
+    teamId: string;
+    accountId: string;
+    actorId: string;
+    fileName?: string | null;
+    mapping: CsvTransactionImportMapping;
+    rowCount: number;
+    importedCount: number;
+    duplicateCount: number;
+    invalidCount: number;
+  }) {
+    const [importSession] = await this.client
+      .insert(schema.transactionImportSession)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        accountId: input.accountId,
+        source: "csv",
+        fileName: input.fileName ?? null,
+        status: "committed",
+        createdByActorId: input.actorId,
+        mapping: input.mapping as Record<string, unknown>,
+        rowCount: input.rowCount,
+        importedCount: input.importedCount,
+        duplicateCount: input.duplicateCount,
+        invalidCount: input.invalidCount,
+      })
+      .returning();
+
+    if (!importSession) {
+      throw new Error("Transaction import session was not created");
+    }
+
+    return mapTransactionImportSession(importSession);
+  }
+
   async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
     const [record] = await this.client
       .select({
@@ -617,6 +655,23 @@ function mapTransaction(transaction: typeof schema.transaction.$inferSelect): Tr
     categoryId: transaction.categoryId,
     reviewState: transaction.reviewState === "reviewed" ? "reviewed" : "needs_review",
     duplicateKey: transaction.duplicateKey,
+  };
+}
+
+function mapTransactionImportSession(
+  importSession: typeof schema.transactionImportSession.$inferSelect,
+): TransactionImportSession {
+  return {
+    id: importSession.id,
+    teamId: importSession.teamId,
+    accountId: importSession.accountId,
+    source: "csv",
+    fileName: importSession.fileName,
+    status: "committed",
+    rowCount: importSession.rowCount,
+    importedCount: importSession.importedCount,
+    duplicateCount: importSession.duplicateCount,
+    invalidCount: importSession.invalidCount,
   };
 }
 

@@ -207,6 +207,34 @@ export const transactionTagAssignment = pgTable(
   ],
 );
 
+export const transactionImportSession = pgTable(
+  "transaction_import_session",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    accountId: text("account_id")
+      .notNull()
+      .references(() => ledgerAccount.id, { onDelete: "cascade" }),
+    source: text("source").default("csv").notNull(),
+    fileName: text("file_name"),
+    status: text("status").default("committed").notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    mapping: jsonb("mapping").$type<Record<string, unknown>>().notNull(),
+    rowCount: integer("row_count").notNull(),
+    importedCount: integer("imported_count").notNull(),
+    duplicateCount: integer("duplicate_count").notNull(),
+    invalidCount: integer("invalid_count").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    committedAt: timestamp("committed_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("transaction_import_session_team_idx").on(table.teamId, table.createdAt),
+    index("transaction_import_session_account_idx").on(table.accountId, table.createdAt),
+  ],
+);
+
 export const auditLog = pgTable(
   "audit_log",
   {
@@ -275,6 +303,7 @@ export const teamRelations = relations(team, ({ many }) => ({
   accounts: many(ledgerAccount),
   counterparties: many(counterparty),
   tags: many(transactionTag),
+  imports: many(transactionImportSession),
   transactions: many(transaction),
 }));
 

@@ -15,6 +15,7 @@ import type {
   ActorTeam,
   IdempotencyResult,
   ReviewWorkspaceData,
+  TransactionImportSession,
   TransactionReviewRepository,
 } from "@dawn/app";
 
@@ -24,6 +25,7 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
   categories = new Map<string, Category>();
   accounts = new Map<string, LedgerAccount>();
   idempotency = new Map<string, IdempotencyResult<unknown>>();
+  importSessions: TransactionImportSession[] = [];
   invites = new Map<string, TeamInvite>();
   memberships = new Map<string, TeamRole>();
   teams = new Map<string, string>();
@@ -142,6 +144,32 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
     };
     this.transactions.set(transaction.id, transaction);
     return transaction;
+  }
+
+  async createTransactionImportSession(input: {
+    teamId: string;
+    accountId: string;
+    actorId: string;
+    fileName?: string | null;
+    rowCount: number;
+    importedCount: number;
+    duplicateCount: number;
+    invalidCount: number;
+  }) {
+    const importSession = {
+      id: `import_${this.importSessions.length + 1}`,
+      teamId: input.teamId,
+      accountId: input.accountId,
+      source: "csv" as const,
+      fileName: input.fileName ?? null,
+      status: "committed" as const,
+      rowCount: input.rowCount,
+      importedCount: input.importedCount,
+      duplicateCount: input.duplicateCount,
+      invalidCount: input.invalidCount,
+    };
+    this.importSessions.push(importSession);
+    return importSession;
   }
 
   async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
@@ -438,6 +466,59 @@ describe("appRouter", () => {
     expect(result.transaction.duplicateKey).toBe(
       "team_1:manual:acct_1:2026-06-14:USD:-1200:figma subscription",
     );
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.outboxEvents).toHaveLength(1);
+  });
+
+  test("previews and commits CSV imports through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    repository.accounts.set("acct_1", {
+      id: "acct_1",
+      teamId: "team_1",
+      name: "Operating",
+      currency: "USD",
+      type: "bank",
+    });
+    repository.categories.set("cat_software", {
+      id: "cat_software",
+      teamId: "team_1",
+      name: "Software",
+    });
+    const router = await createTestRouter(repository);
+    const input = {
+      teamId: "team_1",
+      accountId: "acct_1",
+      csvText:
+        "Date,Description,Amount\n2026-06-14,Figma subscription,-12.00\n2026-06-15,Invoice,50.00\n",
+      mapping: {
+        postedAt: "Date",
+        description: "Description",
+        amount: "Amount",
+        categoryId: "cat_software",
+      },
+    };
+
+    const preview = await call(router.csvImport.preview, input, {
+      context: testContext({ id: "user_1", email: "member@example.com" }),
+    });
+    const result = await call(
+      router.csvImport.commit,
+      {
+        ...input,
+        fileName: "transactions.csv",
+        idempotencyKey: "idem_1",
+      },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(preview.readyCount).toBe(2);
+    expect(result.importSession.importedCount).toBe(2);
+    expect(result.transactions).toHaveLength(2);
+    expect(repository.importSessions).toHaveLength(1);
     expect(repository.auditEvents).toHaveLength(1);
     expect(repository.outboxEvents).toHaveLength(1);
   });

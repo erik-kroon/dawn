@@ -127,6 +127,18 @@ export type LedgerTransactionDraft = {
   tagIds?: readonly string[];
 };
 
+export type CsvTransactionColumnMapping = {
+  postedAt: string;
+  description: string;
+  amount: string;
+  currency?: string | null;
+};
+
+export type CsvTransactionImportRow = {
+  rowNumber: number;
+  values: Record<string, string>;
+};
+
 export type ReportTotals = {
   revenue: Money;
   expenses: Money;
@@ -282,6 +294,51 @@ export function assertValidMoney(money: Money) {
   }
 }
 
+export function parseMoneyAmountMinor(amount: string, currency: string) {
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    throw new Error("Money currency must be an ISO 4217 code");
+  }
+
+  const trimmedAmount = amount.trim();
+
+  if (!trimmedAmount) {
+    throw new Error("Money amount is required");
+  }
+
+  const isParenthesizedNegative = /^\(.*\)$/.test(trimmedAmount);
+  const normalizedAmount = trimmedAmount
+    .replace(/^\((.*)\)$/, "-$1")
+    .replace(/[$€£¥\s_]/g, "")
+    .replace(/,/g, "");
+  const sign = normalizedAmount.startsWith("-") ? -1 : 1;
+  const unsignedAmount = normalizedAmount.replace(/^[+-]/, "");
+
+  if (!/^\d+(\.\d+)?$/.test(unsignedAmount)) {
+    throw new Error("Money amount must be a decimal number");
+  }
+
+  const minorUnitDigits = currencyMinorUnitDigits(currency);
+  const [majorUnits = "0", minorUnits = ""] = unsignedAmount.split(".");
+
+  if (minorUnits.length > minorUnitDigits) {
+    throw new Error("Money amount has too many decimal places for currency");
+  }
+
+  const amountMinor =
+    sign *
+    Number(
+      `${majorUnits}${minorUnits.padEnd(minorUnitDigits, "0")}`.replace(/^0+(?=\d)/, "") || "0",
+    );
+  const money = {
+    amountMinor: isParenthesizedNegative ? -Math.abs(amountMinor) : amountMinor,
+    currency,
+  };
+
+  assertValidMoney(money);
+
+  return money.amountMinor;
+}
+
 export function assertSameCurrency(left: Money, right: Money) {
   assertValidMoney(left);
   assertValidMoney(right);
@@ -379,6 +436,151 @@ export function ledgerDuplicateKey(draft: LedgerTransactionDraft) {
     ].join(":");
 
   return `${draft.teamId}:${sourceKey}`;
+}
+
+export function parseCsvTransactionRows(csv: string): CsvTransactionImportRow[] {
+  const rows = parseCsvRecords(csv);
+
+  if (rows.length === 0) {
+    throw new Error("CSV import file is empty");
+  }
+
+  const headers = rows[0]?.map((header) => header.trim()) ?? [];
+
+  if (headers.every((header) => !header)) {
+    throw new Error("CSV import requires a header row");
+  }
+
+  const seenHeaders = new Set<string>();
+
+  for (const header of headers) {
+    if (!header) {
+      throw new Error("CSV import headers cannot be blank");
+    }
+
+    if (seenHeaders.has(header)) {
+      throw new Error("CSV import headers must be unique");
+    }
+
+    seenHeaders.add(header);
+  }
+
+  return rows
+    .slice(1)
+    .filter((row) => row.some((value) => value.trim()))
+    .map((row, index) => ({
+      rowNumber: index + 2,
+      values: Object.fromEntries(
+        headers.map((header, columnIndex) => [header, row[columnIndex] ?? ""]),
+      ),
+    }));
+}
+
+export function csvRowToLedgerDraft(input: {
+  teamId: string;
+  accountId: string;
+  accountCurrency: string;
+  mapping: CsvTransactionColumnMapping;
+  row: CsvTransactionImportRow;
+  categoryId?: string | null;
+}): LedgerTransactionDraft {
+  const description = requiredCsvValue(input.row, input.mapping.description, "description");
+  const postedAtValue = requiredCsvValue(input.row, input.mapping.postedAt, "posted date");
+  const currency = input.mapping.currency
+    ? requiredCsvValue(input.row, input.mapping.currency, "currency").toUpperCase()
+    : input.accountCurrency;
+  const amountMinor = parseMoneyAmountMinor(
+    requiredCsvValue(input.row, input.mapping.amount, "amount"),
+    currency,
+  );
+  const postedAt = new Date(postedAtValue);
+
+  if (Number.isNaN(postedAt.getTime())) {
+    throw new Error("CSV row posted date is invalid");
+  }
+
+  if (currency !== input.accountCurrency) {
+    throw new Error("CSV row currency must match the account");
+  }
+
+  const draft = {
+    teamId: input.teamId,
+    accountId: input.accountId,
+    description,
+    postedAt: postedAt.toISOString(),
+    money: { amountMinor, currency },
+    type: amountMinor >= 0 ? "income" : "expense",
+    source: "csv_import",
+    categoryId: input.categoryId ?? null,
+  } satisfies LedgerTransactionDraft;
+
+  assertLedgerTransactionDraft(draft);
+
+  return draft;
+}
+
+function requiredCsvValue(row: CsvTransactionImportRow, column: string, label: string) {
+  const value = row.values[column]?.trim();
+
+  if (!value) {
+    throw new Error(`CSV row ${label} is required`);
+  }
+
+  return value;
+}
+
+function parseCsvRecords(csv: string) {
+  const normalizedCsv = csv
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+  const records: string[][] = [];
+  let record: string[] = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let index = 0; index < normalizedCsv.length; index += 1) {
+    const char = normalizedCsv[index];
+    const nextChar = normalizedCsv[index + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        field += '"';
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      record.push(field);
+      field = "";
+      continue;
+    }
+
+    if (char === "\n" && !inQuotes) {
+      record.push(field);
+      records.push(record);
+      record = [];
+      field = "";
+      continue;
+    }
+
+    field += char;
+  }
+
+  if (inQuotes) {
+    throw new Error("CSV import has an unterminated quoted field");
+  }
+
+  record.push(field);
+
+  if (record.some((value) => value.trim())) {
+    records.push(record);
+  }
+
+  return records;
 }
 
 export function createReportTotals(

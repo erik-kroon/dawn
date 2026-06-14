@@ -19,6 +19,7 @@ import {
   type IdempotencyResult,
   type InviteTeamMemberResult,
   type ReviewWorkspaceData,
+  type TransactionImportSession,
   type TransactionReviewRepository,
   inviteTeamMember,
   listTeamDirectory,
@@ -107,6 +108,10 @@ class MemoryTeamRepository implements TransactionReviewRepository {
     duplicateKey: string;
   }): Promise<Transaction> {
     throw new Error("Unexpected ledger transaction creation");
+  }
+
+  async createTransactionImportSession(): Promise<TransactionImportSession> {
+    throw new Error("Unexpected transaction import session creation");
   }
 
   async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {

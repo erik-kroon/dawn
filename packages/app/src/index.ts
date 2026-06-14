@@ -1,6 +1,7 @@
 import type {
   Actor,
   Category,
+  CsvTransactionColumnMapping,
   LedgerAccount,
   LedgerTransactionDraft,
   Permission,
@@ -16,7 +17,9 @@ import {
   applyTransactionReview,
   assertLedgerTransactionDraft,
   createReportTotals,
+  csvRowToLedgerDraft,
   ledgerDuplicateKey,
+  parseCsvTransactionRows,
   permissionsForRole,
   roleHasPermission,
 } from "@dawn/domain";
@@ -121,6 +124,61 @@ export type LedgerSummary = {
   transactionCount: number;
 };
 
+export type CsvTransactionImportMapping = CsvTransactionColumnMapping & {
+  categoryId?: string | null;
+};
+
+export type PreviewCsvTransactionImportCommand = {
+  teamId: string;
+  accountId: string;
+  csvText: string;
+  mapping: CsvTransactionImportMapping;
+};
+
+export type CommitCsvTransactionImportCommand = PreviewCsvTransactionImportCommand & {
+  fileName?: string | null;
+  idempotencyKey: string;
+};
+
+export type CsvTransactionImportPreviewRow = {
+  rowNumber: number;
+  values: Record<string, string>;
+  status: "ready" | "duplicate" | "invalid";
+  errors: string[];
+  duplicateKey: string | null;
+  draft: LedgerTransactionDraft | null;
+};
+
+export type CsvTransactionImportPreview = {
+  teamId: string;
+  accountId: string;
+  rows: CsvTransactionImportPreviewRow[];
+  totalRows: number;
+  readyCount: number;
+  duplicateCount: number;
+  invalidCount: number;
+};
+
+export type TransactionImportSession = {
+  id: string;
+  teamId: string;
+  accountId: string;
+  source: "csv";
+  fileName: string | null;
+  status: "committed";
+  rowCount: number;
+  importedCount: number;
+  duplicateCount: number;
+  invalidCount: number;
+};
+
+export type CommitCsvTransactionImportResult = {
+  importSession: TransactionImportSession;
+  transactions: Transaction[];
+  preview: CsvTransactionImportPreview;
+  replayed: boolean;
+};
+
 export type IdempotencyResult<T> = {
   fingerprint: string;
   result: T;
@@ -160,6 +218,17 @@ export type TransactionReviewRepository = {
     draft: LedgerTransactionDraft;
     duplicateKey: string;
   }): Promise<Transaction>;
+  createTransactionImportSession(input: {
+    teamId: string;
+    accountId: string;
+    actorId: string;
+    fileName?: string | null;
+    mapping: CsvTransactionImportMapping;
+    rowCount: number;
+    importedCount: number;
+    duplicateCount: number;
+    invalidCount: number;
+  }): Promise<TransactionImportSession>;
   getIdempotencyResult(
     teamId: string,
     actorId: string,
@@ -223,6 +292,7 @@ export type TransactionReviewRepository = {
 
 const reviewTransactionOperation = "transaction.review";
 const createLedgerTransactionOperation = "ledger.transaction.create";
+const commitCsvTransactionImportOperation = "csv_transaction_import.commit";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
@@ -545,6 +615,253 @@ export function createLedgerTransactionFingerprint(command: CreateLedgerTransact
     splits: draft.splits ?? [],
     tagIds: draft.tagIds ?? [],
   });
+}
+
+export async function previewCsvTransactionImport(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+  command: PreviewCsvTransactionImportCommand,
+): Promise<CsvTransactionImportPreview> {
+  assertCommandTeamMatchesContext(context, command.teamId, "CSV import not found");
+
+  await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId },
+    "transactions.write",
+    "You cannot import transactions for this team",
+  );
+
+  const account = await repository.getLedgerAccountForTeam(command.teamId, command.accountId);
+
+  if (!account) {
+    throw new AppError("NOT_FOUND", "Ledger account not found");
+  }
+
+  if (command.mapping.categoryId) {
+    const category = await repository.getCategoryForTeam(
+      command.teamId,
+      command.mapping.categoryId,
+    );
+
+    if (!category) {
+      throw new AppError("NOT_FOUND", "Category not found");
+    }
+  }
+
+  return buildCsvImportPreview(repository, command, account);
+}
+
+export async function commitCsvTransactionImport(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+  command: CommitCsvTransactionImportCommand,
+): Promise<CommitCsvTransactionImportResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    assertCommandTeamMatchesContext(context, command.teamId, "CSV import not found");
+
+    await resolveTeamAccess(
+      transactionRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.write",
+      "You cannot import transactions for this team",
+    );
+
+    const fingerprint = csvTransactionImportFingerprint(command);
+    const replayed = await transactionRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      commitCsvTransactionImportOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different CSV import",
+        );
+      }
+
+      return { ...(replayed.result as CommitCsvTransactionImportResult), replayed: true };
+    }
+
+    const account = await transactionRepository.getLedgerAccountForTeam(
+      command.teamId,
+      command.accountId,
+    );
+
+    if (!account) {
+      throw new AppError("NOT_FOUND", "Ledger account not found");
+    }
+
+    if (command.mapping.categoryId) {
+      const category = await transactionRepository.getCategoryForTeam(
+        command.teamId,
+        command.mapping.categoryId,
+      );
+
+      if (!category) {
+        throw new AppError("NOT_FOUND", "Category not found");
+      }
+    }
+
+    const preview = await buildCsvImportPreview(transactionRepository, command, account);
+    const readyRows = preview.rows.filter((row) => row.status === "ready" && row.draft);
+
+    if (readyRows.length === 0) {
+      throw new AppError("CONFLICT", "CSV import has no rows ready to commit");
+    }
+
+    const transactions: Transaction[] = [];
+
+    for (const row of readyRows) {
+      if (!row.draft || !row.duplicateKey) {
+        continue;
+      }
+
+      transactions.push(
+        await transactionRepository.createLedgerTransactionForTeam({
+          draft: row.draft,
+          duplicateKey: row.duplicateKey,
+        }),
+      );
+    }
+
+    const importSession = await transactionRepository.createTransactionImportSession({
+      teamId: command.teamId,
+      accountId: command.accountId,
+      actorId: context.actor.id,
+      fileName: command.fileName ?? null,
+      mapping: command.mapping,
+      rowCount: preview.totalRows,
+      importedCount: transactions.length,
+      duplicateCount: preview.duplicateCount,
+      invalidCount: preview.invalidCount,
+    });
+
+    await transactionRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "transaction_import.committed",
+      entityType: "transaction_import",
+      entityId: importSession.id,
+      metadata: {
+        accountId: command.accountId,
+        importedCount: transactions.length,
+        duplicateCount: preview.duplicateCount,
+        invalidCount: preview.invalidCount,
+      },
+    });
+
+    await transactionRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "transaction_import.committed",
+      version: 1,
+      payload: {
+        importSessionId: importSession.id,
+        transactionIds: transactions.map((transaction) => transaction.id),
+        accountId: command.accountId,
+      },
+    });
+
+    const result = { importSession, transactions, preview, replayed: false };
+
+    await transactionRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: commitCsvTransactionImportOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export function csvTransactionImportFingerprint(command: CommitCsvTransactionImportCommand) {
+  return JSON.stringify({
+    teamId: command.teamId,
+    accountId: command.accountId,
+    csvText: command.csvText,
+    mapping: command.mapping,
+    fileName: command.fileName ?? null,
+  });
+}
+
+async function buildCsvImportPreview(
+  repository: TransactionReviewRepository,
+  command: PreviewCsvTransactionImportCommand,
+  account: LedgerAccount,
+): Promise<CsvTransactionImportPreview> {
+  let rows;
+
+  try {
+    rows = parseCsvTransactionRows(command.csvText);
+  } catch (error) {
+    throw new AppError(
+      "CONFLICT",
+      error instanceof Error ? error.message : "CSV import file is invalid",
+    );
+  }
+
+  const seenDuplicateKeys = new Set<string>();
+  const previewRows: CsvTransactionImportPreviewRow[] = [];
+
+  for (const row of rows) {
+    try {
+      const draft = csvRowToLedgerDraft({
+        teamId: command.teamId,
+        accountId: command.accountId,
+        accountCurrency: account.currency,
+        mapping: command.mapping,
+        row,
+        categoryId: command.mapping.categoryId ?? null,
+      });
+      const duplicateKey = ledgerDuplicateKey(draft);
+      const duplicateInFile = seenDuplicateKeys.has(duplicateKey);
+      const duplicateInLedger = duplicateInFile
+        ? null
+        : await repository.getTransactionByDuplicateKey(command.teamId, duplicateKey);
+
+      seenDuplicateKeys.add(duplicateKey);
+
+      previewRows.push({
+        rowNumber: row.rowNumber,
+        values: row.values,
+        status: duplicateInFile || duplicateInLedger ? "duplicate" : "ready",
+        errors: duplicateInFile
+          ? ["Duplicate row in this file"]
+          : duplicateInLedger
+            ? ["Duplicate transaction already exists"]
+            : [],
+        duplicateKey,
+        draft,
+      });
+    } catch (error) {
+      previewRows.push({
+        rowNumber: row.rowNumber,
+        values: row.values,
+        status: "invalid",
+        errors: [error instanceof Error ? error.message : "CSV row is invalid"],
+        duplicateKey: null,
+        draft: null,
+      });
+    }
+  }
+
+  return {
+    teamId: command.teamId,
+    accountId: command.accountId,
+    rows: previewRows,
+    totalRows: previewRows.length,
+    readyCount: previewRows.filter((row) => row.status === "ready").length,
+    duplicateCount: previewRows.filter((row) => row.status === "duplicate").length,
+    invalidCount: previewRows.filter((row) => row.status === "invalid").length,
+  };
 }
 
 function normalizeLedgerTransactionDraft(
