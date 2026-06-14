@@ -5,7 +5,9 @@ import { RPCHandler } from "@orpc/server/fetch";
 import { ZodToJsonSchemaConverter } from "@orpc/zod/zod4";
 import { createContext } from "@dawn/api/context";
 import { appRouter } from "@dawn/api/routers/index";
+import { dispatchOutboxEvents } from "@dawn/app";
 import { auth } from "@dawn/auth";
+import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
 import { env } from "@dawn/env/server";
 import type { DawnCloudflareBindings } from "@dawn/infra/cloudflare";
 import { initLogger } from "evlog";
@@ -13,6 +15,8 @@ import { createAuthMiddleware, type BetterAuthInstance } from "evlog/better-auth
 import { evlog, type EvlogVariables } from "evlog/hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+
+import { createCloudflareOutboxQueuePublisher } from "./outbox-queue";
 
 export { TenantCoordinator } from "./tenant-coordinator";
 
@@ -48,6 +52,24 @@ app.use(
 );
 
 app.on(["POST", "GET"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+
+app.post("/internal/outbox/dispatch", async (c) => {
+  const authorization = c.req.header("authorization");
+
+  if (authorization !== `Bearer ${c.env.BETTER_AUTH_SECRET}`) {
+    return c.json({ error: "Not found" }, 404);
+  }
+
+  const limitQuery = Number(c.req.query("limit") ?? "25");
+  const limit = Number.isInteger(limitQuery) && limitQuery > 0 ? Math.min(limitQuery, 100) : 25;
+  const result = await dispatchOutboxEvents(
+    new DrizzleTransactionReviewRepository(),
+    createCloudflareOutboxQueuePublisher(c.env.DAWN_JOBS),
+    { limit },
+  );
+
+  return c.json(result);
+});
 
 export const apiHandler = new OpenAPIHandler(appRouter, {
   plugins: [

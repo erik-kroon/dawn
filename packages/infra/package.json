@@ -15,6 +15,7 @@
     "destroy": "alchemy destroy"
   },
   "dependencies": {
+    "@dawn/jobs": "workspace:*",
     "dotenv": "catalog:",
     "zod": "catalog:"
   },

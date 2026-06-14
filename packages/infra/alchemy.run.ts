@@ -10,7 +10,7 @@ import {
 } from "alchemy/cloudflare";
 import { config } from "dotenv";
 
-import type { DawnQueueMessage } from "./src/cloudflare";
+import type { DawnQueueMessage } from "@dawn/jobs";
 import {
   cloudflareResourceName,
   cloudflareStageConfig,

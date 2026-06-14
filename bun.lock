@@ -37,10 +37,12 @@
       "name": "server",
       "dependencies": {
         "@dawn/api": "workspace:*",
+        "@dawn/app": "workspace:*",
         "@dawn/auth": "workspace:*",
         "@dawn/db": "workspace:*",
         "@dawn/env": "workspace:*",
         "@dawn/infra": "workspace:*",
+        "@dawn/jobs": "workspace:*",
         "@orpc/openapi": "catalog:",
         "@orpc/server": "catalog:",
         "@orpc/zod": "catalog:",
@@ -126,6 +128,7 @@
       "name": "@dawn/app",
       "dependencies": {
         "@dawn/domain": "workspace:*",
+        "@dawn/jobs": "workspace:*",
         "@dawn/sync": "workspace:*",
       },
       "devDependencies": {
@@ -196,6 +199,7 @@
     "packages/infra": {
       "name": "@dawn/infra",
       "dependencies": {
+        "@dawn/jobs": "workspace:*",
         "dotenv": "catalog:",
         "zod": "catalog:",
       },
@@ -204,6 +208,16 @@
         "@dawn/config": "workspace:*",
         "@typescript/native-preview": "catalog:",
         "alchemy": "catalog:",
+        "typescript": "catalog:",
+      },
+    },
+    "packages/jobs": {
+      "name": "@dawn/jobs",
+      "dependencies": {
+        "zod": "catalog:",
+      },
+      "devDependencies": {
+        "@dawn/config": "workspace:*",
         "typescript": "catalog:",
       },
     },
@@ -431,6 +445,8 @@
     "@dawn/env": ["@dawn/env@workspace:packages/env"],
 
     "@dawn/infra": ["@dawn/infra@workspace:packages/infra"],
+
+    "@dawn/jobs": ["@dawn/jobs@workspace:packages/jobs"],
 
     "@dawn/sync": ["@dawn/sync@workspace:packages/sync"],
 

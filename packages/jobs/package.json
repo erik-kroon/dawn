@@ -1,5 +1,5 @@
 {
-  "name": "@dawn/app",
+  "name": "@dawn/jobs",
   "type": "module",
   "exports": {
     ".": {
@@ -14,9 +14,7 @@
     "check-types": "tsgo --noEmit"
   },
   "dependencies": {
-    "@dawn/domain": "workspace:*",
-    "@dawn/jobs": "workspace:*",
-    "@dawn/sync": "workspace:*"
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@dawn/config": "workspace:*",

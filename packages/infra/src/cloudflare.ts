@@ -1,3 +1,5 @@
+import type { DawnQueueMessage } from "@dawn/jobs";
+
 export const cloudflareBindingNames = {
   environment: "ENVIRONMENT",
   documentsBucket: "DAWN_DOCUMENTS",
@@ -10,22 +12,6 @@ export const cloudflareBindingNames = {
 
 export type CloudflareBindingName =
   (typeof cloudflareBindingNames)[keyof typeof cloudflareBindingNames];
-
-export type DawnQueueMessage =
-  | {
-      type: "outbox.dispatch";
-      outboxEventId: string;
-      teamId: string;
-      eventType: string;
-      version: number;
-    }
-  | {
-      type: "sync.invalidate";
-      teamId: string;
-      collection: "transactions";
-      cursor: string | null;
-      changedIds: string[];
-    };
 
 export type DawnCloudflareStage = "preview" | "staging" | "production";
 

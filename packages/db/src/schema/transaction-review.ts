@@ -266,10 +266,44 @@ export const outboxEvent = pgTable(
     version: integer("version").notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
     status: text("status").default("pending").notNull(),
+    dispatchAttempts: integer("dispatch_attempts").default(0).notNull(),
+    lastError: text("last_error"),
+    nextAttemptAt: timestamp("next_attempt_at"),
     occurredAt: timestamp("occurred_at").defaultNow().notNull(),
     processedAt: timestamp("processed_at"),
   },
-  (table) => [index("outbox_event_status_idx").on(table.status, table.occurredAt)],
+  (table) => [
+    index("outbox_event_status_idx").on(table.status, table.occurredAt),
+    index("outbox_event_retry_idx").on(table.status, table.nextAttemptAt),
+  ],
+);
+
+export const jobRun = pgTable(
+  "job_run",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    outboxEventId: text("outbox_event_id")
+      .notNull()
+      .references(() => outboxEvent.id, { onDelete: "cascade" }),
+    jobType: text("job_type").notNull(),
+    queueName: text("queue_name").notNull(),
+    status: text("status").notNull(),
+    attempt: integer("attempt").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    error: text("error"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("job_run_outbox_idx").on(table.outboxEventId, table.createdAt),
+    index("job_run_status_idx").on(table.status, table.createdAt),
+  ],
 );
 
 export const idempotencyKey = pgTable(
@@ -305,6 +339,8 @@ export const teamRelations = relations(team, ({ many }) => ({
   tags: many(transactionTag),
   imports: many(transactionImportSession),
   transactions: many(transaction),
+  outboxEvents: many(outboxEvent),
+  jobRuns: many(jobRun),
 }));
 
 export const teamMembershipRelations = relations(teamMembership, ({ one }) => ({

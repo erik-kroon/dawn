@@ -11,10 +11,12 @@
   },
   "dependencies": {
     "@dawn/api": "workspace:*",
+    "@dawn/app": "workspace:*",
     "@dawn/auth": "workspace:*",
     "@dawn/db": "workspace:*",
     "@dawn/env": "workspace:*",
     "@dawn/infra": "workspace:*",
+    "@dawn/jobs": "workspace:*",
     "@orpc/openapi": "catalog:",
     "@orpc/server": "catalog:",
     "@orpc/zod": "catalog:",

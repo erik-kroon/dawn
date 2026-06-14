@@ -2,6 +2,9 @@ import type {
   ActorTeam,
   CsvTransactionImportMapping,
   IdempotencyResult,
+  JobRun,
+  OutboxDispatchRepository,
+  OutboxEvent,
   ReviewWorkspaceData,
   TransactionImportSession,
   TransactionReviewRepository,
@@ -18,7 +21,7 @@ import type {
   Transaction,
 } from "@dawn/domain";
 import { ledgerDuplicateKey } from "@dawn/domain";
-import { and, asc, desc, eq, gt, gte, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 
 import { db } from "./index";
 import * as schema from "./schema";
@@ -26,13 +29,12 @@ import * as schema from "./schema";
 type Database = typeof db;
 type TransactionClient = Parameters<Parameters<Database["transaction"]>[0]>[0];
 type QueryClient = Database | TransactionClient;
+type DrizzleRepository = TransactionReviewRepository & OutboxDispatchRepository;
 
-export class DrizzleTransactionReviewRepository implements TransactionReviewRepository {
+export class DrizzleTransactionReviewRepository implements DrizzleRepository {
   constructor(private readonly client: QueryClient = db) {}
 
-  async withTransaction<T>(
-    callback: (repository: TransactionReviewRepository) => Promise<T>,
-  ): Promise<T> {
+  async withTransaction<T>(callback: (repository: DrizzleRepository) => Promise<T>): Promise<T> {
     if (!("transaction" in this.client)) {
       return callback(this);
     }
@@ -467,6 +469,111 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     });
   }
 
+  async listDispatchableOutboxEvents(input: { limit: number; now: Date }): Promise<OutboxEvent[]> {
+    const events = await this.client
+      .select()
+      .from(schema.outboxEvent)
+      .where(
+        and(
+          inArray(schema.outboxEvent.status, ["pending", "failed"]),
+          or(
+            isNull(schema.outboxEvent.nextAttemptAt),
+            lte(schema.outboxEvent.nextAttemptAt, input.now),
+          ),
+        ),
+      )
+      .orderBy(asc(schema.outboxEvent.occurredAt))
+      .limit(input.limit);
+
+    return events.map(mapOutboxEvent);
+  }
+
+  async claimOutboxEventForDispatch(input: {
+    outboxEventId: string;
+    now: Date;
+  }): Promise<OutboxEvent | null> {
+    const [event] = await this.client
+      .update(schema.outboxEvent)
+      .set({
+        status: "dispatching",
+        dispatchAttempts: sql`${schema.outboxEvent.dispatchAttempts} + 1`,
+        lastError: null,
+        nextAttemptAt: null,
+      })
+      .where(
+        and(
+          eq(schema.outboxEvent.id, input.outboxEventId),
+          inArray(schema.outboxEvent.status, ["pending", "failed"]),
+          or(
+            isNull(schema.outboxEvent.nextAttemptAt),
+            lte(schema.outboxEvent.nextAttemptAt, input.now),
+          ),
+        ),
+      )
+      .returning();
+
+    return event ? mapOutboxEvent(event) : null;
+  }
+
+  async createJobRun(input: {
+    teamId: string;
+    outboxEventId: string;
+    jobType: JobRun["jobType"];
+    queueName: string;
+    status: JobRun["status"];
+    attempt: number;
+    idempotencyKey: string;
+    error?: string | null;
+  }): Promise<JobRun> {
+    const [jobRun] = await this.client
+      .insert(schema.jobRun)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        outboxEventId: input.outboxEventId,
+        jobType: input.jobType,
+        queueName: input.queueName,
+        status: input.status,
+        attempt: input.attempt,
+        idempotencyKey: input.idempotencyKey,
+        error: input.error ?? null,
+      })
+      .returning();
+
+    if (!jobRun) {
+      throw new Error("Job run was not created");
+    }
+
+    return mapJobRun(jobRun);
+  }
+
+  async markOutboxEventDispatched(input: { outboxEventId: string; now: Date }) {
+    await this.client
+      .update(schema.outboxEvent)
+      .set({
+        status: "dispatched",
+        processedAt: input.now,
+        lastError: null,
+        nextAttemptAt: null,
+      })
+      .where(eq(schema.outboxEvent.id, input.outboxEventId));
+  }
+
+  async markOutboxEventDispatchFailed(input: {
+    outboxEventId: string;
+    error: string;
+    nextAttemptAt: Date;
+  }) {
+    await this.client
+      .update(schema.outboxEvent)
+      .set({
+        status: "failed",
+        lastError: input.error.slice(0, 2_000),
+        nextAttemptAt: input.nextAttemptAt,
+      })
+      .where(eq(schema.outboxEvent.id, input.outboxEventId));
+  }
+
   async saveIdempotencyResult(input: {
     teamId: string;
     actorId: string;
@@ -689,6 +796,38 @@ function mapTransactionImportSession(
     importedCount: importSession.importedCount,
     duplicateCount: importSession.duplicateCount,
     invalidCount: importSession.invalidCount,
+  };
+}
+
+function mapOutboxEvent(event: typeof schema.outboxEvent.$inferSelect): OutboxEvent {
+  return {
+    id: event.id,
+    teamId: event.teamId,
+    type: event.type,
+    version: event.version,
+    payload: event.payload,
+    status: event.status as OutboxEvent["status"],
+    dispatchAttempts: event.dispatchAttempts,
+    occurredAt: event.occurredAt.toISOString(),
+    processedAt: event.processedAt?.toISOString() ?? null,
+    lastError: event.lastError,
+    nextAttemptAt: event.nextAttemptAt?.toISOString() ?? null,
+  };
+}
+
+function mapJobRun(jobRun: typeof schema.jobRun.$inferSelect): JobRun {
+  return {
+    id: jobRun.id,
+    teamId: jobRun.teamId,
+    outboxEventId: jobRun.outboxEventId,
+    jobType: jobRun.jobType as JobRun["jobType"],
+    queueName: jobRun.queueName,
+    status: jobRun.status as JobRun["status"],
+    attempt: jobRun.attempt,
+    idempotencyKey: jobRun.idempotencyKey,
+    error: jobRun.error,
+    createdAt: jobRun.createdAt.toISOString(),
+    updatedAt: jobRun.updatedAt.toISOString(),
   };
 }
 

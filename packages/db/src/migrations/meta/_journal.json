@@ -36,6 +36,13 @@
       "when": 1781477571284,
       "tag": "0004_majestic_amazoness",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1781479669942,
+      "tag": "0005_swift_pride",
+      "breakpoints": true
     }
   ]
 }

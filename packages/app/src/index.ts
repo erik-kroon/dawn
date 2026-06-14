@@ -13,6 +13,7 @@ import type {
   TeamRole,
   Transaction,
 } from "@dawn/domain";
+import type { DawnQueueMessage, OutboxEventForJob } from "@dawn/jobs";
 import type { TransactionSyncResponse } from "@dawn/sync";
 import {
   applyTransactionReview,
@@ -24,6 +25,7 @@ import {
   permissionsForRole,
   roleHasPermission,
 } from "@dawn/domain";
+import { dawnQueueNames, nextOutboxRetryAt, outboxEventToQueueMessages } from "@dawn/jobs";
 import { buildTransactionSyncResponse } from "@dawn/sync";
 
 export type AppErrorCode = "FORBIDDEN" | "NOT_FOUND" | "CONFLICT";
@@ -179,11 +181,79 @@ export type TransactionImportSession = {
   invalidCount: number;
 };
 
+export type OutboxEventStatus = "pending" | "dispatching" | "dispatched" | "failed";
+
+export type OutboxEvent = OutboxEventForJob & {
+  status: OutboxEventStatus;
+  occurredAt: string;
+  processedAt?: string | null;
+  lastError?: string | null;
+  nextAttemptAt?: string | null;
+};
+
+export type JobRunStatus = "queued" | "failed";
+
+export type JobRun = {
+  id: string;
+  teamId: string;
+  outboxEventId: string;
+  jobType: DawnQueueMessage["type"];
+  queueName: string;
+  status: JobRunStatus;
+  attempt: number;
+  idempotencyKey: string;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DispatchOutboxCommand = {
+  limit?: number;
+  now?: Date;
+};
+
+export type DispatchOutboxResult = {
+  scanned: number;
+  dispatched: number;
+  failed: number;
+  skipped: number;
+  queuedMessages: number;
+};
+
+export type OutboxQueuePublisher = {
+  publish(message: DawnQueueMessage): Promise<void>;
+};
+
 export type CommitCsvTransactionImportResult = {
   importSession: TransactionImportSession;
   transactions: Transaction[];
   preview: CsvTransactionImportPreview;
   replayed: boolean;
+};
+
+export type OutboxDispatchRepository = {
+  withTransaction<T>(callback: (repository: OutboxDispatchRepository) => Promise<T>): Promise<T>;
+  listDispatchableOutboxEvents(input: { limit: number; now: Date }): Promise<OutboxEvent[]>;
+  claimOutboxEventForDispatch(input: {
+    outboxEventId: string;
+    now: Date;
+  }): Promise<OutboxEvent | null>;
+  createJobRun(input: {
+    teamId: string;
+    outboxEventId: string;
+    jobType: DawnQueueMessage["type"];
+    queueName: string;
+    status: JobRunStatus;
+    attempt: number;
+    idempotencyKey: string;
+    error?: string | null;
+  }): Promise<JobRun>;
+  markOutboxEventDispatched(input: { outboxEventId: string; now: Date }): Promise<void>;
+  markOutboxEventDispatchFailed(input: {
+    outboxEventId: string;
+    error: string;
+    nextAttemptAt: Date;
+  }): Promise<void>;
 };
 
 export type IdempotencyResult<T> = {
@@ -307,6 +377,82 @@ const commitCsvTransactionImportOperation = "csv_transaction_import.commit";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
+
+export async function dispatchOutboxEvents(
+  repository: OutboxDispatchRepository,
+  publisher: OutboxQueuePublisher,
+  command: DispatchOutboxCommand = {},
+): Promise<DispatchOutboxResult> {
+  const now = command.now ?? new Date();
+  const events = await repository.listDispatchableOutboxEvents({
+    limit: command.limit ?? 25,
+    now,
+  });
+  const result: DispatchOutboxResult = {
+    scanned: events.length,
+    dispatched: 0,
+    failed: 0,
+    skipped: 0,
+    queuedMessages: 0,
+  };
+
+  for (const event of events) {
+    const claimed = await repository.claimOutboxEventForDispatch({
+      outboxEventId: event.id,
+      now,
+    });
+
+    if (!claimed) {
+      result.skipped += 1;
+      continue;
+    }
+
+    try {
+      const messages = outboxEventToQueueMessages(event);
+
+      for (const message of messages) {
+        await publisher.publish(message);
+        await repository.createJobRun({
+          teamId: event.teamId,
+          outboxEventId: event.id,
+          jobType: message.type,
+          queueName: dawnQueueNames.jobs,
+          status: "queued",
+          attempt: event.dispatchAttempts + 1,
+          idempotencyKey: message.idempotencyKey,
+          error: null,
+        });
+        result.queuedMessages += 1;
+      }
+
+      await repository.markOutboxEventDispatched({ outboxEventId: event.id, now });
+      result.dispatched += 1;
+    } catch (error) {
+      const message = errorMessage(error);
+      const attempt = event.dispatchAttempts + 1;
+      const nextAttemptAt = nextOutboxRetryAt({ attempt, now });
+
+      await repository.createJobRun({
+        teamId: event.teamId,
+        outboxEventId: event.id,
+        jobType: "outbox.dispatch",
+        queueName: dawnQueueNames.jobs,
+        status: "failed",
+        attempt,
+        idempotencyKey: `outbox:${event.id}:failed:${attempt}`,
+        error: message,
+      });
+      await repository.markOutboxEventDispatchFailed({
+        outboxEventId: event.id,
+        error: message,
+        nextAttemptAt,
+      });
+      result.failed += 1;
+    }
+  }
+
+  return result;
+}
 
 export async function listTeams(
   repository: TransactionReviewRepository,
@@ -1318,4 +1464,8 @@ function assertCommandTeamMatchesContext(
   if (context.teamId && context.teamId !== teamId) {
     throw new AppError("NOT_FOUND", message);
   }
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Outbox dispatch failed";
 }
