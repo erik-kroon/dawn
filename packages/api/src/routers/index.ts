@@ -10,6 +10,7 @@ import {
   listLedgerSummary,
   listTeamDirectory,
   listTeams,
+  listTransactionSyncCollection,
   listTransactionReviewWorkspace,
   previewCsvTransactionImport,
   reviewTransaction,
@@ -93,6 +94,13 @@ const commitCsvTransactionImportInput = previewCsvTransactionImportInput.extend(
 const teamContextInput = z
   .object({
     teamId: z.string().min(1).optional(),
+  })
+  .optional();
+
+const transactionSyncInput = z
+  .object({
+    teamId: z.string().min(1).optional(),
+    cursor: z.iso.datetime().nullable().optional(),
   })
   .optional();
 
@@ -270,6 +278,25 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 teamId: input.teamId,
               },
               input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    sync: {
+      transactions: protectedProcedure
+        .input(transactionSyncInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listTransactionSyncCollection(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input?.teamId,
+              },
+              { teamId: input?.teamId, cursor: input?.cursor ?? null },
             );
           } catch (error) {
             mapAppError(error);

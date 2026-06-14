@@ -103,6 +103,10 @@ class MemoryTeamRepository implements TransactionReviewRepository {
     throw new Error("Unexpected report transaction list");
   }
 
+  async listTransactionsForSync(): Promise<Transaction[]> {
+    throw new Error("Unexpected sync transaction list");
+  }
+
   async createLedgerTransactionForTeam(_input: {
     draft: LedgerTransactionDraft;
     duplicateKey: string;

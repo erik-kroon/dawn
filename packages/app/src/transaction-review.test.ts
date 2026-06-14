@@ -17,6 +17,7 @@ import {
   type ReviewTransactionResult,
   type TransactionImportSession,
   type TransactionReviewRepository,
+  listTransactionSyncCollection,
   listTransactionReviewWorkspace,
   reviewTransaction,
 } from "./index";
@@ -102,6 +103,26 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
 
   async listTransactionsForReport(): Promise<Transaction[]> {
     throw new Error("Unexpected report transaction list");
+  }
+
+  async listTransactionsForSync(input: { teamId: string; cursor?: string | null }) {
+    const cursorTime = input.cursor ? new Date(input.cursor).getTime() : null;
+
+    return [...this.transactions.values()]
+      .filter((transaction) => transaction.teamId === input.teamId)
+      .filter((transaction) => {
+        if (cursorTime === null) {
+          return true;
+        }
+
+        return transaction.updatedAt
+          ? new Date(transaction.updatedAt).getTime() > cursorTime
+          : false;
+      })
+      .sort(
+        (left, right) =>
+          new Date(left.updatedAt ?? 0).getTime() - new Date(right.updatedAt ?? 0).getTime(),
+      );
   }
 
   async createLedgerTransactionForTeam(_input: {
@@ -223,6 +244,7 @@ function seededRepository(role: TeamRole) {
     money: { amountMinor: -1200, currency: "USD" },
     categoryId: null,
     reviewState: "needs_review",
+    updatedAt: "2026-06-14T10:00:00.000Z",
   });
   return repository;
 }
@@ -324,5 +346,59 @@ describe("reviewTransaction", () => {
         { teamId: "team_2", transactionId: "txn_1", categoryId: "cat_1", idempotencyKey: "idem_1" },
       ),
     ).rejects.toEqual(new AppError("NOT_FOUND", "Transaction not found"));
+  });
+});
+
+describe("listTransactionSyncCollection", () => {
+  test("returns team-scoped cursor changes for readers", async () => {
+    const repository = seededRepository("viewer");
+    repository.transactions.set("txn_2", {
+      id: "txn_2",
+      teamId: "team_1",
+      description: "Invoice",
+      postedAt: "2026-06-15",
+      money: { amountMinor: 5000, currency: "USD" },
+      categoryId: "cat_1",
+      reviewState: "reviewed",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+    });
+    repository.transactions.set("txn_other", {
+      id: "txn_other",
+      teamId: "team_2",
+      description: "Other",
+      postedAt: "2026-06-15",
+      money: { amountMinor: -1000, currency: "USD" },
+      categoryId: null,
+      reviewState: "needs_review",
+      updatedAt: "2026-06-16T10:00:00.000Z",
+    });
+
+    const response = await listTransactionSyncCollection(
+      repository,
+      { actor: { id: "user_1", type: "user" }, requestId: "request_1" },
+      { teamId: "team_1", cursor: "2026-06-14T12:00:00.000Z" },
+    );
+
+    expect(response).toMatchObject({
+      collection: "transactions",
+      teamId: "team_1",
+      cursor: "2026-06-15T10:00:00.000Z",
+      conflictPolicy: "server_wins_for_financial_state",
+    });
+    expect(
+      response.changes.map((change) => (change.type === "upsert" ? change.record.id : "")),
+    ).toEqual(["txn_2"]);
+  });
+
+  test("denies sync to non-members", async () => {
+    const repository = seededRepository("viewer");
+
+    await expect(
+      listTransactionSyncCollection(
+        repository,
+        { actor: { id: "user_1", type: "user" }, requestId: "request_1" },
+        { teamId: "team_2" },
+      ),
+    ).rejects.toEqual(new AppError("FORBIDDEN", "You cannot sync transactions for this team"));
   });
 });

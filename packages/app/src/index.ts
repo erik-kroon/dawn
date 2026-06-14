@@ -13,6 +13,7 @@ import type {
   TeamRole,
   Transaction,
 } from "@dawn/domain";
+import type { TransactionSyncResponse } from "@dawn/sync";
 import {
   applyTransactionReview,
   assertLedgerTransactionDraft,
@@ -23,6 +24,7 @@ import {
   permissionsForRole,
   roleHasPermission,
 } from "@dawn/domain";
+import { buildTransactionSyncResponse } from "@dawn/sync";
 
 export type AppErrorCode = "FORBIDDEN" | "NOT_FOUND" | "CONFLICT";
 
@@ -60,6 +62,11 @@ export type ReviewWorkspace = {
 };
 
 export type ReviewWorkspaceData = Omit<ReviewWorkspace, "role" | "permissions">;
+
+export type ListTransactionSyncCommand = {
+  teamId?: string;
+  cursor?: string | null;
+};
 
 export type ReviewTransactionCommand = {
   teamId: string;
@@ -214,6 +221,10 @@ export type TransactionReviewRepository = {
     from?: string;
     to?: string;
   }): Promise<Transaction[]>;
+  listTransactionsForSync(input: {
+    teamId: string;
+    cursor?: string | null;
+  }): Promise<Transaction[]>;
   createLedgerTransactionForTeam(input: {
     draft: LedgerTransactionDraft;
     duplicateKey: string;
@@ -344,6 +355,28 @@ export async function listTransactionReviewWorkspace(
     role: access.role,
     permissions: access.permissions,
   };
+}
+
+export async function listTransactionSyncCollection(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+  command: ListTransactionSyncCommand = {},
+): Promise<TransactionSyncResponse> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId ?? context.teamId },
+    "transactions.read",
+    "You cannot sync transactions for this team",
+  );
+  const transactions = await repository.listTransactionsForSync({
+    teamId: access.teamId,
+    cursor: command.cursor ?? null,
+  });
+
+  return buildTransactionSyncResponse({
+    teamId: access.teamId,
+    transactions,
+  });
 }
 
 export async function reviewTransaction(

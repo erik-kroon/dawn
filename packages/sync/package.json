@@ -1,5 +1,5 @@
 {
-  "name": "@dawn/app",
+  "name": "@dawn/sync",
   "type": "module",
   "exports": {
     ".": {
@@ -10,12 +10,10 @@
     }
   },
   "scripts": {
-    "test": "bun test",
     "check-types": "tsgo --noEmit"
   },
   "dependencies": {
-    "@dawn/domain": "workspace:*",
-    "@dawn/sync": "workspace:*"
+    "@dawn/domain": "workspace:*"
   },
   "devDependencies": {
     "@dawn/config": "workspace:*",

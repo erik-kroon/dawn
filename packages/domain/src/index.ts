@@ -76,6 +76,7 @@ export type Transaction = {
   categoryId: string | null;
   reviewState: TransactionReviewState;
   duplicateKey?: string | null;
+  updatedAt?: string | null;
 };
 
 export type Category = {

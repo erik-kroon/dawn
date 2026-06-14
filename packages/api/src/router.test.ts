@@ -123,6 +123,26 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
     );
   }
 
+  async listTransactionsForSync(input: { teamId: string; cursor?: string | null }) {
+    const cursorTime = input.cursor ? new Date(input.cursor).getTime() : null;
+
+    return [...this.transactions.values()]
+      .filter((transaction) => transaction.teamId === input.teamId)
+      .filter((transaction) => {
+        if (cursorTime === null) {
+          return true;
+        }
+
+        return transaction.updatedAt
+          ? new Date(transaction.updatedAt).getTime() > cursorTime
+          : false;
+      })
+      .sort(
+        (left, right) =>
+          new Date(left.updatedAt ?? 0).getTime() - new Date(right.updatedAt ?? 0).getTime(),
+      );
+  }
+
   async createLedgerTransactionForTeam(input: {
     draft: LedgerTransactionDraft;
     duplicateKey: string;
@@ -141,6 +161,7 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
       categoryId: input.draft.categoryId ?? null,
       reviewState: "needs_review" as const,
       duplicateKey: input.duplicateKey,
+      updatedAt: new Date().toISOString(),
     };
     this.transactions.set(transaction.id, transaction);
     return transaction;
@@ -423,6 +444,86 @@ describe("appRouter", () => {
     ).rejects.toMatchObject({
       code: "NOT_FOUND",
       message: "Transaction not found",
+    });
+  });
+
+  test("returns cursor-scoped transaction sync changes through the protected router", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.teams.set("team_2", "Other Team");
+    repository.memberships.set("user_1:team_1", "viewer");
+    repository.transactions.set("txn_old", {
+      id: "txn_old",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Old transaction",
+      postedAt: "2026-06-13",
+      money: { amountMinor: -500, currency: "USD" },
+      categoryId: null,
+      reviewState: "needs_review",
+      updatedAt: "2026-06-14T09:00:00.000Z",
+    });
+    repository.transactions.set("txn_new", {
+      id: "txn_new",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "New transaction",
+      postedAt: "2026-06-15",
+      money: { amountMinor: -1200, currency: "USD" },
+      categoryId: "cat_software",
+      reviewState: "reviewed",
+      updatedAt: "2026-06-15T09:00:00.000Z",
+    });
+    repository.transactions.set("txn_other", {
+      id: "txn_other",
+      teamId: "team_2",
+      accountId: "acct_2",
+      description: "Other team",
+      postedAt: "2026-06-15",
+      money: { amountMinor: -1200, currency: "USD" },
+      categoryId: null,
+      reviewState: "needs_review",
+      updatedAt: "2026-06-16T09:00:00.000Z",
+    });
+    const router = await createTestRouter(repository);
+
+    const response = await call(
+      router.sync.transactions,
+      { teamId: "team_1", cursor: "2026-06-14T12:00:00.000Z" },
+      {
+        context: testContext({ id: "user_1", email: "viewer@example.com" }),
+      },
+    );
+
+    expect(response).toMatchObject({
+      collection: "transactions",
+      teamId: "team_1",
+      cursor: "2026-06-15T09:00:00.000Z",
+      conflictPolicy: "server_wins_for_financial_state",
+    });
+    expect(
+      response.changes.map((change) => (change.type === "upsert" ? change.record.id : "")),
+    ).toEqual(["txn_new"]);
+  });
+
+  test("maps sync permission denials to typed oRPC errors", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.teams.set("team_2", "Other Team");
+    repository.memberships.set("user_1:team_1", "viewer");
+    const router = await createTestRouter(repository);
+
+    await expect(
+      call(
+        router.sync.transactions,
+        { teamId: "team_2", cursor: null },
+        {
+          context: testContext({ id: "user_1", email: "viewer@example.com" }),
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: "You cannot sync transactions for this team",
     });
   });
 

@@ -98,6 +98,26 @@ class MemoryLedgerRepository implements TransactionReviewRepository {
     );
   }
 
+  async listTransactionsForSync(input: { teamId: string; cursor?: string | null }) {
+    const cursorTime = input.cursor ? new Date(input.cursor).getTime() : null;
+
+    return [...this.transactions.values()]
+      .filter((transaction) => transaction.teamId === input.teamId)
+      .filter((transaction) => {
+        if (cursorTime === null) {
+          return true;
+        }
+
+        return transaction.updatedAt
+          ? new Date(transaction.updatedAt).getTime() > cursorTime
+          : false;
+      })
+      .sort(
+        (left, right) =>
+          new Date(left.updatedAt ?? 0).getTime() - new Date(right.updatedAt ?? 0).getTime(),
+      );
+  }
+
   async createLedgerTransactionForTeam(input: {
     draft: LedgerTransactionDraft;
     duplicateKey: string;
@@ -116,6 +136,7 @@ class MemoryLedgerRepository implements TransactionReviewRepository {
       categoryId: input.draft.categoryId ?? null,
       reviewState: "needs_review" as const,
       duplicateKey: input.duplicateKey,
+      updatedAt: new Date().toISOString(),
     };
     this.transactions.set(transaction.id, transaction);
     return transaction;

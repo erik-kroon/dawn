@@ -18,7 +18,7 @@ import type {
   Transaction,
 } from "@dawn/domain";
 import { ledgerDuplicateKey } from "@dawn/domain";
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, lte } from "drizzle-orm";
 
 import { db } from "./index";
 import * as schema from "./schema";
@@ -262,6 +262,22 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
       .from(schema.transaction)
       .where(and(...conditions))
       .orderBy(desc(schema.transaction.postedAt));
+
+    return transactions.map(mapTransaction);
+  }
+
+  async listTransactionsForSync(input: { teamId: string; cursor?: string | null }) {
+    const conditions = [eq(schema.transaction.teamId, input.teamId)];
+
+    if (input.cursor) {
+      conditions.push(gt(schema.transaction.updatedAt, new Date(input.cursor)));
+    }
+
+    const transactions = await this.client
+      .select()
+      .from(schema.transaction)
+      .where(and(...conditions))
+      .orderBy(asc(schema.transaction.updatedAt));
 
     return transactions.map(mapTransaction);
   }
@@ -655,6 +671,7 @@ function mapTransaction(transaction: typeof schema.transaction.$inferSelect): Tr
     categoryId: transaction.categoryId,
     reviewState: transaction.reviewState === "reviewed" ? "reviewed" : "needs_review",
     duplicateKey: transaction.duplicateKey,
+    updatedAt: transaction.updatedAt.toISOString(),
   };
 }
 

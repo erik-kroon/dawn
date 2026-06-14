@@ -7,13 +7,15 @@ import {
   CardTitle,
 } from "@dawn/ui/components/card";
 import { formatMoney, type Money } from "@dawn/domain";
+import type { TransactionSyncRecord } from "@dawn/sync";
 import { Input } from "@dawn/ui/components/input";
 import { Label } from "@dawn/ui/components/label";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { authClient } from "@/lib/auth-client";
+import { useTransactionSync } from "@/sync/transactions";
 import { orpc } from "@/utils/orpc";
 
 export const Route = createFileRoute("/_auth/dashboard")({
@@ -39,13 +41,29 @@ function RouteComponent() {
     currency: "",
     categoryId: "",
   });
+  const [syncReviewError, setSyncReviewError] = useState<string | null>(null);
+  const [syncReviewingId, setSyncReviewingId] = useState<string | null>(null);
 
   const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: selectedTeamId } }));
   const currentTeamId = selectedTeamId ?? teams.data?.currentTeamId;
   const currentTeam = teams.data?.teams.find((team) => team.id === currentTeamId);
+  const transactionSync = useTransactionSync(currentTeamId);
   const transactionReview = useQuery(
     orpc.transactionReview.list.queryOptions({ input: { teamId: currentTeamId } }),
   );
+  const syncedTransactions = useMemo(
+    () =>
+      [...transactionSync.transactions].sort(
+        (left, right) =>
+          new Date(right.postedAt).getTime() - new Date(left.postedAt).getTime() ||
+          new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+      ),
+    [transactionSync.transactions],
+  );
+  const visibleTransactions =
+    syncedTransactions.length > 0 || transactionSync.isReady
+      ? syncedTransactions
+      : (transactionReview.data?.transactions ?? []);
   const ledgerSummary = useQuery({
     ...orpc.ledger.summary.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
@@ -61,6 +79,7 @@ function RouteComponent() {
         await queryClient.invalidateQueries({
           queryKey: orpc.transactionReview.list.queryKey(),
         });
+        await transactionSync.refetch();
       },
     }),
   );
@@ -100,6 +119,7 @@ function RouteComponent() {
           queryKey: orpc.transactionReview.list.queryKey(),
         });
         await queryClient.invalidateQueries({ queryKey: orpc.ledger.summary.queryKey() });
+        await transactionSync.refetch();
       },
     }),
   );
@@ -493,16 +513,38 @@ function RouteComponent() {
                 <span className="font-medium">{transactionReview.data.teamName}</span>
                 <span className="text-muted-foreground">
                   Sync: {transactionReview.data.sync.collection} ·{" "}
-                  {transactionReview.data.sync.conflictPolicy}
+                  {transactionReview.data.sync.conflictPolicy} · {transactionSync.status}
                 </span>
               </div>
               <div className="overflow-hidden border">
-                {transactionReview.data.transactions.map((transaction) => (
+                {visibleTransactions.map((transaction) => (
                   <TransactionReviewRow
                     key={transaction.id}
                     categories={transactionReview.data.categories}
-                    disabled={reviewMutation.isPending}
-                    onReview={(categoryId) => {
+                    disabled={reviewMutation.isPending || syncReviewingId === transaction.id}
+                    onReview={async (categoryId) => {
+                      const syncedRecord =
+                        transactionSync.collection?.get(transaction.id) ?? transaction;
+
+                      if (isTransactionSyncRecord(syncedRecord)) {
+                        setSyncReviewError(null);
+                        setSyncReviewingId(transaction.id);
+
+                        try {
+                          await transactionSync.reviewTransaction(syncedRecord, categoryId);
+                          await queryClient.invalidateQueries({
+                            queryKey: orpc.ledger.summary.queryKey(),
+                          });
+                        } catch (error) {
+                          setSyncReviewError(errorMessage(error));
+                          await transactionSync.refetch();
+                        } finally {
+                          setSyncReviewingId(null);
+                        }
+
+                        return;
+                      }
+
                       reviewMutation.mutate({
                         transactionId: transaction.id,
                         categoryId,
@@ -514,6 +556,9 @@ function RouteComponent() {
                   />
                 ))}
               </div>
+              {syncReviewError ? (
+                <p className="text-sm text-destructive">{syncReviewError}</p>
+              ) : null}
               {reviewMutation.error ? (
                 <p className="text-sm text-destructive">{reviewMutation.error.message}</p>
               ) : null}
@@ -611,7 +656,7 @@ function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
 type TransactionReviewRowProps = {
   categories: { id: string; name: string }[];
   disabled: boolean;
-  onReview: (categoryId: string) => void;
+  onReview: (categoryId: string) => void | Promise<void>;
   transaction: {
     id: string;
     description: string;
@@ -619,6 +664,7 @@ type TransactionReviewRowProps = {
     money: Money;
     categoryId: string | null;
     reviewState: "needs_review" | "reviewed";
+    updatedAt?: string | null;
   };
 };
 
@@ -658,10 +704,20 @@ function TransactionReviewRow({
             </option>
           ))}
         </select>
-        <Button disabled={disabled || !canReview} onClick={() => onReview(categoryId)}>
+        <Button disabled={disabled || !canReview} onClick={() => void onReview(categoryId)}>
           Review
         </Button>
       </div>
     </div>
   );
+}
+
+function isTransactionSyncRecord(transaction: {
+  updatedAt?: string | null;
+}): transaction is TransactionSyncRecord {
+  return typeof transaction.updatedAt === "string" && transaction.updatedAt.length > 0;
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Transaction review failed";
 }
