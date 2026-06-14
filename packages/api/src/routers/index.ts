@@ -9,6 +9,7 @@ import {
   listTeams,
   listTransactionReviewWorkspace,
   reviewTransaction,
+  type TransactionReviewRepository,
   updateTeamMemberRole,
 } from "@dawn/app";
 import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
@@ -16,7 +17,9 @@ import { z } from "zod";
 
 import { protectedProcedure, publicProcedure } from "../index";
 
-const transactionReviewRepository = new DrizzleTransactionReviewRepository();
+export type AppRouterDependencies = {
+  transactionReviewRepository: TransactionReviewRepository;
+};
 
 const reviewTransactionInput = z.object({
   teamId: z.string().min(1),
@@ -64,140 +67,156 @@ function mapAppError(error: unknown): never {
   throw error;
 }
 
-export const appRouter = {
-  healthCheck: publicProcedure.handler(() => {
-    return "OK";
-  }),
-  teams: {
-    list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
-      try {
-        return await listTeams(transactionReviewRepository, {
-          actor: { id: context.session.user.id, type: "user" },
-          requestId: context.requestId,
-          teamId: input?.teamId,
-        });
-      } catch (error) {
-        mapAppError(error);
-      }
+function createDefaultDependencies(): AppRouterDependencies {
+  return {
+    transactionReviewRepository: new DrizzleTransactionReviewRepository(),
+  };
+}
+
+export function createAppRouter(dependencies: AppRouterDependencies = createDefaultDependencies()) {
+  const { transactionReviewRepository } = dependencies;
+
+  return {
+    healthCheck: publicProcedure.handler(() => {
+      return "OK";
     }),
-    create: protectedProcedure.input(createTeamInput).handler(async ({ context, input }) => {
-      try {
-        return await createTeam(
-          transactionReviewRepository,
-          {
+    teams: {
+      list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
+        try {
+          return await listTeams(transactionReviewRepository, {
             actor: { id: context.session.user.id, type: "user" },
             requestId: context.requestId,
-          },
-          input,
-        );
-      } catch (error) {
-        mapAppError(error);
-      }
-    }),
-    directory: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
-      try {
-        return await listTeamDirectory(transactionReviewRepository, {
-          actor: {
-            id: context.session.user.id,
-            type: "user",
-            email: context.session.user.email,
-          },
-          requestId: context.requestId,
-          teamId: input?.teamId,
-        });
-      } catch (error) {
-        mapAppError(error);
-      }
-    }),
-    invite: protectedProcedure.input(inviteTeamMemberInput).handler(async ({ context, input }) => {
-      try {
-        return await inviteTeamMember(
-          transactionReviewRepository,
-          {
+            teamId: input?.teamId,
+          });
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+      create: protectedProcedure.input(createTeamInput).handler(async ({ context, input }) => {
+        try {
+          return await createTeam(
+            transactionReviewRepository,
+            {
+              actor: { id: context.session.user.id, type: "user" },
+              requestId: context.requestId,
+            },
+            input,
+          );
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+      directory: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
+        try {
+          return await listTeamDirectory(transactionReviewRepository, {
             actor: {
               id: context.session.user.id,
               type: "user",
               email: context.session.user.email,
             },
             requestId: context.requestId,
-            teamId: input.teamId,
-          },
-          input,
-        );
-      } catch (error) {
-        mapAppError(error);
-      }
-    }),
-    acceptInvite: protectedProcedure
-      .input(acceptTeamInviteInput)
-      .handler(async ({ context, input }) => {
-        try {
-          return await acceptTeamInvite(
-            transactionReviewRepository,
-            {
-              actor: {
-                id: context.session.user.id,
-                type: "user",
-                email: context.session.user.email,
-              },
-              requestId: context.requestId,
-            },
-            input,
-          );
+            teamId: input?.teamId,
+          });
         } catch (error) {
           mapAppError(error);
         }
       }),
-    updateMemberRole: protectedProcedure
-      .input(updateTeamMemberRoleInput)
-      .handler(async ({ context, input }) => {
-        try {
-          return await updateTeamMemberRole(
-            transactionReviewRepository,
-            {
-              actor: {
-                id: context.session.user.id,
-                type: "user",
-                email: context.session.user.email,
+      invite: protectedProcedure
+        .input(inviteTeamMemberInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await inviteTeamMember(
+              transactionReviewRepository,
+              {
+                actor: {
+                  id: context.session.user.id,
+                  type: "user",
+                  email: context.session.user.email,
+                },
+                requestId: context.requestId,
+                teamId: input.teamId,
               },
-              requestId: context.requestId,
-              teamId: input.teamId,
-            },
-            input,
-          );
-        } catch (error) {
-          mapAppError(error);
-        }
-      }),
-  },
-  transactionReview: {
-    list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
-      try {
-        return await listTransactionReviewWorkspace(transactionReviewRepository, {
-          actor: { id: context.session.user.id, type: "user" },
-          requestId: context.requestId,
-          teamId: input?.teamId,
-        });
-      } catch (error) {
-        mapAppError(error);
-      }
-    }),
-    review: protectedProcedure.input(reviewTransactionInput).handler(async ({ context, input }) => {
-      try {
-        return await reviewTransaction(
-          transactionReviewRepository,
-          {
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      acceptInvite: protectedProcedure
+        .input(acceptTeamInviteInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await acceptTeamInvite(
+              transactionReviewRepository,
+              {
+                actor: {
+                  id: context.session.user.id,
+                  type: "user",
+                  email: context.session.user.email,
+                },
+                requestId: context.requestId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      updateMemberRole: protectedProcedure
+        .input(updateTeamMemberRoleInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await updateTeamMemberRole(
+              transactionReviewRepository,
+              {
+                actor: {
+                  id: context.session.user.id,
+                  type: "user",
+                  email: context.session.user.email,
+                },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    transactionReview: {
+      list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
+        try {
+          return await listTransactionReviewWorkspace(transactionReviewRepository, {
             actor: { id: context.session.user.id, type: "user" },
             requestId: context.requestId,
-            teamId: input.teamId,
-          },
-          input,
-        );
-      } catch (error) {
-        mapAppError(error);
-      }
-    }),
-  },
-};
-export type AppRouter = typeof appRouter;
-export type AppRouterClient = RouterClient<typeof appRouter>;
+            teamId: input?.teamId,
+          });
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+      review: protectedProcedure
+        .input(reviewTransactionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await reviewTransaction(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+  };
+}
+
+export const appRouter = createAppRouter();
+export type AppRouter = ReturnType<typeof createAppRouter>;
+export type AppRouterClient = RouterClient<AppRouter>;
