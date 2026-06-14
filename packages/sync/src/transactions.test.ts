@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   buildTransactionSyncInvalidation,
   buildTransactionSyncResponse,
+  createTransactionSyncSubscriptionAck,
   createOptimisticTransactionReview,
+  isTransactionSyncInvalidationEvent,
+  parseTransactionSyncSubscription,
   transactionSyncRecordsFromChanges,
   type TransactionSyncRecord,
 } from "./index";
@@ -52,13 +55,33 @@ describe("transaction sync collection", () => {
   });
 
   test("creates invalidation event shape for realtime fanout", () => {
-    expect(buildTransactionSyncInvalidation({ teamId: "team_1", transactions })).toEqual({
+    const event = buildTransactionSyncInvalidation({ teamId: "team_1", transactions });
+
+    expect(event).toEqual({
       type: "sync.transactions.invalidated",
       teamId: "team_1",
       collection: "transactions",
       cursor: "2026-06-15T10:00:00.000Z",
       changedIds: ["txn_1", "txn_2"],
     });
+    expect(isTransactionSyncInvalidationEvent(event)).toBe(true);
+  });
+
+  test("models realtime subscription handshake messages", () => {
+    expect(parseTransactionSyncSubscription({ teamId: "team_1" })).toEqual({
+      type: "sync.transactions.subscribe",
+      teamId: "team_1",
+      collection: "transactions",
+    });
+    expect(createTransactionSyncSubscriptionAck({ teamId: "team_1" })).toEqual({
+      type: "sync.transactions.subscribed",
+      teamId: "team_1",
+      collection: "transactions",
+      reconnect: "refetch_by_cursor",
+    });
+    expect(() =>
+      parseTransactionSyncSubscription({ teamId: "team_1", collection: "documents" }),
+    ).toThrow("Unsupported sync collection");
   });
 
   test("models optimistic review with rollback state", () => {

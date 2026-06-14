@@ -41,6 +41,29 @@ export type TransactionSyncInvalidationEvent = {
   changedIds: string[];
 };
 
+export type TransactionSyncSubscription = {
+  type: "sync.transactions.subscribe";
+  teamId: string;
+  collection: TransactionSyncCollectionId;
+};
+
+export type TransactionSyncSubscriptionAck = {
+  type: "sync.transactions.subscribed";
+  teamId: string;
+  collection: TransactionSyncCollectionId;
+  reconnect: "refetch_by_cursor";
+};
+
+export type TransactionSyncErrorEvent = {
+  type: "sync.error";
+  message: string;
+};
+
+export type TransactionSyncRealtimeEvent =
+  | TransactionSyncInvalidationEvent
+  | TransactionSyncSubscriptionAck
+  | TransactionSyncErrorEvent;
+
 export type OptimisticTransactionReview = {
   record: TransactionSyncRecord;
   rollback: TransactionSyncRecord;
@@ -84,6 +107,67 @@ export function buildTransactionSyncInvalidation(input: {
   };
 }
 
+export function createTransactionSyncInvalidation(input: {
+  teamId: string;
+  cursor?: string | null;
+  changedIds: readonly string[];
+}): TransactionSyncInvalidationEvent {
+  return {
+    type: transactionSyncCollection.invalidationEventType,
+    teamId: input.teamId,
+    collection: transactionSyncCollection.id,
+    cursor: input.cursor ?? null,
+    changedIds: [...input.changedIds],
+  };
+}
+
+export function createTransactionSyncSubscriptionAck(input: {
+  teamId: string;
+}): TransactionSyncSubscriptionAck {
+  return {
+    type: "sync.transactions.subscribed",
+    teamId: input.teamId,
+    collection: transactionSyncCollection.id,
+    reconnect: "refetch_by_cursor",
+  };
+}
+
+export function isTransactionSyncInvalidationEvent(
+  input: unknown,
+): input is TransactionSyncInvalidationEvent {
+  if (!isRecord(input)) {
+    return false;
+  }
+
+  return (
+    input.type === transactionSyncCollection.invalidationEventType &&
+    typeof input.teamId === "string" &&
+    input.collection === transactionSyncCollection.id &&
+    (typeof input.cursor === "string" || input.cursor === null) &&
+    Array.isArray(input.changedIds) &&
+    input.changedIds.every((changedId) => typeof changedId === "string")
+  );
+}
+
+export function parseTransactionSyncSubscription(input: {
+  teamId?: string | null;
+  collection?: string | null;
+}): TransactionSyncSubscription {
+  if (!input.teamId) {
+    throw new Error("Transaction sync subscription requires a teamId");
+  }
+
+  if (input.collection && input.collection !== transactionSyncCollection.id) {
+    throw new Error("Unsupported sync collection");
+  }
+
+  return {
+    type: "sync.transactions.subscribe",
+    teamId: input.teamId,
+    collection: transactionSyncCollection.id,
+  };
+}
+
 export function transactionSyncRecordsFromChanges(changes: readonly TransactionSyncChange[]) {
   return changes.flatMap((change) => (change.type === "upsert" ? [change.record] : []));
 }
@@ -121,4 +205,8 @@ function maxIsoCursor(left: string | null, right: string) {
   }
 
   return new Date(left).getTime() >= new Date(right).getTime() ? left : right;
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null;
 }

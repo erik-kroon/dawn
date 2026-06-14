@@ -513,7 +513,8 @@ function RouteComponent() {
                 <span className="font-medium">{transactionReview.data.teamName}</span>
                 <span className="text-muted-foreground">
                   Sync: {transactionReview.data.sync.collection} ·{" "}
-                  {transactionReview.data.sync.conflictPolicy} · {transactionSync.status}
+                  {transactionReview.data.sync.conflictPolicy} · {transactionSync.status} ·{" "}
+                  {transactionSync.realtimeStatus}
                 </span>
               </div>
               <div className="overflow-hidden border">

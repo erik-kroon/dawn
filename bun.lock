@@ -43,6 +43,7 @@
         "@dawn/env": "workspace:*",
         "@dawn/infra": "workspace:*",
         "@dawn/jobs": "workspace:*",
+        "@dawn/sync": "workspace:*",
         "@orpc/openapi": "catalog:",
         "@orpc/server": "catalog:",
         "@orpc/zod": "catalog:",
