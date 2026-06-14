@@ -135,6 +135,7 @@ pass, and the implementing agent has inspected the diff.
 | `5f81d86` | Transaction review tracer foundation | Hardened exact money formatting, domain review transition, tenant-scoped repository access, and command-aware idempotency. |
 | `71bee81` | Team permission foundation           | Added PRD-shaped role permissions, team access resolution, persisted invites, invite API/UI, and invite verification.      |
 | `152fa2d` | Team membership lifecycle            | Added invite acceptance, membership creation, managed role updates, lifecycle guards, API routes, and persistence methods. |
+| `b89a73f` | Team directory management            | Added team member/pending-invite directory query, manager-only access checks, API route, and dashboard role controls.      |
 
 ## Implementation Notes
 
