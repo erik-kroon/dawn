@@ -1,11 +1,10 @@
 import type {
   ActorTeam,
   IdempotencyResult,
-  ReviewTransactionResult,
-  ReviewWorkspace,
+  ReviewWorkspaceData,
   TransactionReviewRepository,
 } from "@dawn/app";
-import type { Actor, Category, TeamRole, Transaction } from "@dawn/domain";
+import type { Actor, Category, TeamInvite, TeamRole, Transaction } from "@dawn/domain";
 import { and, desc, eq } from "drizzle-orm";
 
 import { db } from "./index";
@@ -14,8 +13,6 @@ import * as schema from "./schema";
 type Database = typeof db;
 type TransactionClient = Parameters<Parameters<Database["transaction"]>[0]>[0];
 type QueryClient = Database | TransactionClient;
-
-const operation = "transaction.review";
 
 export class DrizzleTransactionReviewRepository implements TransactionReviewRepository {
   constructor(private readonly client: QueryClient = db) {}
@@ -99,7 +96,7 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     return { id: teamId, name: input.name, role: "owner" };
   }
 
-  async listWorkspace(_actor: Actor, teamId: string): Promise<ReviewWorkspace> {
+  async listWorkspace(_actor: Actor, teamId: string): Promise<ReviewWorkspaceData> {
     const [team] = await this.client
       .select({ id: schema.team.id, name: schema.team.name })
       .from(schema.team)
@@ -171,7 +168,7 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     return category ? mapCategory(category) : null;
   }
 
-  async getIdempotencyResult(teamId: string, actorId: string, key: string) {
+  async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
     const [record] = await this.client
       .select({
         fingerprint: schema.idempotencyKey.fingerprint,
@@ -191,8 +188,8 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     return record
       ? ({
           fingerprint: record.fingerprint,
-          result: record.result as ReviewTransactionResult,
-        } satisfies IdempotencyResult<ReviewTransactionResult>)
+          result: record.result,
+        } satisfies IdempotencyResult<unknown>)
       : null;
   }
 
@@ -228,7 +225,9 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     teamId: string;
     actorId: string;
     requestId: string;
-    transactionId: string;
+    action: string;
+    entityType: string;
+    entityId: string;
     metadata: Record<string, unknown>;
   }) {
     await this.client.insert(schema.auditLog).values({
@@ -236,9 +235,9 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
       teamId: input.teamId,
       actorId: input.actorId,
       requestId: input.requestId,
-      action: "transaction.reviewed",
-      entityType: "transaction",
-      entityId: input.transactionId,
+      action: input.action,
+      entityType: input.entityType,
+      entityId: input.entityId,
       metadata: input.metadata,
     });
   }
@@ -247,14 +246,15 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     teamId: string;
     actorId: string;
     requestId: string;
-    transactionId: string;
+    type: string;
+    version: number;
     payload: Record<string, unknown>;
   }) {
     await this.client.insert(schema.outboxEvent).values({
       id: crypto.randomUUID(),
       teamId: input.teamId,
-      type: "transaction.reviewed",
-      version: 1,
+      type: input.type,
+      version: input.version,
       payload: {
         ...input.payload,
         actorId: input.actorId,
@@ -266,19 +266,47 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
   async saveIdempotencyResult(input: {
     teamId: string;
     actorId: string;
+    operation: string;
     key: string;
     fingerprint: string;
-    result: ReviewTransactionResult;
+    result: unknown;
   }) {
     await this.client.insert(schema.idempotencyKey).values({
       id: crypto.randomUUID(),
       teamId: input.teamId,
       actorId: input.actorId,
       key: input.key,
-      operation,
+      operation: input.operation,
       fingerprint: input.fingerprint,
-      result: input.result,
+      result: input.result as Record<string, unknown>,
     });
+  }
+
+  async createTeamInvite(input: {
+    teamId: string;
+    email: string;
+    role: TeamRole;
+    invitedByActorId: string;
+    expiresAt: Date;
+  }) {
+    const [invite] = await this.client
+      .insert(schema.teamInvite)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        email: input.email,
+        role: input.role,
+        status: "pending",
+        invitedByActorId: input.invitedByActorId,
+        expiresAt: input.expiresAt,
+      })
+      .returning();
+
+    if (!invite) {
+      throw new Error("Team invite was not created");
+    }
+
+    return mapTeamInvite(invite);
   }
 }
 
@@ -302,5 +330,17 @@ function mapTransaction(transaction: typeof schema.transaction.$inferSelect): Tr
     },
     categoryId: transaction.categoryId,
     reviewState: transaction.reviewState === "reviewed" ? "reviewed" : "needs_review",
+  };
+}
+
+function mapTeamInvite(invite: typeof schema.teamInvite.$inferSelect): TeamInvite {
+  return {
+    id: invite.id,
+    teamId: invite.teamId,
+    email: invite.email,
+    role: invite.role as TeamRole,
+    status: invite.status === "pending" ? "pending" : (invite.status as TeamInvite["status"]),
+    invitedByActorId: invite.invitedByActorId,
+    expiresAt: invite.expiresAt.toISOString(),
   };
 }

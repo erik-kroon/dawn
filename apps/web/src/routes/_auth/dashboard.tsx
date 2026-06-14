@@ -7,6 +7,8 @@ import {
   CardTitle,
 } from "@dawn/ui/components/card";
 import { formatMoney, type Money } from "@dawn/domain";
+import { Input } from "@dawn/ui/components/input";
+import { Label } from "@dawn/ui/components/label";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -25,9 +27,12 @@ function RouteComponent() {
     () => localStorage.getItem("dawn:selected-team-id") ?? undefined,
   );
   const [newTeamName, setNewTeamName] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<TeamInviteRole>("member");
 
   const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: selectedTeamId } }));
   const currentTeamId = selectedTeamId ?? teams.data?.currentTeamId;
+  const currentTeam = teams.data?.teams.find((team) => team.id === currentTeamId);
   const transactionReview = useQuery(
     orpc.transactionReview.list.queryOptions({ input: { teamId: currentTeamId } }),
   );
@@ -37,6 +42,14 @@ function RouteComponent() {
         await queryClient.invalidateQueries({
           queryKey: orpc.transactionReview.list.queryKey(),
         });
+      },
+    }),
+  );
+  const inviteTeamMemberMutation = useMutation(
+    orpc.teams.invite.mutationOptions({
+      onSuccess: () => {
+        setInviteEmail("");
+        setInviteRole("member");
       },
     }),
   );
@@ -101,7 +114,7 @@ function RouteComponent() {
         </CardHeader>
         <CardContent>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-            <label className="flex flex-1 flex-col gap-1 text-sm">
+            <Label className="flex flex-1 flex-col gap-1 text-sm">
               Current team
               <select
                 className="h-9 rounded-none border bg-background px-2 text-sm"
@@ -118,16 +131,15 @@ function RouteComponent() {
                   </option>
                 ))}
               </select>
-            </label>
-            <label className="flex flex-1 flex-col gap-1 text-sm">
+            </Label>
+            <Label className="flex flex-1 flex-col gap-1 text-sm">
               New team
-              <input
-                className="h-9 rounded-none border bg-background px-2 text-sm"
+              <Input
                 onChange={(event) => setNewTeamName(event.target.value)}
                 placeholder="Team name"
                 value={newTeamName}
               />
-            </label>
+            </Label>
             <Button
               disabled={createTeamMutation.isPending || !newTeamName.trim()}
               onClick={() => createTeamMutation.mutate({ name: newTeamName })}
@@ -137,6 +149,61 @@ function RouteComponent() {
           </div>
           {createTeamMutation.error ? (
             <p className="mt-2 text-sm text-destructive">{createTeamMutation.error.message}</p>
+          ) : null}
+          {transactionReview.data ? (
+            <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-[1fr_1fr]">
+              <div>
+                <p className="text-sm font-medium">Resolved access</p>
+                <p className="text-sm text-muted-foreground">
+                  {currentTeam?.name ?? transactionReview.data.teamName} ·{" "}
+                  {transactionReview.data.role}
+                </p>
+              </div>
+              {transactionReview.data.permissions.includes("team.manage") ? (
+                <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                  <Input
+                    aria-label="Invite email"
+                    onChange={(event) => setInviteEmail(event.target.value)}
+                    placeholder="teammate@example.com"
+                    value={inviteEmail}
+                  />
+                  <select
+                    aria-label="Invite role"
+                    className="h-9 rounded-none border bg-background px-2 text-sm"
+                    onChange={(event) => setInviteRole(event.target.value as TeamInviteRole)}
+                    value={inviteRole}
+                  >
+                    {teamInviteRoles.map((role) => (
+                      <option key={role} value={role}>
+                        {role}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    disabled={
+                      inviteTeamMemberMutation.isPending ||
+                      !inviteEmail.trim() ||
+                      !transactionReview.data.teamId
+                    }
+                    onClick={() =>
+                      inviteTeamMemberMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        email: inviteEmail,
+                        role: inviteRole,
+                        idempotencyKey: crypto.randomUUID(),
+                      })
+                    }
+                  >
+                    Invite
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {inviteTeamMemberMutation.error ? (
+            <p className="mt-2 text-sm text-destructive">
+              {inviteTeamMemberMutation.error.message}
+            </p>
           ) : null}
         </CardContent>
       </Card>
@@ -188,6 +255,9 @@ function RouteComponent() {
     </div>
   );
 }
+
+const teamInviteRoles = ["admin", "member", "accountant", "viewer"] as const;
+type TeamInviteRole = (typeof teamInviteRoles)[number];
 
 type TransactionReviewRowProps = {
   categories: { id: string; name: string }[];

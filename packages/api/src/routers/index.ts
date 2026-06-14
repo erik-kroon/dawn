@@ -3,6 +3,7 @@ import { ORPCError } from "@orpc/server";
 import {
   AppError,
   createTeam,
+  inviteTeamMember,
   listTeams,
   listTransactionReviewWorkspace,
   reviewTransaction,
@@ -29,6 +30,15 @@ const teamContextInput = z
 
 const createTeamInput = z.object({
   name: z.string().min(1),
+});
+
+const inviteTeamRoleInput = z.enum(["admin", "member", "accountant", "viewer"]);
+
+const inviteTeamMemberInput = z.object({
+  teamId: z.string().min(1),
+  email: z.email(),
+  role: inviteTeamRoleInput,
+  idempotencyKey: z.string().min(1),
 });
 
 function mapAppError(error: unknown): never {
@@ -62,6 +72,21 @@ export const appRouter = {
           {
             actor: { id: context.session.user.id, type: "user" },
             requestId: context.requestId,
+          },
+          input,
+        );
+      } catch (error) {
+        mapAppError(error);
+      }
+    }),
+    invite: protectedProcedure.input(inviteTeamMemberInput).handler(async ({ context, input }) => {
+      try {
+        return await inviteTeamMember(
+          transactionReviewRepository,
+          {
+            actor: { id: context.session.user.id, type: "user" },
+            requestId: context.requestId,
+            teamId: input.teamId,
           },
           input,
         );

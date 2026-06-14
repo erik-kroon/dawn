@@ -5,7 +5,21 @@ export type Actor = {
 
 export type TeamRole = "owner" | "admin" | "member" | "accountant" | "viewer";
 
-export type Permission = "transactions:read" | "transactions:review";
+export type Permission =
+  | "transactions.read"
+  | "transactions.write"
+  | "transactions.categorize"
+  | "documents.read"
+  | "documents.write"
+  | "invoices.read"
+  | "invoices.write"
+  | "invoices.send"
+  | "bank_connections.manage"
+  | "team.manage"
+  | "settings.billing"
+  | "api_keys.manage"
+  | "assistant.use"
+  | "assistant.mutate";
 
 export type Team = {
   id: string;
@@ -16,6 +30,18 @@ export type TeamMembership = {
   teamId: string;
   userId: string;
   role: TeamRole;
+};
+
+export type TeamInviteStatus = "pending" | "accepted" | "revoked" | "expired";
+
+export type TeamInvite = {
+  id: string;
+  teamId: string;
+  email: string;
+  role: TeamRole;
+  status: TeamInviteStatus;
+  invitedByActorId: string;
+  expiresAt: string;
 };
 
 export type Money = {
@@ -79,15 +105,71 @@ export type TransactionReviewChange = {
 };
 
 export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
-  owner: ["transactions:read", "transactions:review"],
-  admin: ["transactions:read", "transactions:review"],
-  member: ["transactions:read", "transactions:review"],
-  accountant: ["transactions:read", "transactions:review"],
-  viewer: ["transactions:read"],
+  owner: [
+    "transactions.read",
+    "transactions.write",
+    "transactions.categorize",
+    "documents.read",
+    "documents.write",
+    "invoices.read",
+    "invoices.write",
+    "invoices.send",
+    "bank_connections.manage",
+    "team.manage",
+    "settings.billing",
+    "api_keys.manage",
+    "assistant.use",
+    "assistant.mutate",
+  ],
+  admin: [
+    "transactions.read",
+    "transactions.write",
+    "transactions.categorize",
+    "documents.read",
+    "documents.write",
+    "invoices.read",
+    "invoices.write",
+    "invoices.send",
+    "bank_connections.manage",
+    "team.manage",
+    "api_keys.manage",
+    "assistant.use",
+    "assistant.mutate",
+  ],
+  member: [
+    "transactions.read",
+    "transactions.write",
+    "transactions.categorize",
+    "documents.read",
+    "documents.write",
+    "invoices.read",
+    "invoices.write",
+    "assistant.use",
+  ],
+  accountant: [
+    "transactions.read",
+    "transactions.categorize",
+    "documents.read",
+    "documents.write",
+    "invoices.read",
+    "invoices.write",
+    "assistant.use",
+  ],
+  viewer: ["transactions.read", "documents.read", "invoices.read", "assistant.use"],
 };
 
 export function roleHasPermission(role: TeamRole, permission: Permission) {
   return rolePermissions[role].includes(permission);
+}
+
+export function permissionsForRole(role: TeamRole) {
+  return rolePermissions[role];
+}
+
+export function assertTeamRole(role: string): asserts role is TeamRole {
+  if (!["owner", "admin", "member", "accountant", "viewer"].includes(role)) {
+    throw new Error("Unknown team role");
+  }
 }
 
 export function applyTransactionReview(

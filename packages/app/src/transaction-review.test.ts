@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Actor, Category, TeamRole, Transaction } from "@dawn/domain";
+import type { Actor, Category, TeamInvite, TeamRole, Transaction } from "@dawn/domain";
 
 import {
   AppError,
@@ -17,6 +17,7 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
   transactions = new Map<string, Transaction>();
   categories = new Map<string, Category>();
   idempotency = new Map<string, IdempotencyResult<ReviewTransactionResult>>();
+  invites = new Map<string, TeamInvite>();
 
   async withTransaction<T>(
     callback: (repository: TransactionReviewRepository) => Promise<T>,
@@ -76,8 +77,8 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
     return category?.teamId === teamId ? category : null;
   }
 
-  async getIdempotencyResult(teamId: string, actorId: string, key: string) {
-    return this.idempotency.get(`${teamId}:${actorId}:${key}`) ?? null;
+  async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
+    return this.idempotency.get(`${teamId}:${actorId}:${operation}:${key}`) ?? null;
   }
 
   async updateTransactionReviewForTeam(input: {
@@ -112,14 +113,35 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
   async saveIdempotencyResult(input: {
     teamId: string;
     actorId: string;
+    operation: string;
     key: string;
     fingerprint: string;
-    result: ReviewTransactionResult;
+    result: unknown;
   }) {
-    this.idempotency.set(`${input.teamId}:${input.actorId}:${input.key}`, {
+    this.idempotency.set(`${input.teamId}:${input.actorId}:${input.operation}:${input.key}`, {
       fingerprint: input.fingerprint,
-      result: input.result,
+      result: input.result as ReviewTransactionResult,
     });
+  }
+
+  async createTeamInvite(input: {
+    teamId: string;
+    email: string;
+    role: TeamRole;
+    invitedByActorId: string;
+    expiresAt: Date;
+  }) {
+    const invite = {
+      id: `invite_${this.invites.size + 1}`,
+      teamId: input.teamId,
+      email: input.email,
+      role: input.role,
+      status: "pending" as const,
+      invitedByActorId: input.invitedByActorId,
+      expiresAt: input.expiresAt.toISOString(),
+    };
+    this.invites.set(invite.id, invite);
+    return invite;
   }
 }
 

@@ -33,6 +33,31 @@ export const teamMembership = pgTable(
   (table) => [uniqueIndex("team_membership_team_user_idx").on(table.teamId, table.userId)],
 );
 
+export const teamInvite = pgTable(
+  "team_invite",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    role: text("role").notNull(),
+    status: text("status").default("pending").notNull(),
+    invitedByActorId: text("invited_by_actor_id").notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+    acceptedAt: timestamp("accepted_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("team_invite_pending_email_idx").on(table.teamId, table.email, table.status),
+    index("team_invite_team_status_idx").on(table.teamId, table.status),
+  ],
+);
+
 export const transactionCategory = pgTable(
   "transaction_category",
   {
@@ -137,6 +162,7 @@ export const idempotencyKey = pgTable(
 
 export const teamRelations = relations(team, ({ many }) => ({
   memberships: many(teamMembership),
+  invites: many(teamInvite),
   categories: many(transactionCategory),
   transactions: many(transaction),
 }));
