@@ -139,6 +139,7 @@ pass, and the implementing agent has inspected the diff.
 | `71bee81` | Team permission foundation           | Added PRD-shaped role permissions, team access resolution, persisted invites, invite API/UI, and invite verification.      |
 | `152fa2d` | Team membership lifecycle            | Added invite acceptance, membership creation, managed role updates, lifecycle guards, API routes, and persistence methods. |
 | `b89a73f` | Team directory management            | Added team member/pending-invite directory query, manager-only access checks, API route, and dashboard role controls.      |
+| `5587580` | Team API contract verification       | Added injectable API router factory and oRPC tests for auth, forbidden, directory data, and not-found error mapping.       |
 
 ## Implementation Notes
 
