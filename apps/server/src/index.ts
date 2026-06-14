@@ -7,11 +7,14 @@ import { createContext } from "@dawn/api/context";
 import { appRouter } from "@dawn/api/routers/index";
 import { auth } from "@dawn/auth";
 import { env } from "@dawn/env/server";
+import type { DawnCloudflareBindings } from "@dawn/infra/cloudflare";
 import { initLogger } from "evlog";
 import { createAuthMiddleware, type BetterAuthInstance } from "evlog/better-auth";
 import { evlog, type EvlogVariables } from "evlog/hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+
+export { TenantCoordinator } from "./tenant-coordinator";
 
 initLogger({
   env: { service: "dawn-server" },
@@ -22,7 +25,11 @@ const identifyUser = createAuthMiddleware(auth as BetterAuthInstance, {
   maskEmail: true,
 });
 
-const app = new Hono<EvlogVariables>();
+type ServerHonoEnv = EvlogVariables & {
+  Bindings: DawnCloudflareBindings;
+};
+
+const app = new Hono<ServerHonoEnv>();
 
 app.use(evlog());
 app.use("*", async (c, next) => {

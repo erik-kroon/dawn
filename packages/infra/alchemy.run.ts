@@ -1,20 +1,139 @@
 import alchemy from "alchemy";
-import { Vite } from "alchemy/cloudflare";
+import {
+  DurableObjectNamespace,
+  Hyperdrive,
+  KVNamespace,
+  Queue,
+  R2Bucket,
+  Vite,
+  Worker,
+} from "alchemy/cloudflare";
 import { config } from "dotenv";
+
+import type { DawnQueueMessage } from "./src/cloudflare";
+import {
+  cloudflareResourceName,
+  cloudflareStageConfig,
+  resolveCloudflareStage,
+} from "./src/environments";
 
 config({ path: "./.env" });
 config({ path: "../../apps/web/.env" });
+config({ path: "../../apps/server/.env" });
 
-const app = await alchemy("dawn");
+const stage = resolveCloudflareStage(
+  process.env.ALCHEMY_STAGE ?? process.env.CLOUDFLARE_ENVIRONMENT,
+);
+const stageConfig = cloudflareStageConfig[stage];
+const app = await alchemy("dawn", { stage });
+
+const documentsBucket = await R2Bucket("documents", {
+  name: cloudflareResourceName(stage, "documents"),
+  delete: stageConfig.deleteProtectedData,
+  dev: { remote: false },
+});
+
+const cache = await KVNamespace("cache", {
+  title: cloudflareResourceName(stage, "cache"),
+  delete: stageConfig.deleteProtectedData,
+  dev: { remote: false },
+});
+
+const jobsDeadLetterQueue = await Queue<DawnQueueMessage>("jobs-dlq", {
+  name: cloudflareResourceName(stage, "jobs-dlq"),
+  delete: stageConfig.deleteProtectedData,
+  settings: {
+    messageRetentionPeriod: 1_209_600,
+  },
+  dev: { remote: false },
+});
+
+const jobsQueue = await Queue<DawnQueueMessage>("jobs", {
+  name: cloudflareResourceName(stage, "jobs"),
+  dlq: jobsDeadLetterQueue,
+  delete: stageConfig.deleteProtectedData,
+  settings: {
+    messageRetentionPeriod: 604_800,
+  },
+  dev: { remote: false },
+});
+
+const tenantCoordinator = DurableObjectNamespace("tenant-coordinator", {
+  className: "TenantCoordinator",
+  sqlite: true,
+});
+
+const hyperdrive = maybeDatabaseUrl()
+  ? await Hyperdrive("postgres", {
+      name: cloudflareResourceName(stage, "postgres"),
+      origin: alchemy.secret(requiredEnv("DATABASE_URL")),
+      caching: { disabled: true },
+      delete: stageConfig.deleteProtectedData,
+      dev: {
+        origin: requiredEnv("DATABASE_URL"),
+        remote: false,
+      },
+    })
+  : undefined;
+
+export const api = await Worker("api", {
+  cwd: "../../apps/server",
+  entrypoint: "./src/index.ts",
+  compatibility: "node",
+  compatibilityDate: "2026-06-14",
+  name: cloudflareResourceName(stage, "api"),
+  url: stageConfig.workerUrl,
+  bindings: {
+    ENVIRONMENT: stage,
+    NODE_ENV: stage === "production" ? "production" : "development",
+    CORS_ORIGIN: requiredEnv("CORS_ORIGIN"),
+    BETTER_AUTH_URL: requiredEnv("BETTER_AUTH_URL"),
+    BETTER_AUTH_SECRET: alchemy.secret(requiredEnv("BETTER_AUTH_SECRET")),
+    POLAR_ACCESS_TOKEN: alchemy.secret(requiredEnv("POLAR_ACCESS_TOKEN")),
+    POLAR_SUCCESS_URL: requiredEnv("POLAR_SUCCESS_URL"),
+    DATABASE_URL: alchemy.secret(requiredEnv("DATABASE_URL")),
+    DAWN_DOCUMENTS: documentsBucket,
+    DAWN_JOBS: jobsQueue,
+    DAWN_JOBS_DLQ: jobsDeadLetterQueue,
+    DAWN_CACHE: cache,
+    DAWN_TENANT_COORDINATOR: tenantCoordinator,
+    ...(hyperdrive ? { DAWN_HYPERDRIVE: hyperdrive } : {}),
+  },
+  observability: {
+    enabled: true,
+    logs: { enabled: true },
+    traces: { enabled: true },
+  },
+});
 
 export const web = await Vite("web", {
   cwd: "../../apps/web",
   assets: "dist",
   bindings: {
-    VITE_SERVER_URL: alchemy.env.VITE_SERVER_URL!,
+    VITE_SERVER_URL: process.env.VITE_SERVER_URL ?? api.url ?? requiredEnv("BETTER_AUTH_URL"),
   },
 });
 
+console.log(`Stage  -> ${stage}`);
+console.log(`API    -> ${api.url ?? "(route-only)"}`);
 console.log(`Web    -> ${web.url}`);
 
 await app.finalize();
+
+function maybeDatabaseUrl() {
+  return Boolean(process.env.DATABASE_URL || alchemy.env.DATABASE_URL);
+}
+
+function requiredEnv(name: string) {
+  const value = process.env[name] ?? alchemy.env[name];
+
+  if (value) {
+    return value;
+  }
+
+  if (process.argv.includes("deploy")) {
+    throw new Error(`${name} must be set before deploying Cloudflare infrastructure`);
+  }
+
+  return `missing-${name}`;
+}

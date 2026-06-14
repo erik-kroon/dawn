@@ -40,6 +40,7 @@
         "@dawn/auth": "workspace:*",
         "@dawn/db": "workspace:*",
         "@dawn/env": "workspace:*",
+        "@dawn/infra": "workspace:*",
         "@orpc/openapi": "catalog:",
         "@orpc/server": "catalog:",
         "@orpc/zod": "catalog:",
@@ -199,7 +200,9 @@
         "zod": "catalog:",
       },
       "devDependencies": {
+        "@cloudflare/workers-types": "^4.20251213.0",
         "@dawn/config": "workspace:*",
+        "@typescript/native-preview": "catalog:",
         "alchemy": "catalog:",
         "typescript": "catalog:",
       },
