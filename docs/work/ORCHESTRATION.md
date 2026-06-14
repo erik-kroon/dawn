@@ -49,7 +49,7 @@ pass, and the implementing agent has inspected the diff.
 | 5   | CSV Transaction Import                                       | UI/API-verified foundation in progress                   | Slice 4                  | Parser tests; preview/duplicate/commit tests; typecheck/check; web build.                                                |
 | 6   | TanStack DB Sync Tracer                                      | UI/API-verified foundation in progress                   | Slices 2, 3              | Sync contract tests; API cursor tests; dashboard collection wiring; typecheck/check.                                     |
 | 7   | Cloudflare Infrastructure Baseline                           | Verified foundation, live plan blocked on CF auth        | Slice 1                  | Infra contract test; server bundle; `bun run check-types`; `bun run check`; credentialed Alchemy plan blocked.           |
-| 8   | Outbox Dispatcher And Queue Bridge                           | Not started                                              | Slices 2, 7              | Outbox transaction tests; worker/queue retry tests; manual dispatch.                                                     |
+| 8   | Outbox Dispatcher And Queue Bridge                           | Verified foundation in progress                          | Slices 2, 7              | Job contract tests; dispatcher retry/idempotency tests; typecheck/check.                                                 |
 | 9   | Tenant Durable Object Realtime Fanout                        | Not started                                              | Slices 6, 8              | Multi-client invalidation test; Worker binding typecheck.                                                                |
 | 10  | Banking Provider Adapter Interface And Mock Provider         | Not started                                              | Slices 4, 8              | Adapter contract tests; sync idempotency tests; manual mock sync.                                                        |
 | 11  | First Real Banking Provider                                  | Blocked on provider choice/credentials                   | Slice 10                 | Sandbox/provider tests; webhook signature tests; manual sandbox connection.                                              |
@@ -152,6 +152,11 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 7      | `bun run --filter server build`                                                                                                                                                                                                                                                                                              | Pass    | Server bundle built successfully; output includes `pg-cloudflare` compatibility path alongside current Postgres driver.                     |
 | 2026-06-15 slice 7      | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 204 files.                                                                                    |
 | 2026-06-15 slice 7      | `bun test packages/infra/src/environments.test.ts`                                                                                                                                                                                                                                                                           | Pass    | Final focused run after formatting: 4 tests passed.                                                                                         |
+| 2026-06-15 slice 8      | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0005_swift_pride.sql` for outbox retry metadata and persisted job runs.                               |
+| 2026-06-15 slice 8      | `bun test packages/jobs/src/index.test.ts packages/app/src/outbox-dispatch.test.ts packages/app/src/transaction-review.test.ts packages/app/src/ledger.test.ts packages/app/src/team-permissions.test.ts`                                                                                                                    | Pass    | 35 tests passed for job contracts, dispatcher retry/idempotency behavior, and existing outbox-writing mutations.                            |
+| 2026-06-15 slice 8      | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                      |
+| 2026-06-15 slice 8      | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 211 files.                                                                                    |
+| 2026-06-15 slice 8      | `bun test packages/jobs/src/index.test.ts packages/app/src/outbox-dispatch.test.ts`                                                                                                                                                                                                                                          | Pass    | Final focused rerun after the malformed-message failure path adjustment: 7 tests passed.                                                    |
 
 ## Commit Log
 
@@ -167,6 +172,7 @@ pass, and the implementing agent has inspected the diff.
 | `dc2b2d5` | CSV transaction import foundation    | Added CSV parsing, preview/commit use cases, import sessions, API routes, dashboard upload UI, and verification.           |
 | `6d7d4f3` | Transaction sync collection          | Added the sync package, cursor-scoped transaction endpoint, TanStack DB collection hook, and optimistic dashboard review.  |
 | `55adf24` | Cloudflare runtime baseline          | Added stage-aware Alchemy resources, Worker bindings, typed runtime helpers, infra contract tests, and environment docs.   |
+| `f926ce5` | Outbox dispatcher queue bridge       | Added job contracts, app dispatcher, outbox retry metadata, persisted job runs, Cloudflare queue publisher, and trigger.   |
 
 ## Implementation Notes
 
@@ -229,6 +235,15 @@ bindings available to server/runtime code, and the server exports a minimal
 TenantCoordinator class for Worker migration compatibility. Environment and
 secret expectations are documented in `docs/deployment/CLOUDFLARE.md`.
 
+Slice 8 foundation added `packages/jobs` for queue names, retry policy, outbox
+dispatch job messages, and transaction sync invalidation messages. The app layer
+now has a repository-backed dispatcher that claims due outbox events, publishes
+Cloudflare Queue messages, persists queued or failed job runs, and records retry
+metadata. Drizzle persists dispatch attempts, last error, next attempt time, and
+`job_run` rows via migration `0005_swift_pride`. The server exposes a narrow
+`POST /internal/outbox/dispatch` trigger guarded by `BETTER_AUTH_SECRET` bearer
+auth and backed by the `DAWN_JOBS` queue binding.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -236,7 +251,7 @@ secret expectations are documented in `docs/deployment/CLOUDFLARE.md`.
   local harnesses; mark only live wiring blocked.
 - `bun run check` currently runs `oxfmt --write`; inspect formatting diffs after
   using it.
-- `apps/worker`, `packages/jobs`, `packages/integrations`, and
+- `apps/worker`, `packages/integrations`, and
   `packages/ai` should be introduced only when their slice owns real contracts.
 - Checked-in server env lacks `POLAR_ACCESS_TOKEN`; full authenticated dashboard
   smoke needs valid local auth/payment env or a test-mode auth bypass.
@@ -261,3 +276,5 @@ secret expectations are documented in `docs/deployment/CLOUDFLARE.md`.
 - Slice 6 still needs authenticated two-session browser verification and a
   realtime invalidation transport in a later Durable Object/outbox slice before
   it should be marked complete.
+- Slice 8 still needs a migrated local or preview database plus a Worker-bound
+  queue to manually trigger a real persisted outbox event end to end.
