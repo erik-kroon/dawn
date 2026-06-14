@@ -43,12 +43,6 @@ export const appRouter = {
   healthCheck: publicProcedure.handler(() => {
     return "OK";
   }),
-  privateData: protectedProcedure.handler(({ context }) => {
-    return {
-      message: "This is private",
-      user: context.session?.user,
-    };
-  }),
   teams: {
     list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
       try {

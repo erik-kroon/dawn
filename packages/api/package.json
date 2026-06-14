@@ -11,14 +11,14 @@
   },
   "scripts": {},
   "dependencies": {
-    "@orpc/client": "catalog:",
-    "@orpc/openapi": "catalog:",
-    "@orpc/server": "catalog:",
-    "@orpc/zod": "catalog:",
     "@dawn/app": "workspace:*",
     "@dawn/auth": "workspace:*",
     "@dawn/db": "workspace:*",
     "@dawn/env": "workspace:*",
+    "@orpc/client": "catalog:",
+    "@orpc/openapi": "catalog:",
+    "@orpc/server": "catalog:",
+    "@orpc/zod": "catalog:",
     "dotenv": "catalog:",
     "zod": "catalog:"
   },

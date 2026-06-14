@@ -1153,4 +1153,3 @@ Raise confidence before production use of sensitive business data.
 Start with Slice 1, then immediately do Slice 2.
 
 Slice 1 prevents architectural drift. Slice 2 proves the architecture through an observable workflow without requiring real banking providers, document AI, payments, or public API complexity. If Slice 2 feels too large during execution, keep the same end-to-end shape but reduce the UI to a single transaction row and one category action.
-

@@ -71,4 +71,3 @@ Every surface should converge on the same core flow:
 
 - Full PRD: `docs/PRD.md`
 - Midday reference clone: `ref/midday`
-

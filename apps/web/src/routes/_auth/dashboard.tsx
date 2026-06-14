@@ -25,7 +25,6 @@ function RouteComponent() {
   );
   const [newTeamName, setNewTeamName] = useState("");
 
-  const privateData = useQuery(orpc.privateData.queryOptions());
   const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: selectedTeamId } }));
   const currentTeamId = selectedTeamId ?? teams.data?.currentTeamId;
   const transactionReview = useQuery(
@@ -72,8 +71,9 @@ function RouteComponent() {
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Dashboard</h1>
-          <p className="text-sm text-muted-foreground">Welcome {session.data?.user.name}</p>
-          <p className="text-xs text-muted-foreground">API: {privateData.data?.message}</p>
+          <p className="text-sm text-muted-foreground">
+            {session.data?.user.name ? `${session.data.user.name}'s workspace` : "Workspace"}
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <p className="text-sm text-muted-foreground">

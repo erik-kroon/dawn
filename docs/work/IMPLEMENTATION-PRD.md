@@ -178,4 +178,3 @@ The solution is an end-state architecture with these properties:
 This PRD is the implementation-oriented companion to the broader product PRD. It intentionally avoids locking implementation to brittle file paths. The current local equivalent of issue-tracker publication is this document marked `ready-for-agent`.
 
 Before broad implementation begins, the first useful work should create accepted ADRs and a thin tracer slice that proves the intended architecture with one small, observable business workflow. The best tracer is a team-scoped transaction review path because it exercises actor/team context, permissions, domain rules, database persistence, audit/outbox behavior, API transport, TanStack DB sync shape, and UI behavior without requiring real banking providers.
-
