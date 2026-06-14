@@ -47,7 +47,7 @@ pass, and the implementing agent has inspected the diff.
 | 3   | Team Context And Permission Model                            | API-verified foundation in progress                      | Slice 2                  | Role matrix, directory, invite, acceptance, role update, and API contract tests; `bun run check-types`; `bun run check`. |
 | 4   | Money And Ledger Core                                        | API-verified foundation in progress                      | Slice 3                  | Money/domain tests; duplicate and split tests; report fixture tests; typecheck/check.                                    |
 | 5   | CSV Transaction Import                                       | UI/API-verified foundation in progress                   | Slice 4                  | Parser tests; preview/duplicate/commit tests; typecheck/check; web build.                                                |
-| 6   | TanStack DB Sync Tracer                                      | Not started                                              | Slices 2, 3              | Sync contract tests; two-session UI/manual test; typecheck.                                                              |
+| 6   | TanStack DB Sync Tracer                                      | UI/API-verified foundation in progress                   | Slices 2, 3              | Sync contract tests; API cursor tests; dashboard collection wiring; typecheck/check.                                     |
 | 7   | Cloudflare Infrastructure Baseline                           | Not started                                              | Slice 1                  | Typecheck; deployment dry run/local equivalent; secret review.                                                           |
 | 8   | Outbox Dispatcher And Queue Bridge                           | Not started                                              | Slices 2, 7              | Outbox transaction tests; worker/queue retry tests; manual dispatch.                                                     |
 | 9   | Tenant Durable Object Realtime Fanout                        | Not started                                              | Slices 6, 8              | Multi-client invalidation test; Worker binding typecheck.                                                                |
@@ -140,6 +140,11 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 5      | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 192 files.                                                                                    |
 | 2026-06-15 slice 5      | `bun test packages/domain/src/csv-import.test.ts packages/domain/src/money.test.ts packages/domain/src/ledger.test.ts packages/app/src/ledger.test.ts packages/app/src/transaction-review.test.ts packages/app/src/team-permissions.test.ts packages/api/src/router.test.ts`                                                 | Pass    | Final focused run after formatting: 46 tests passed.                                                                                        |
 | 2026-06-15 slice 5      | `bun test packages/domain/src/csv-import.test.ts packages/app/src/ledger.test.ts packages/api/src/router.test.ts`                                                                                                                                                                                                            | Pass    | 17 changed-path tests passed after typed CSV file-error mapping.                                                                            |
+| 2026-06-15 slice 6      | `bun test packages/sync/src/transactions.test.ts packages/app/src/transaction-review.test.ts packages/api/src/router.test.ts`                                                                                                                                                                                                | Pass    | 20 tests passed for sync response/invalidation/optimistic-review contracts, app permission/cursor behavior, and oRPC route coverage.        |
+| 2026-06-15 slice 6      | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                      |
+| 2026-06-15 slice 6      | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 197 files.                                                                                    |
+| 2026-06-15 slice 6      | `bun test packages/sync/src/transactions.test.ts packages/app/src/transaction-review.test.ts packages/api/src/router.test.ts`                                                                                                                                                                                                | Pass    | Final focused run after formatting: 20 tests passed.                                                                                        |
+| 2026-06-15 slice 6      | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Final full workspace typecheck/build after formatting passed; Vite reported the existing large chunk warning.                               |
 
 ## Commit Log
 
@@ -153,6 +158,7 @@ pass, and the implementing agent has inspected the diff.
 | `5587580` | Team API contract verification       | Added injectable API router factory and oRPC tests for auth, forbidden, directory data, and not-found error mapping.       |
 | `350c577` | Money and ledger core foundation     | Added exact money arithmetic, ledger drafts, duplicate keys, report totals, app/API use cases, DB schema, and migration.   |
 | `dc2b2d5` | CSV transaction import foundation    | Added CSV parsing, preview/commit use cases, import sessions, API routes, dashboard upload UI, and verification.           |
+| `6d7d4f3` | Transaction sync collection          | Added the sync package, cursor-scoped transaction endpoint, TanStack DB collection hook, and optimistic dashboard review.  |
 
 ## Implementation Notes
 
@@ -198,6 +204,14 @@ against existing ledger transactions and within the file, persisted CSV import
 sessions, protected oRPC preview/commit routes, route tests, and a dashboard CSV
 upload panel with column mapping, row status preview, and commit controls.
 
+Slice 6 foundation introduced `packages/sync` for the first transaction
+collection contract, including cursor response shape, invalidation event shape,
+and optimistic review state modeling. The app layer now exposes a
+permission-gated sync use case, the API exposes `sync.transactions`, the Drizzle
+repository reads team-scoped changes after `updatedAt` cursors, and the
+dashboard review list is backed by a TanStack DB query collection with optimistic
+review updates and server-refetch reconciliation.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -205,7 +219,7 @@ upload panel with column mapping, row status preview, and commit controls.
   local harnesses; mark only live wiring blocked.
 - `bun run check` currently runs `oxfmt --write`; inspect formatting diffs after
   using it.
-- `apps/worker`, `packages/jobs`, `packages/integrations`, `packages/sync`, and
+- `apps/worker`, `packages/jobs`, `packages/integrations`, and
   `packages/ai` should be introduced only when their slice owns real contracts.
 - Checked-in server env lacks `POLAR_ACCESS_TOKEN`; full authenticated dashboard
   smoke needs valid local auth/payment env or a test-mode auth bypass.
@@ -224,3 +238,6 @@ upload panel with column mapping, row status preview, and commit controls.
 - Slice 5 still needs authenticated browser/manual import verification against a
   migrated local database and richer CSV mapping variants before it should be
   marked complete.
+- Slice 6 still needs authenticated two-session browser verification and a
+  realtime invalidation transport in a later Durable Object/outbox slice before
+  it should be marked complete.
