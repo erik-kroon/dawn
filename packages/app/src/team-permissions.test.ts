@@ -1,15 +1,26 @@
 import { describe, expect, test } from "bun:test";
-import type { Actor, Category, TeamInvite, TeamRole, Transaction } from "@dawn/domain";
+import type {
+  Actor,
+  Category,
+  TeamInvite,
+  TeamMember,
+  TeamMembership,
+  TeamRole,
+  Transaction,
+} from "@dawn/domain";
 
 import {
   AppError,
+  acceptTeamInvite,
   type ActorTeam,
+  type AcceptTeamInviteResult,
   type IdempotencyResult,
   type InviteTeamMemberResult,
   type ReviewWorkspaceData,
   type TransactionReviewRepository,
   inviteTeamMember,
   resolveTeamAccess,
+  updateTeamMemberRole,
 } from "./index";
 
 class MemoryTeamRepository implements TransactionReviewRepository {
@@ -121,9 +132,72 @@ class MemoryTeamRepository implements TransactionReviewRepository {
     this.invites.set(invite.id, invite);
     return invite;
   }
+
+  async getTeamInvite(inviteId: string) {
+    return this.invites.get(inviteId) ?? null;
+  }
+
+  async addTeamMembership(input: {
+    teamId: string;
+    userId: string;
+    role: TeamRole;
+  }): Promise<TeamMembership> {
+    const key = `${input.userId}:${input.teamId}`;
+
+    if (this.memberships.has(key)) {
+      throw new Error("duplicate membership");
+    }
+
+    this.memberships.set(key, input.role);
+    return {
+      teamId: input.teamId,
+      userId: input.userId,
+      role: input.role,
+    };
+  }
+
+  async markTeamInviteAccepted(input: { inviteId: string; acceptedAt: Date }) {
+    const invite = this.invites.get(input.inviteId);
+
+    if (!invite || invite.status !== "pending") {
+      throw new Error("Team invite was not accepted");
+    }
+
+    const acceptedInvite = {
+      ...invite,
+      status: "accepted" as const,
+    };
+    this.invites.set(input.inviteId, acceptedInvite);
+    return acceptedInvite;
+  }
+
+  async getTeamMemberByUserId(teamId: string, userId: string): Promise<TeamMember | null> {
+    const role = this.memberships.get(`${userId}:${teamId}`);
+    return role ? { id: `${teamId}:${userId}`, teamId, userId, role } : null;
+  }
+
+  async updateTeamMemberRole(input: {
+    teamId: string;
+    userId: string;
+    role: TeamRole;
+  }): Promise<TeamMember> {
+    const key = `${input.userId}:${input.teamId}`;
+
+    if (!this.memberships.has(key)) {
+      throw new Error("missing membership");
+    }
+
+    this.memberships.set(key, input.role);
+    return {
+      id: `${input.teamId}:${input.userId}`,
+      teamId: input.teamId,
+      userId: input.userId,
+      role: input.role,
+    };
+  }
 }
 
-const actor = { id: "user_1", type: "user" } as const;
+const actor = { id: "user_1", type: "user", email: "owner@example.com" } as const;
 const context = { actor, requestId: "request_1", teamId: "team_1" };
 
 describe("team permissions", () => {
@@ -223,5 +297,138 @@ describe("team permissions", () => {
     expect(repository.invites).toHaveLength(0);
     expect(repository.auditEvents).toHaveLength(0);
     expect(repository.outboxEvents).toHaveLength(0);
+  });
+
+  test("accepts a pending invite for the matching actor email", async () => {
+    const repository = new MemoryTeamRepository();
+    repository.invites.set("invite_1", {
+      id: "invite_1",
+      teamId: "team_1",
+      email: "bookkeeper@example.com",
+      role: "accountant",
+      status: "pending",
+      invitedByActorId: "user_1",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const invitedContext = {
+      actor: { id: "user_2", type: "user", email: "Bookkeeper@Example.com" } as const,
+      requestId: "request_2",
+    };
+    const command = { inviteId: "invite_1", idempotencyKey: "idem_1" };
+
+    const first = await acceptTeamInvite(repository, invitedContext, command);
+    const replay = await acceptTeamInvite(repository, invitedContext, command);
+
+    expect(first.membership).toEqual({
+      teamId: "team_1",
+      userId: "user_2",
+      role: "accountant",
+    });
+    expect(first.invite.status).toBe("accepted");
+    expect(replay).toEqual({
+      ...(first as AcceptTeamInviteResult),
+      replayed: true,
+    });
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.outboxEvents).toHaveLength(1);
+  });
+
+  test("rejects invite acceptance from another email", async () => {
+    const repository = new MemoryTeamRepository();
+    repository.invites.set("invite_1", {
+      id: "invite_1",
+      teamId: "team_1",
+      email: "bookkeeper@example.com",
+      role: "accountant",
+      status: "pending",
+      invitedByActorId: "user_1",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    await expect(
+      acceptTeamInvite(
+        repository,
+        {
+          actor: { id: "user_2", type: "user", email: "other@example.com" },
+          requestId: "request_2",
+        },
+        { inviteId: "invite_1", idempotencyKey: "idem_1" },
+      ),
+    ).rejects.toEqual(new AppError("FORBIDDEN", "You cannot accept this team invite"));
+    expect(repository.memberships.has("user_2:team_1")).toBe(false);
+  });
+
+  test("rejects invite acceptance when actor already belongs to the team", async () => {
+    const repository = new MemoryTeamRepository();
+    repository.memberships.set("user_2:team_1", "viewer");
+    repository.invites.set("invite_1", {
+      id: "invite_1",
+      teamId: "team_1",
+      email: "bookkeeper@example.com",
+      role: "accountant",
+      status: "pending",
+      invitedByActorId: "user_1",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    await expect(
+      acceptTeamInvite(
+        repository,
+        {
+          actor: { id: "user_2", type: "user", email: "bookkeeper@example.com" },
+          requestId: "request_2",
+        },
+        { inviteId: "invite_1", idempotencyKey: "idem_1" },
+      ),
+    ).rejects.toEqual(new AppError("CONFLICT", "You already belong to this team"));
+  });
+
+  test("updates managed member roles with audit, outbox, and idempotent replay", async () => {
+    const repository = new MemoryTeamRepository();
+    repository.memberships.set("user_1:team_1", "admin");
+    repository.memberships.set("user_2:team_1", "viewer");
+    const command = {
+      teamId: "team_1",
+      userId: "user_2",
+      role: "accountant" as const,
+      idempotencyKey: "idem_1",
+    };
+
+    const first = await updateTeamMemberRole(repository, context, command);
+    const replay = await updateTeamMemberRole(repository, context, command);
+
+    expect(first.membership.role).toBe("accountant");
+    expect(replay.replayed).toBe(true);
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.outboxEvents).toHaveLength(1);
+  });
+
+  test("does not update owner roles through generic role management", async () => {
+    const repository = new MemoryTeamRepository();
+    repository.memberships.set("user_1:team_1", "owner");
+    repository.memberships.set("user_2:team_1", "owner");
+
+    await expect(
+      updateTeamMemberRole(repository, context, {
+        teamId: "team_1",
+        userId: "user_2",
+        role: "admin",
+        idempotencyKey: "idem_1",
+      }),
+    ).rejects.toEqual(new AppError("CONFLICT", "Owner role changes require ownership transfer"));
+  });
+
+  test("does not let actors change their own role", async () => {
+    const repository = new MemoryTeamRepository();
+    repository.memberships.set("user_1:team_1", "admin");
+
+    await expect(
+      updateTeamMemberRole(repository, context, {
+        teamId: "team_1",
+        userId: "user_1",
+        role: "viewer",
+        idempotencyKey: "idem_1",
+      }),
+    ).rejects.toEqual(new AppError("CONFLICT", "You cannot update your own role"));
   });
 });

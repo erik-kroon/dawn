@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { Actor, Category, TeamInvite, TeamRole, Transaction } from "@dawn/domain";
+import type {
+  Actor,
+  Category,
+  TeamInvite,
+  TeamMember,
+  TeamMembership,
+  TeamRole,
+  Transaction,
+} from "@dawn/domain";
 
 import {
   AppError,
@@ -142,6 +150,26 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
     };
     this.invites.set(invite.id, invite);
     return invite;
+  }
+
+  async getTeamInvite(): Promise<TeamInvite | null> {
+    throw new Error("Unexpected invite lookup");
+  }
+
+  async addTeamMembership(): Promise<TeamMembership> {
+    throw new Error("Unexpected membership creation");
+  }
+
+  async markTeamInviteAccepted(): Promise<TeamInvite> {
+    throw new Error("Unexpected invite acceptance");
+  }
+
+  async getTeamMemberByUserId(): Promise<TeamMember | null> {
+    throw new Error("Unexpected team member lookup");
+  }
+
+  async updateTeamMemberRole(): Promise<TeamMember> {
+    throw new Error("Unexpected team member role update");
   }
 }
 

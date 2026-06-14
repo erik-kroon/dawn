@@ -4,6 +4,8 @@ import type {
   Permission,
   Team,
   TeamInvite,
+  TeamMember,
+  TeamMembership,
   TeamRole,
   Transaction,
 } from "@dawn/domain";
@@ -67,6 +69,29 @@ export type InviteTeamMemberCommand = {
 
 export type InviteTeamMemberResult = {
   invite: TeamInvite;
+  replayed: boolean;
+};
+
+export type AcceptTeamInviteCommand = {
+  inviteId: string;
+  idempotencyKey: string;
+};
+
+export type AcceptTeamInviteResult = {
+  membership: TeamMembership;
+  invite: TeamInvite;
+  replayed: boolean;
+};
+
+export type UpdateTeamMemberRoleCommand = {
+  teamId: string;
+  userId: string;
+  role: TeamRole;
+  idempotencyKey: string;
+};
+
+export type UpdateTeamMemberRoleResult = {
+  membership: TeamMember;
   replayed: boolean;
 };
 
@@ -134,10 +159,25 @@ export type TransactionReviewRepository = {
     invitedByActorId: string;
     expiresAt: Date;
   }): Promise<TeamInvite>;
+  getTeamInvite(inviteId: string): Promise<TeamInvite | null>;
+  addTeamMembership(input: {
+    teamId: string;
+    userId: string;
+    role: TeamRole;
+  }): Promise<TeamMembership>;
+  markTeamInviteAccepted(input: { inviteId: string; acceptedAt: Date }): Promise<TeamInvite>;
+  getTeamMemberByUserId(teamId: string, userId: string): Promise<TeamMember | null>;
+  updateTeamMemberRole(input: {
+    teamId: string;
+    userId: string;
+    role: TeamRole;
+  }): Promise<TeamMember>;
 };
 
 const reviewTransactionOperation = "transaction.review";
 const inviteTeamMemberOperation = "team.invite";
+const acceptTeamInviteOperation = "team.invite.accept";
+const updateTeamMemberRoleOperation = "team.member.role.update";
 
 export async function listTeams(
   repository: TransactionReviewRepository,
@@ -372,6 +412,199 @@ export async function inviteTeamMember(
   });
 }
 
+export async function acceptTeamInvite(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+  command: AcceptTeamInviteCommand,
+): Promise<AcceptTeamInviteResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const invite = await transactionRepository.getTeamInvite(command.inviteId);
+
+    if (!invite) {
+      throw new AppError("NOT_FOUND", "Team invite not found");
+    }
+
+    const fingerprint = acceptTeamInviteFingerprint(command);
+    const replayed = await transactionRepository.getIdempotencyResult(
+      invite.teamId,
+      context.actor.id,
+      acceptTeamInviteOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different invite acceptance",
+        );
+      }
+
+      return { ...(replayed.result as AcceptTeamInviteResult), replayed: true };
+    }
+
+    assertActorCanAcceptInvite(context.actor, invite);
+
+    const existingMembership = await transactionRepository.getMembership(
+      context.actor,
+      invite.teamId,
+    );
+
+    if (existingMembership) {
+      throw new AppError("CONFLICT", "You already belong to this team");
+    }
+
+    const membership = await transactionRepository.addTeamMembership({
+      teamId: invite.teamId,
+      userId: context.actor.id,
+      role: invite.role,
+    });
+    const acceptedInvite = await transactionRepository.markTeamInviteAccepted({
+      inviteId: invite.id,
+      acceptedAt: new Date(),
+    });
+
+    await transactionRepository.appendAuditEvent({
+      teamId: invite.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "team.invite_accepted",
+      entityType: "team_invite",
+      entityId: invite.id,
+      metadata: {
+        email: invite.email,
+        role: invite.role,
+      },
+    });
+
+    await transactionRepository.appendOutboxEvent({
+      teamId: invite.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "team.invite_accepted",
+      version: 1,
+      payload: {
+        inviteId: invite.id,
+        userId: context.actor.id,
+        role: invite.role,
+      },
+    });
+
+    const result = { membership, invite: acceptedInvite, replayed: false };
+
+    await transactionRepository.saveIdempotencyResult({
+      teamId: invite.teamId,
+      actorId: context.actor.id,
+      operation: acceptTeamInviteOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function updateTeamMemberRole(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+  command: UpdateTeamMemberRoleCommand,
+): Promise<UpdateTeamMemberRoleResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    assertCommandTeamMatchesContext(context, command.teamId, "Team member not found");
+
+    await resolveTeamAccess(
+      transactionRepository,
+      { ...context, teamId: command.teamId },
+      "team.manage",
+      "You cannot manage members for this team",
+    );
+
+    if (context.actor.id === command.userId) {
+      throw new AppError("CONFLICT", "You cannot update your own role");
+    }
+
+    assertManagedRole(command.role);
+
+    const fingerprint = updateTeamMemberRoleFingerprint(command);
+    const replayed = await transactionRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      updateTeamMemberRoleOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different role update",
+        );
+      }
+
+      return { ...(replayed.result as UpdateTeamMemberRoleResult), replayed: true };
+    }
+
+    const existingMembership = await transactionRepository.getTeamMemberByUserId(
+      command.teamId,
+      command.userId,
+    );
+
+    if (!existingMembership) {
+      throw new AppError("NOT_FOUND", "Team member not found");
+    }
+
+    assertManagedRole(existingMembership.role);
+
+    const membership = await transactionRepository.updateTeamMemberRole({
+      teamId: command.teamId,
+      userId: command.userId,
+      role: command.role,
+    });
+
+    await transactionRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "team.member_role_updated",
+      entityType: "team_membership",
+      entityId: membership.id,
+      metadata: {
+        userId: command.userId,
+        previousRole: existingMembership.role,
+        nextRole: membership.role,
+      },
+    });
+
+    await transactionRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "team.member_role_updated",
+      version: 1,
+      payload: {
+        membershipId: membership.id,
+        userId: command.userId,
+        previousRole: existingMembership.role,
+        nextRole: membership.role,
+      },
+    });
+
+    const result = { membership, replayed: false };
+
+    await transactionRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: updateTeamMemberRoleOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
 export async function resolveTeamAccess(
   repository: TransactionReviewRepository,
   context: TransactionReviewContext,
@@ -400,6 +633,22 @@ export async function resolveTeamAccess(
   };
 }
 
+function assertActorCanAcceptInvite(actor: Actor, invite: TeamInvite) {
+  const actorEmail = actor.email ? normalizeInviteEmail(actor.email) : null;
+
+  if (!actorEmail || actorEmail !== invite.email) {
+    throw new AppError("FORBIDDEN", "You cannot accept this team invite");
+  }
+
+  if (invite.status !== "pending") {
+    throw new AppError("CONFLICT", "Team invite is not pending");
+  }
+
+  if (new Date(invite.expiresAt).getTime() <= Date.now()) {
+    throw new AppError("CONFLICT", "Team invite has expired");
+  }
+}
+
 function normalizeInviteEmail(email: string) {
   const normalizedEmail = email.trim().toLowerCase();
 
@@ -408,6 +657,12 @@ function normalizeInviteEmail(email: string) {
   }
 
   return normalizedEmail;
+}
+
+export function acceptTeamInviteFingerprint(command: AcceptTeamInviteCommand) {
+  return JSON.stringify({
+    inviteId: command.inviteId,
+  });
 }
 
 export function inviteTeamMemberFingerprint(command: InviteTeamMemberCommand) {
@@ -420,9 +675,25 @@ export function inviteTeamMemberFingerprint(command: InviteTeamMemberCommand) {
   });
 }
 
+export function updateTeamMemberRoleFingerprint(command: UpdateTeamMemberRoleCommand) {
+  assertManagedRole(command.role);
+
+  return JSON.stringify({
+    teamId: command.teamId,
+    userId: command.userId,
+    role: command.role,
+  });
+}
+
 function assertInvitableRole(role: TeamRole) {
   if (role === "owner") {
     throw new AppError("CONFLICT", "Owner role cannot be assigned by invite");
+  }
+}
+
+function assertManagedRole(role: TeamRole) {
+  if (role === "owner") {
+    throw new AppError("CONFLICT", "Owner role changes require ownership transfer");
   }
 }
 

@@ -1,6 +1,7 @@
 export type Actor = {
   id: string;
   type: "user";
+  email?: string;
 };
 
 export type TeamRole = "owner" | "admin" | "member" | "accountant" | "viewer";
@@ -30,6 +31,10 @@ export type TeamMembership = {
   teamId: string;
   userId: string;
   role: TeamRole;
+};
+
+export type TeamMember = TeamMembership & {
+  id: string;
 };
 
 export type TeamInviteStatus = "pending" | "accepted" | "revoked" | "expired";

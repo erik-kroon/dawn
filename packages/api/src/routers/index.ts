@@ -2,11 +2,13 @@ import type { RouterClient } from "@orpc/server";
 import { ORPCError } from "@orpc/server";
 import {
   AppError,
+  acceptTeamInvite,
   createTeam,
   inviteTeamMember,
   listTeams,
   listTransactionReviewWorkspace,
   reviewTransaction,
+  updateTeamMemberRole,
 } from "@dawn/app";
 import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
 import { z } from "zod";
@@ -37,6 +39,18 @@ const inviteTeamRoleInput = z.enum(["admin", "member", "accountant", "viewer"]);
 const inviteTeamMemberInput = z.object({
   teamId: z.string().min(1),
   email: z.email(),
+  role: inviteTeamRoleInput,
+  idempotencyKey: z.string().min(1),
+});
+
+const acceptTeamInviteInput = z.object({
+  inviteId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const updateTeamMemberRoleInput = z.object({
+  teamId: z.string().min(1),
+  userId: z.string().min(1),
   role: inviteTeamRoleInput,
   idempotencyKey: z.string().min(1),
 });
@@ -84,7 +98,11 @@ export const appRouter = {
         return await inviteTeamMember(
           transactionReviewRepository,
           {
-            actor: { id: context.session.user.id, type: "user" },
+            actor: {
+              id: context.session.user.id,
+              type: "user",
+              email: context.session.user.email,
+            },
             requestId: context.requestId,
             teamId: input.teamId,
           },
@@ -94,6 +112,47 @@ export const appRouter = {
         mapAppError(error);
       }
     }),
+    acceptInvite: protectedProcedure
+      .input(acceptTeamInviteInput)
+      .handler(async ({ context, input }) => {
+        try {
+          return await acceptTeamInvite(
+            transactionReviewRepository,
+            {
+              actor: {
+                id: context.session.user.id,
+                type: "user",
+                email: context.session.user.email,
+              },
+              requestId: context.requestId,
+            },
+            input,
+          );
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+    updateMemberRole: protectedProcedure
+      .input(updateTeamMemberRoleInput)
+      .handler(async ({ context, input }) => {
+        try {
+          return await updateTeamMemberRole(
+            transactionReviewRepository,
+            {
+              actor: {
+                id: context.session.user.id,
+                type: "user",
+                email: context.session.user.email,
+              },
+              requestId: context.requestId,
+              teamId: input.teamId,
+            },
+            input,
+          );
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
   },
   transactionReview: {
     list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {

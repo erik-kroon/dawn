@@ -4,7 +4,15 @@ import type {
   ReviewWorkspaceData,
   TransactionReviewRepository,
 } from "@dawn/app";
-import type { Actor, Category, TeamInvite, TeamRole, Transaction } from "@dawn/domain";
+import type {
+  Actor,
+  Category,
+  TeamInvite,
+  TeamMember,
+  TeamMembership,
+  TeamRole,
+  Transaction,
+} from "@dawn/domain";
 import { and, desc, eq } from "drizzle-orm";
 
 import { db } from "./index";
@@ -308,6 +316,94 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
 
     return mapTeamInvite(invite);
   }
+
+  async getTeamInvite(inviteId: string) {
+    const [invite] = await this.client
+      .select()
+      .from(schema.teamInvite)
+      .where(eq(schema.teamInvite.id, inviteId))
+      .limit(1);
+
+    return invite ? mapTeamInvite(invite) : null;
+  }
+
+  async addTeamMembership(input: {
+    teamId: string;
+    userId: string;
+    role: TeamRole;
+  }): Promise<TeamMembership> {
+    const [membership] = await this.client
+      .insert(schema.teamMembership)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        userId: input.userId,
+        role: input.role,
+      })
+      .returning();
+
+    if (!membership) {
+      throw new Error("Team membership was not created");
+    }
+
+    return mapTeamMembership(membership);
+  }
+
+  async markTeamInviteAccepted(input: { inviteId: string; acceptedAt: Date }) {
+    const [invite] = await this.client
+      .update(schema.teamInvite)
+      .set({
+        status: "accepted",
+        acceptedAt: input.acceptedAt,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(schema.teamInvite.id, input.inviteId), eq(schema.teamInvite.status, "pending")))
+      .returning();
+
+    if (!invite) {
+      throw new Error("Team invite was not accepted");
+    }
+
+    return mapTeamInvite(invite);
+  }
+
+  async getTeamMemberByUserId(teamId: string, userId: string) {
+    const [membership] = await this.client
+      .select()
+      .from(schema.teamMembership)
+      .where(
+        and(eq(schema.teamMembership.teamId, teamId), eq(schema.teamMembership.userId, userId)),
+      )
+      .limit(1);
+
+    return membership ? mapTeamMember(membership) : null;
+  }
+
+  async updateTeamMemberRole(input: {
+    teamId: string;
+    userId: string;
+    role: TeamRole;
+  }): Promise<TeamMember> {
+    const [membership] = await this.client
+      .update(schema.teamMembership)
+      .set({
+        role: input.role,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.teamMembership.teamId, input.teamId),
+          eq(schema.teamMembership.userId, input.userId),
+        ),
+      )
+      .returning();
+
+    if (!membership) {
+      throw new Error("Team membership was not updated");
+    }
+
+    return mapTeamMember(membership);
+  }
 }
 
 function mapCategory(category: typeof schema.transactionCategory.$inferSelect): Category {
@@ -342,5 +438,20 @@ function mapTeamInvite(invite: typeof schema.teamInvite.$inferSelect): TeamInvit
     status: invite.status === "pending" ? "pending" : (invite.status as TeamInvite["status"]),
     invitedByActorId: invite.invitedByActorId,
     expiresAt: invite.expiresAt.toISOString(),
+  };
+}
+
+function mapTeamMembership(membership: typeof schema.teamMembership.$inferSelect): TeamMembership {
+  return {
+    teamId: membership.teamId,
+    userId: membership.userId,
+    role: membership.role as TeamRole,
+  };
+}
+
+function mapTeamMember(membership: typeof schema.teamMembership.$inferSelect): TeamMember {
+  return {
+    id: membership.id,
+    ...mapTeamMembership(membership),
   };
 }
