@@ -75,6 +75,62 @@ export const transactionCategory = pgTable(
   (table) => [uniqueIndex("transaction_category_team_name_idx").on(table.teamId, table.name)],
 );
 
+export const ledgerAccount = pgTable(
+  "ledger_account",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    currency: text("currency").notNull(),
+    type: text("type").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("ledger_account_team_name_idx").on(table.teamId, table.name),
+    index("ledger_account_team_idx").on(table.teamId),
+  ],
+);
+
+export const counterparty = pgTable(
+  "counterparty",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [uniqueIndex("counterparty_team_name_idx").on(table.teamId, table.name)],
+);
+
+export const transactionTag = pgTable(
+  "transaction_tag",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [uniqueIndex("transaction_tag_team_name_idx").on(table.teamId, table.name)],
+);
+
 export const transaction = pgTable(
   "transaction",
   {
@@ -82,10 +138,20 @@ export const transaction = pgTable(
     teamId: text("team_id")
       .notNull()
       .references(() => team.id, { onDelete: "cascade" }),
+    accountId: text("account_id").references(() => ledgerAccount.id, {
+      onDelete: "set null",
+    }),
     description: text("description").notNull(),
     postedAt: timestamp("posted_at").notNull(),
     amountMinor: integer("amount_minor").notNull(),
     currency: text("currency").notNull(),
+    type: text("type").default("expense").notNull(),
+    source: text("source").default("manual").notNull(),
+    counterpartyId: text("counterparty_id").references(() => counterparty.id, {
+      onDelete: "set null",
+    }),
+    providerTransactionId: text("provider_transaction_id"),
+    duplicateKey: text("duplicate_key"),
     categoryId: text("category_id").references(() => transactionCategory.id, {
       onDelete: "set null",
     }),
@@ -96,7 +162,49 @@ export const transaction = pgTable(
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
   },
-  (table) => [index("transaction_team_posted_idx").on(table.teamId, table.postedAt)],
+  (table) => [
+    index("transaction_team_posted_idx").on(table.teamId, table.postedAt),
+    index("transaction_team_account_posted_idx").on(table.teamId, table.accountId, table.postedAt),
+    uniqueIndex("transaction_team_duplicate_idx").on(table.teamId, table.duplicateKey),
+    uniqueIndex("transaction_team_provider_idx").on(table.teamId, table.providerTransactionId),
+  ],
+);
+
+export const transactionSplit = pgTable(
+  "transaction_split",
+  {
+    id: text("id").primaryKey(),
+    transactionId: text("transaction_id")
+      .notNull()
+      .references(() => transaction.id, { onDelete: "cascade" }),
+    categoryId: text("category_id").references(() => transactionCategory.id, {
+      onDelete: "set null",
+    }),
+    amountMinor: integer("amount_minor").notNull(),
+    currency: text("currency").notNull(),
+    note: text("note"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("transaction_split_transaction_idx").on(table.transactionId),
+    index("transaction_split_category_idx").on(table.categoryId),
+  ],
+);
+
+export const transactionTagAssignment = pgTable(
+  "transaction_tag_assignment",
+  {
+    transactionId: text("transaction_id")
+      .notNull()
+      .references(() => transaction.id, { onDelete: "cascade" }),
+    tagId: text("tag_id")
+      .notNull()
+      .references(() => transactionTag.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    uniqueIndex("transaction_tag_assignment_idx").on(table.transactionId, table.tagId),
+    index("transaction_tag_assignment_tag_idx").on(table.tagId),
+  ],
 );
 
 export const auditLog = pgTable(
@@ -164,6 +272,9 @@ export const teamRelations = relations(team, ({ many }) => ({
   memberships: many(teamMembership),
   invites: many(teamInvite),
   categories: many(transactionCategory),
+  accounts: many(ledgerAccount),
+  counterparties: many(counterparty),
+  tags: many(transactionTag),
   transactions: many(transaction),
 }));
 

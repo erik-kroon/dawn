@@ -7,13 +7,16 @@ import type {
 import type {
   Actor,
   Category,
+  LedgerAccount,
+  LedgerTransactionDraft,
   TeamInvite,
   TeamMember,
   TeamMembership,
   TeamRole,
   Transaction,
 } from "@dawn/domain";
-import { and, desc, eq } from "drizzle-orm";
+import { ledgerDuplicateKey } from "@dawn/domain";
+import { and, desc, eq, gte, lte } from "drizzle-orm";
 
 import { db } from "./index";
 import * as schema from "./schema";
@@ -73,9 +76,20 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
 
   async createTeam(input: { actor: Actor; name: string }): Promise<ActorTeam> {
     const teamId = crypto.randomUUID();
+    const accountId = crypto.randomUUID();
     const softwareCategoryId = crypto.randomUUID();
     const mealsCategoryId = crypto.randomUUID();
     const transactionId = crypto.randomUUID();
+    const seedTransactionDraft = {
+      teamId,
+      accountId,
+      description: "Figma subscription",
+      postedAt: "2026-06-14T00:00:00.000Z",
+      money: { amountMinor: -1200, currency: "USD" },
+      type: "expense",
+      source: "manual",
+      categoryId: null,
+    } satisfies LedgerTransactionDraft;
 
     await this.client.insert(schema.team).values({
       id: teamId,
@@ -91,14 +105,25 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
       { id: softwareCategoryId, teamId, name: "Software" },
       { id: mealsCategoryId, teamId, name: "Meals" },
     ]);
+    await this.client.insert(schema.ledgerAccount).values({
+      id: accountId,
+      teamId,
+      name: "Operating",
+      currency: "USD",
+      type: "bank",
+    });
     await this.client.insert(schema.transaction).values({
       id: transactionId,
       teamId,
-      description: "Figma subscription",
-      postedAt: new Date("2026-06-14T00:00:00.000Z"),
-      amountMinor: -1200,
-      currency: "USD",
+      accountId,
+      description: seedTransactionDraft.description,
+      postedAt: new Date(seedTransactionDraft.postedAt),
+      amountMinor: seedTransactionDraft.money.amountMinor,
+      currency: seedTransactionDraft.money.currency,
+      type: seedTransactionDraft.type,
+      source: seedTransactionDraft.source,
       reviewState: "needs_review",
+      duplicateKey: ledgerDuplicateKey(seedTransactionDraft),
     });
 
     return { id: teamId, name: input.name, role: "owner" };
@@ -174,6 +199,123 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
       .limit(1);
 
     return category ? mapCategory(category) : null;
+  }
+
+  async listLedgerAccounts(teamId: string) {
+    const accounts = await this.client
+      .select()
+      .from(schema.ledgerAccount)
+      .where(eq(schema.ledgerAccount.teamId, teamId));
+
+    return accounts.map(mapLedgerAccount);
+  }
+
+  async getLedgerAccountForTeam(teamId: string, accountId: string) {
+    const [account] = await this.client
+      .select()
+      .from(schema.ledgerAccount)
+      .where(and(eq(schema.ledgerAccount.teamId, teamId), eq(schema.ledgerAccount.id, accountId)))
+      .limit(1);
+
+    return account ? mapLedgerAccount(account) : null;
+  }
+
+  async getTransactionByDuplicateKey(teamId: string, duplicateKey: string) {
+    const [transaction] = await this.client
+      .select()
+      .from(schema.transaction)
+      .where(
+        and(
+          eq(schema.transaction.teamId, teamId),
+          eq(schema.transaction.duplicateKey, duplicateKey),
+        ),
+      )
+      .limit(1);
+
+    return transaction ? mapTransaction(transaction) : null;
+  }
+
+  async listTransactionsForReport(input: {
+    teamId: string;
+    accountId?: string;
+    from?: string;
+    to?: string;
+  }) {
+    const conditions = [eq(schema.transaction.teamId, input.teamId)];
+
+    if (input.accountId) {
+      conditions.push(eq(schema.transaction.accountId, input.accountId));
+    }
+
+    if (input.from) {
+      conditions.push(gte(schema.transaction.postedAt, new Date(input.from)));
+    }
+
+    if (input.to) {
+      conditions.push(lte(schema.transaction.postedAt, new Date(input.to)));
+    }
+
+    const transactions = await this.client
+      .select()
+      .from(schema.transaction)
+      .where(and(...conditions))
+      .orderBy(desc(schema.transaction.postedAt));
+
+    return transactions.map(mapTransaction);
+  }
+
+  async createLedgerTransactionForTeam(input: {
+    draft: LedgerTransactionDraft;
+    duplicateKey: string;
+  }) {
+    const transactionId = crypto.randomUUID();
+    const [transaction] = await this.client
+      .insert(schema.transaction)
+      .values({
+        id: transactionId,
+        teamId: input.draft.teamId,
+        accountId: input.draft.accountId,
+        description: input.draft.description,
+        postedAt: new Date(input.draft.postedAt),
+        amountMinor: input.draft.money.amountMinor,
+        currency: input.draft.money.currency,
+        type: input.draft.type,
+        source: input.draft.source,
+        counterpartyId: input.draft.counterpartyId ?? null,
+        providerTransactionId: input.draft.providerTransactionId ?? null,
+        duplicateKey: input.duplicateKey,
+        categoryId: input.draft.categoryId ?? null,
+        reviewState: "needs_review",
+      })
+      .returning();
+
+    if (!transaction) {
+      throw new Error("Ledger transaction was not created");
+    }
+
+    if (input.draft.splits?.length) {
+      await this.client.insert(schema.transactionSplit).values(
+        input.draft.splits.map((split) => ({
+          id: crypto.randomUUID(),
+          transactionId,
+          categoryId: split.categoryId ?? null,
+          amountMinor: split.money.amountMinor,
+          currency: split.money.currency,
+          note: split.note ?? null,
+        })),
+      );
+    }
+
+    if (input.draft.tagIds?.length) {
+      await this.client.insert(schema.transactionTagAssignment).values(
+        input.draft.tagIds.map((tagId) => ({
+          transactionId,
+          tagId,
+        })),
+      );
+    }
+
+    return mapTransaction(transaction);
   }
 
   async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
@@ -447,18 +589,34 @@ function mapCategory(category: typeof schema.transactionCategory.$inferSelect): 
   };
 }
 
+function mapLedgerAccount(account: typeof schema.ledgerAccount.$inferSelect): LedgerAccount {
+  return {
+    id: account.id,
+    teamId: account.teamId,
+    name: account.name,
+    currency: account.currency,
+    type: account.type as LedgerAccount["type"],
+  };
+}
+
 function mapTransaction(transaction: typeof schema.transaction.$inferSelect): Transaction {
   return {
     id: transaction.id,
     teamId: transaction.teamId,
+    accountId: transaction.accountId,
     description: transaction.description,
     postedAt: transaction.postedAt.toISOString(),
     money: {
       amountMinor: transaction.amountMinor,
       currency: transaction.currency,
     },
+    type: transaction.type as Transaction["type"],
+    source: transaction.source as Transaction["source"],
+    counterpartyId: transaction.counterpartyId,
+    providerTransactionId: transaction.providerTransactionId,
     categoryId: transaction.categoryId,
     reviewState: transaction.reviewState === "reviewed" ? "reviewed" : "needs_review",
+    duplicateKey: transaction.duplicateKey,
   };
 }
 

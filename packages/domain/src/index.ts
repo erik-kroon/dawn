@@ -56,22 +56,83 @@ export type Money = {
   currency: string;
 };
 
+export type TransactionType = "income" | "expense" | "transfer" | "fee" | "refund" | "adjustment";
+
+export type TransactionSource = "manual" | "csv_import" | "bank_sync" | "provider_webhook";
+
 export type TransactionReviewState = "needs_review" | "reviewed";
 
 export type Transaction = {
   id: string;
   teamId: string;
+  accountId?: string | null;
   description: string;
   postedAt: string;
   money: Money;
+  type?: TransactionType;
+  source?: TransactionSource;
+  counterpartyId?: string | null;
+  providerTransactionId?: string | null;
   categoryId: string | null;
   reviewState: TransactionReviewState;
+  duplicateKey?: string | null;
 };
 
 export type Category = {
   id: string;
   teamId: string;
   name: string;
+};
+
+export type LedgerAccount = {
+  id: string;
+  teamId: string;
+  name: string;
+  currency: string;
+  type: "bank" | "cash" | "credit_card" | "loan" | "other";
+};
+
+export type Counterparty = {
+  id: string;
+  teamId: string;
+  name: string;
+};
+
+export type TransactionTag = {
+  id: string;
+  teamId: string;
+  name: string;
+};
+
+export type TransactionSplit = {
+  id: string;
+  transactionId: string;
+  categoryId: string | null;
+  money: Money;
+  note?: string | null;
+};
+
+export type LedgerTransactionDraft = {
+  teamId: string;
+  accountId: string;
+  description: string;
+  postedAt: string;
+  money: Money;
+  type: TransactionType;
+  source: TransactionSource;
+  categoryId?: string | null;
+  counterpartyId?: string | null;
+  providerTransactionId?: string | null;
+  splits?: readonly Omit<TransactionSplit, "id" | "transactionId">[];
+  tagIds?: readonly string[];
+};
+
+export type ReportTotals = {
+  revenue: Money;
+  expenses: Money;
+  profit: Money;
+  balance: Money;
+  categoryTotals: Record<string, Money>;
 };
 
 export type AuditEvent = {
@@ -219,6 +280,146 @@ export function assertValidMoney(money: Money) {
   if (!/^[A-Z]{3}$/.test(money.currency)) {
     throw new Error("Money currency must be an ISO 4217 code");
   }
+}
+
+export function assertSameCurrency(left: Money, right: Money) {
+  assertValidMoney(left);
+  assertValidMoney(right);
+
+  if (left.currency !== right.currency) {
+    throw new Error("Money currency mismatch");
+  }
+}
+
+export function addMoney(left: Money, right: Money): Money {
+  assertSameCurrency(left, right);
+
+  const result = {
+    amountMinor: left.amountMinor + right.amountMinor,
+    currency: left.currency,
+  };
+
+  assertValidMoney(result);
+
+  return result;
+}
+
+export function subtractMoney(left: Money, right: Money): Money {
+  return addMoney(left, negateMoney(right));
+}
+
+export function negateMoney(money: Money): Money {
+  assertValidMoney(money);
+
+  const result = {
+    amountMinor: -money.amountMinor,
+    currency: money.currency,
+  };
+
+  assertValidMoney(result);
+
+  return result;
+}
+
+export function zeroMoney(currency: string): Money {
+  const money = { amountMinor: 0, currency };
+  assertValidMoney(money);
+  return money;
+}
+
+export function sumMoney(values: readonly Money[], currency: string): Money {
+  return values.reduce((total, money) => addMoney(total, money), zeroMoney(currency));
+}
+
+export function assertBalancedSplits(transactionMoney: Money, splits: readonly { money: Money }[]) {
+  if (splits.length === 0) {
+    return;
+  }
+
+  const splitTotal = sumMoney(
+    splits.map((split) => split.money),
+    transactionMoney.currency,
+  );
+
+  if (splitTotal.amountMinor !== transactionMoney.amountMinor) {
+    throw new Error("Transaction splits must equal the transaction amount");
+  }
+}
+
+export function assertLedgerTransactionDraft(draft: LedgerTransactionDraft) {
+  assertValidMoney(draft.money);
+
+  if (!draft.teamId || !draft.accountId) {
+    throw new Error("Ledger transaction requires team and account");
+  }
+
+  if (!draft.description.trim()) {
+    throw new Error("Ledger transaction description is required");
+  }
+
+  if (Number.isNaN(new Date(draft.postedAt).getTime())) {
+    throw new Error("Ledger transaction posted date is invalid");
+  }
+
+  assertBalancedSplits(draft.money, draft.splits ?? []);
+}
+
+export function ledgerDuplicateKey(draft: LedgerTransactionDraft) {
+  assertLedgerTransactionDraft(draft);
+
+  const sourceKey =
+    draft.providerTransactionId?.trim() ||
+    [
+      draft.source,
+      draft.accountId,
+      new Date(draft.postedAt).toISOString().slice(0, 10),
+      draft.money.currency,
+      draft.money.amountMinor,
+      draft.description.trim().toLowerCase().replace(/\s+/g, " "),
+    ].join(":");
+
+  return `${draft.teamId}:${sourceKey}`;
+}
+
+export function createReportTotals(
+  transactions: readonly Transaction[],
+  currency: string,
+): ReportTotals {
+  let revenue = zeroMoney(currency);
+  let expenses = zeroMoney(currency);
+  let balance = zeroMoney(currency);
+  const categoryTotals: Record<string, Money> = {};
+
+  for (const transaction of transactions) {
+    assertValidMoney(transaction.money);
+
+    if (transaction.money.currency !== currency) {
+      throw new Error("Report currency mismatch");
+    }
+
+    balance = addMoney(balance, transaction.money);
+
+    if (transaction.money.amountMinor > 0) {
+      revenue = addMoney(revenue, transaction.money);
+    } else if (transaction.money.amountMinor < 0) {
+      expenses = addMoney(expenses, transaction.money);
+    }
+
+    if (transaction.categoryId) {
+      categoryTotals[transaction.categoryId] = addMoney(
+        categoryTotals[transaction.categoryId] ?? zeroMoney(currency),
+        transaction.money,
+      );
+    }
+  }
+
+  return {
+    revenue,
+    expenses,
+    profit: addMoney(revenue, expenses),
+    balance,
+    categoryTotals,
+  };
 }
 
 export function currencyMinorUnitDigits(currency: string, locale = "en-US") {

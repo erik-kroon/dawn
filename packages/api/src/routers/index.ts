@@ -3,8 +3,10 @@ import { ORPCError } from "@orpc/server";
 import {
   AppError,
   acceptTeamInvite,
+  createLedgerTransaction,
   createTeam,
   inviteTeamMember,
+  listLedgerSummary,
   listTeamDirectory,
   listTeams,
   listTransactionReviewWorkspace,
@@ -25,6 +27,44 @@ const reviewTransactionInput = z.object({
   teamId: z.string().min(1),
   transactionId: z.string().min(1),
   categoryId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const moneyInput = z.object({
+  amountMinor: z.number().int(),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+});
+
+const ledgerSummaryInput = z
+  .object({
+    teamId: z.string().min(1).optional(),
+    accountId: z.string().min(1).optional(),
+    from: z.iso.datetime().optional(),
+    to: z.iso.datetime().optional(),
+  })
+  .optional();
+
+const createLedgerTransactionInput = z.object({
+  teamId: z.string().min(1),
+  accountId: z.string().min(1),
+  description: z.string().min(1),
+  postedAt: z.iso.datetime(),
+  money: moneyInput,
+  type: z.enum(["income", "expense", "transfer", "fee", "refund", "adjustment"]),
+  source: z.enum(["manual", "csv_import", "bank_sync", "provider_webhook"]),
+  categoryId: z.string().min(1).nullable().optional(),
+  counterpartyId: z.string().min(1).nullable().optional(),
+  providerTransactionId: z.string().min(1).nullable().optional(),
+  splits: z
+    .array(
+      z.object({
+        categoryId: z.string().min(1).nullable().optional(),
+        money: moneyInput,
+        note: z.string().nullable().optional(),
+      }),
+    )
+    .optional(),
+  tagIds: z.array(z.string().min(1)).optional(),
   idempotencyKey: z.string().min(1),
 });
 
@@ -208,6 +248,50 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 teamId: input.teamId,
               },
               input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    ledger: {
+      summary: protectedProcedure.input(ledgerSummaryInput).handler(async ({ context, input }) => {
+        try {
+          return await listLedgerSummary(
+            transactionReviewRepository,
+            {
+              actor: { id: context.session.user.id, type: "user" },
+              requestId: context.requestId,
+              teamId: input?.teamId,
+            },
+            input,
+          );
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+      createTransaction: protectedProcedure
+        .input(createLedgerTransactionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createLedgerTransaction(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                categoryId: input.categoryId ?? null,
+                counterpartyId: input.counterpartyId ?? null,
+                providerTransactionId: input.providerTransactionId ?? null,
+                splits: input.splits?.map((split) => ({
+                  categoryId: split.categoryId ?? null,
+                  money: split.money,
+                  note: split.note ?? null,
+                })),
+              },
             );
           } catch (error) {
             mapAppError(error);

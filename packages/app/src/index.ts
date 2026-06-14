@@ -1,7 +1,10 @@
 import type {
   Actor,
   Category,
+  LedgerAccount,
+  LedgerTransactionDraft,
   Permission,
+  ReportTotals,
   Team,
   TeamInvite,
   TeamMember,
@@ -9,7 +12,14 @@ import type {
   TeamRole,
   Transaction,
 } from "@dawn/domain";
-import { applyTransactionReview, permissionsForRole, roleHasPermission } from "@dawn/domain";
+import {
+  applyTransactionReview,
+  assertLedgerTransactionDraft,
+  createReportTotals,
+  ledgerDuplicateKey,
+  permissionsForRole,
+  roleHasPermission,
+} from "@dawn/domain";
 
 export type AppErrorCode = "FORBIDDEN" | "NOT_FOUND" | "CONFLICT";
 
@@ -95,6 +105,22 @@ export type UpdateTeamMemberRoleResult = {
   replayed: boolean;
 };
 
+export type CreateLedgerTransactionCommand = LedgerTransactionDraft & {
+  idempotencyKey: string;
+};
+
+export type CreateLedgerTransactionResult = {
+  transaction: Transaction;
+  replayed: boolean;
+};
+
+export type LedgerSummary = {
+  teamId: string;
+  accounts: LedgerAccount[];
+  totals: ReportTotals;
+  transactionCount: number;
+};
+
 export type IdempotencyResult<T> = {
   fingerprint: string;
   result: T;
@@ -121,6 +147,19 @@ export type TransactionReviewRepository = {
   getMembership(actor: Actor, teamId: string): Promise<{ role: TeamRole } | null>;
   getTransactionForTeam(teamId: string, transactionId: string): Promise<Transaction | null>;
   getCategoryForTeam(teamId: string, categoryId: string): Promise<Category | null>;
+  listLedgerAccounts(teamId: string): Promise<LedgerAccount[]>;
+  getLedgerAccountForTeam(teamId: string, accountId: string): Promise<LedgerAccount | null>;
+  getTransactionByDuplicateKey(teamId: string, duplicateKey: string): Promise<Transaction | null>;
+  listTransactionsForReport(input: {
+    teamId: string;
+    accountId?: string;
+    from?: string;
+    to?: string;
+  }): Promise<Transaction[]>;
+  createLedgerTransactionForTeam(input: {
+    draft: LedgerTransactionDraft;
+    duplicateKey: string;
+  }): Promise<Transaction>;
   getIdempotencyResult(
     teamId: string,
     actorId: string,
@@ -183,6 +222,7 @@ export type TransactionReviewRepository = {
 };
 
 const reviewTransactionOperation = "transaction.review";
+const createLedgerTransactionOperation = "ledger.transaction.create";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
@@ -335,6 +375,199 @@ export function transactionReviewFingerprint(command: ReviewTransactionCommand) 
     transactionId: command.transactionId,
     categoryId: command.categoryId,
   });
+}
+
+export async function listLedgerSummary(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+  input: { teamId?: string; accountId?: string; from?: string; to?: string } = {},
+): Promise<LedgerSummary> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: input.teamId ?? context.teamId },
+    "transactions.read",
+    "You cannot read ledger data for this team",
+  );
+  const [accounts, transactions] = await Promise.all([
+    repository.listLedgerAccounts(access.teamId),
+    repository.listTransactionsForReport({
+      teamId: access.teamId,
+      accountId: input.accountId,
+      from: input.from,
+      to: input.to,
+    }),
+  ]);
+  const currency =
+    accounts.find((account) => account.id === input.accountId)?.currency ??
+    accounts[0]?.currency ??
+    transactions[0]?.money.currency ??
+    "USD";
+
+  return {
+    teamId: access.teamId,
+    accounts,
+    totals: createReportTotals(transactions, currency),
+    transactionCount: transactions.length,
+  };
+}
+
+export async function createLedgerTransaction(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+  command: CreateLedgerTransactionCommand,
+): Promise<CreateLedgerTransactionResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    assertCommandTeamMatchesContext(context, command.teamId, "Ledger transaction not found");
+
+    await resolveTeamAccess(
+      transactionRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.write",
+      "You cannot create ledger transactions for this team",
+    );
+
+    const draft = normalizeLedgerTransactionDraft(command);
+    const fingerprint = createLedgerTransactionFingerprint(command);
+    const replayed = await transactionRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createLedgerTransactionOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different ledger transaction",
+        );
+      }
+
+      return { ...(replayed.result as CreateLedgerTransactionResult), replayed: true };
+    }
+
+    const account = await transactionRepository.getLedgerAccountForTeam(
+      draft.teamId,
+      draft.accountId,
+    );
+
+    if (!account) {
+      throw new AppError("NOT_FOUND", "Ledger account not found");
+    }
+
+    if (account.currency !== draft.money.currency) {
+      throw new AppError("CONFLICT", "Ledger transaction currency must match the account");
+    }
+
+    if (draft.categoryId) {
+      const category = await transactionRepository.getCategoryForTeam(
+        draft.teamId,
+        draft.categoryId,
+      );
+
+      if (!category) {
+        throw new AppError("NOT_FOUND", "Category not found");
+      }
+    }
+
+    const duplicateKey = ledgerDuplicateKey(draft);
+    const duplicate = await transactionRepository.getTransactionByDuplicateKey(
+      draft.teamId,
+      duplicateKey,
+    );
+
+    if (duplicate) {
+      throw new AppError("CONFLICT", "Ledger transaction duplicate key already exists");
+    }
+
+    const transaction = await transactionRepository.createLedgerTransactionForTeam({
+      draft,
+      duplicateKey,
+    });
+
+    await transactionRepository.appendAuditEvent({
+      teamId: draft.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "transaction.created",
+      entityType: "transaction",
+      entityId: transaction.id,
+      metadata: {
+        accountId: draft.accountId,
+        duplicateKey,
+        source: draft.source,
+        type: draft.type,
+      },
+    });
+
+    await transactionRepository.appendOutboxEvent({
+      teamId: draft.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "transaction.created",
+      version: 1,
+      payload: {
+        transactionId: transaction.id,
+        accountId: draft.accountId,
+        duplicateKey,
+      },
+    });
+
+    const result = { transaction, replayed: false };
+
+    await transactionRepository.saveIdempotencyResult({
+      teamId: draft.teamId,
+      actorId: context.actor.id,
+      operation: createLedgerTransactionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export function createLedgerTransactionFingerprint(command: CreateLedgerTransactionCommand) {
+  const draft = normalizeLedgerTransactionDraft(command);
+
+  return JSON.stringify({
+    teamId: draft.teamId,
+    accountId: draft.accountId,
+    description: draft.description,
+    postedAt: draft.postedAt,
+    money: draft.money,
+    type: draft.type,
+    source: draft.source,
+    categoryId: draft.categoryId ?? null,
+    counterpartyId: draft.counterpartyId ?? null,
+    providerTransactionId: draft.providerTransactionId ?? null,
+    splits: draft.splits ?? [],
+    tagIds: draft.tagIds ?? [],
+  });
+}
+
+function normalizeLedgerTransactionDraft(
+  command: CreateLedgerTransactionCommand,
+): LedgerTransactionDraft {
+  const draft = {
+    teamId: command.teamId,
+    accountId: command.accountId,
+    description: command.description.trim(),
+    postedAt: new Date(command.postedAt).toISOString(),
+    money: command.money,
+    type: command.type,
+    source: command.source,
+    categoryId: command.categoryId ?? null,
+    counterpartyId: command.counterpartyId ?? null,
+    providerTransactionId: command.providerTransactionId?.trim() || null,
+    splits: command.splits ?? [],
+    tagIds: command.tagIds ?? [],
+  } satisfies LedgerTransactionDraft;
+
+  assertLedgerTransactionDraft(draft);
+
+  return draft;
 }
 
 export async function inviteTeamMember(

@@ -3,6 +3,8 @@ import { call } from "@orpc/server";
 import type {
   Actor,
   Category,
+  LedgerAccount,
+  LedgerTransactionDraft,
   TeamInvite,
   TeamMember,
   TeamMembership,
@@ -20,6 +22,7 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
   auditEvents: unknown[] = [];
   outboxEvents: unknown[] = [];
   categories = new Map<string, Category>();
+  accounts = new Map<string, LedgerAccount>();
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   invites = new Map<string, TeamInvite>();
   memberships = new Map<string, TeamRole>();
@@ -91,6 +94,54 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
   async getCategoryForTeam(teamId: string, categoryId: string) {
     const category = this.categories.get(categoryId);
     return category?.teamId === teamId ? category : null;
+  }
+
+  async listLedgerAccounts(teamId: string) {
+    return [...this.accounts.values()].filter((account) => account.teamId === teamId);
+  }
+
+  async getLedgerAccountForTeam(teamId: string, accountId: string) {
+    const account = this.accounts.get(accountId);
+    return account?.teamId === teamId ? account : null;
+  }
+
+  async getTransactionByDuplicateKey(teamId: string, duplicateKey: string) {
+    return (
+      [...this.transactions.values()].find(
+        (transaction) => transaction.teamId === teamId && transaction.duplicateKey === duplicateKey,
+      ) ?? null
+    );
+  }
+
+  async listTransactionsForReport(input: { teamId: string; accountId?: string }) {
+    return [...this.transactions.values()].filter(
+      (transaction) =>
+        transaction.teamId === input.teamId &&
+        (!input.accountId || transaction.accountId === input.accountId),
+    );
+  }
+
+  async createLedgerTransactionForTeam(input: {
+    draft: LedgerTransactionDraft;
+    duplicateKey: string;
+  }) {
+    const transaction = {
+      id: `txn_${this.transactions.size + 1}`,
+      teamId: input.draft.teamId,
+      accountId: input.draft.accountId,
+      description: input.draft.description,
+      postedAt: input.draft.postedAt,
+      money: input.draft.money,
+      type: input.draft.type,
+      source: input.draft.source,
+      counterpartyId: input.draft.counterpartyId ?? null,
+      providerTransactionId: input.draft.providerTransactionId ?? null,
+      categoryId: input.draft.categoryId ?? null,
+      reviewState: "needs_review" as const,
+      duplicateKey: input.duplicateKey,
+    };
+    this.transactions.set(transaction.id, transaction);
+    return transaction;
   }
 
   async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
@@ -345,5 +396,49 @@ describe("appRouter", () => {
       code: "NOT_FOUND",
       message: "Transaction not found",
     });
+  });
+
+  test("creates ledger transactions through the protected router", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    repository.accounts.set("acct_1", {
+      id: "acct_1",
+      teamId: "team_1",
+      name: "Operating",
+      currency: "USD",
+      type: "bank",
+    });
+    repository.categories.set("cat_software", {
+      id: "cat_software",
+      teamId: "team_1",
+      name: "Software",
+    });
+    const router = await createTestRouter(repository);
+
+    const result = await call(
+      router.ledger.createTransaction,
+      {
+        teamId: "team_1",
+        accountId: "acct_1",
+        description: "Figma subscription",
+        postedAt: "2026-06-14T00:00:00.000Z",
+        money: { amountMinor: -1200, currency: "USD" },
+        type: "expense",
+        source: "manual",
+        categoryId: "cat_software",
+        idempotencyKey: "idem_1",
+      },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(result.transaction.accountId).toBe("acct_1");
+    expect(result.transaction.duplicateKey).toBe(
+      "team_1:manual:acct_1:2026-06-14:USD:-1200:figma subscription",
+    );
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.outboxEvents).toHaveLength(1);
   });
 });

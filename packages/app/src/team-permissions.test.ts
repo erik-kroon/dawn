@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type {
   Actor,
   Category,
+  LedgerAccount,
+  LedgerTransactionDraft,
   TeamInvite,
   TeamMember,
   TeamMembership,
@@ -82,6 +84,29 @@ class MemoryTeamRepository implements TransactionReviewRepository {
 
   async getCategoryForTeam(_teamId: string, _categoryId: string): Promise<Category | null> {
     throw new Error("Unexpected category lookup");
+  }
+
+  async listLedgerAccounts(): Promise<LedgerAccount[]> {
+    throw new Error("Unexpected ledger account list");
+  }
+
+  async getLedgerAccountForTeam(): Promise<LedgerAccount | null> {
+    throw new Error("Unexpected ledger account lookup");
+  }
+
+  async getTransactionByDuplicateKey(): Promise<Transaction | null> {
+    throw new Error("Unexpected duplicate transaction lookup");
+  }
+
+  async listTransactionsForReport(): Promise<Transaction[]> {
+    throw new Error("Unexpected report transaction list");
+  }
+
+  async createLedgerTransactionForTeam(_input: {
+    draft: LedgerTransactionDraft;
+    duplicateKey: string;
+  }): Promise<Transaction> {
+    throw new Error("Unexpected ledger transaction creation");
   }
 
   async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {

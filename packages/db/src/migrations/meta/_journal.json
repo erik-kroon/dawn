@@ -22,6 +22,13 @@
       "when": 1781475116615,
       "tag": "0002_dazzling_supreme_intelligence",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1781477074794,
+      "tag": "0003_far_boom_boom",
+      "breakpoints": true
     }
   ]
 }
