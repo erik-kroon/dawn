@@ -50,7 +50,7 @@ pass, and the implementing agent has inspected the diff.
 | 6   | TanStack DB Sync Tracer                                      | UI/API-verified foundation in progress                   | Slices 2, 3              | Sync contract tests; API cursor tests; dashboard collection wiring; typecheck/check.                                     |
 | 7   | Cloudflare Infrastructure Baseline                           | Verified foundation, live plan blocked on CF auth        | Slice 1                  | Infra contract test; server bundle; `bun run check-types`; `bun run check`; credentialed Alchemy plan blocked.           |
 | 8   | Outbox Dispatcher And Queue Bridge                           | Verified foundation in progress                          | Slices 2, 7              | Job contract tests; dispatcher retry/idempotency tests; typecheck/check.                                                 |
-| 9   | Tenant Durable Object Realtime Fanout                        | Not started                                              | Slices 6, 8              | Multi-client invalidation test; Worker binding typecheck.                                                                |
+| 9   | Tenant Durable Object Realtime Fanout                        | Verified foundation, live multi-client blocked           | Slices 6, 8              | Subscription routing tests; sync protocol tests; Worker/server build; typecheck/check.                                   |
 | 10  | Banking Provider Adapter Interface And Mock Provider         | Not started                                              | Slices 4, 8              | Adapter contract tests; sync idempotency tests; manual mock sync.                                                        |
 | 11  | First Real Banking Provider                                  | Blocked on provider choice/credentials                   | Slice 10                 | Sandbox/provider tests; webhook signature tests; manual sandbox connection.                                              |
 | 12  | Documents And R2 Storage                                     | Not started                                              | Slices 3, 7, 8           | Metadata/permission tests; R2 mock/local test; manual upload/download.                                                   |
@@ -157,6 +157,10 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 8      | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                      |
 | 2026-06-15 slice 8      | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 211 files.                                                                                    |
 | 2026-06-15 slice 8      | `bun test packages/jobs/src/index.test.ts packages/app/src/outbox-dispatch.test.ts`                                                                                                                                                                                                                                          | Pass    | Final focused rerun after the malformed-message failure path adjustment: 7 tests passed.                                                    |
+| 2026-06-15 slice 9      | `bun test packages/sync/src/transactions.test.ts apps/server/src/tenant-coordinator.test.ts packages/jobs/src/index.test.ts packages/app/src/outbox-dispatch.test.ts`                                                                                                                                                        | Pass    | 16 tests passed for realtime protocol messages, transient hub routing, queue-job invalidation normalization, and outbox bridge behavior.    |
+| 2026-06-15 slice 9      | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                      |
+| 2026-06-15 slice 9      | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 213 files.                                                                                    |
+| 2026-06-15 slice 9      | `bun run --filter server build`                                                                                                                                                                                                                                                                                              | Pass    | Server Worker bundle built successfully after adding the default `fetch` plus `queue` export.                                               |
 
 ## Commit Log
 
@@ -173,6 +177,7 @@ pass, and the implementing agent has inspected the diff.
 | `6d7d4f3` | Transaction sync collection          | Added the sync package, cursor-scoped transaction endpoint, TanStack DB collection hook, and optimistic dashboard review.  |
 | `55adf24` | Cloudflare runtime baseline          | Added stage-aware Alchemy resources, Worker bindings, typed runtime helpers, infra contract tests, and environment docs.   |
 | `f926ce5` | Outbox dispatcher queue bridge       | Added job contracts, app dispatcher, outbox retry metadata, persisted job runs, Cloudflare queue publisher, and trigger.   |
+| `0a83b5c` | Tenant realtime fanout               | Added transaction realtime protocol, TenantCoordinator fanout, queue invalidation bridge, and web subscription refetch.    |
 
 ## Implementation Notes
 
@@ -244,6 +249,16 @@ metadata. Drizzle persists dispatch attempts, last error, next attempt time, and
 `POST /internal/outbox/dispatch` trigger guarded by `BETTER_AUTH_SECRET` bearer
 auth and backed by the `DAWN_JOBS` queue binding.
 
+Slice 9 foundation replaced the placeholder TenantCoordinator with transient
+WebSocket subscription routing for transaction sync invalidations. The server
+authorizes `/sync/transactions/subscribe` through the app-layer
+`transactions.read` access check before handing the socket to the team-named
+Durable Object. Queue `sync.invalidate` jobs now publish transaction invalidation
+events to the TenantCoordinator, and the dashboard transaction sync hook
+subscribes, refetches on connect/reconnect, and refetches when matching
+team-scoped invalidations arrive. The Durable Object stores only in-memory
+socket subscriptions and does not use Durable Object storage for domain state.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -274,7 +289,10 @@ auth and backed by the `DAWN_JOBS` queue binding.
   migrated local database and richer CSV mapping variants before it should be
   marked complete.
 - Slice 6 still needs authenticated two-session browser verification and a
-  realtime invalidation transport in a later Durable Object/outbox slice before
-  it should be marked complete.
+  deployed/local Worker-bound realtime invalidation exercise before it should be
+  marked complete.
 - Slice 8 still needs a migrated local or preview database plus a Worker-bound
   queue to manually trigger a real persisted outbox event end to end.
+- Slice 9 still needs live two-session browser verification against a Worker
+  runtime with Durable Object and Queue bindings; local unit/build checks cover
+  routing, protocol, and type contracts only.
