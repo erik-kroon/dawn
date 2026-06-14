@@ -122,6 +122,7 @@ pass, and the implementing agent has inspected the diff.
 | Commit    | Slice or task                  | Notes                                                  |
 | --------- | ------------------------------ | ------------------------------------------------------ |
 | `89c76a3` | Goal contract and package path | Switched Dawn goal from orchestration to implementor mode. |
+| `5f81d86` | Transaction review tracer foundation | Hardened exact money formatting, domain review transition, tenant-scoped repository access, and command-aware idempotency. |
 
 ## Implementation Notes
 
