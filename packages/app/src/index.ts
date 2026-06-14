@@ -106,6 +106,12 @@ export type ResolvedTeamAccess = {
   permissions: readonly Permission[];
 };
 
+export type TeamDirectory = {
+  teamId: string;
+  members: TeamMember[];
+  pendingInvites: TeamInvite[];
+};
+
 export type TransactionReviewRepository = {
   withTransaction<T>(callback: (repository: TransactionReviewRepository) => Promise<T>): Promise<T>;
   ensureDefaultWorkspace(actor: Actor): Promise<{ teamId: string }>;
@@ -159,6 +165,8 @@ export type TransactionReviewRepository = {
     invitedByActorId: string;
     expiresAt: Date;
   }): Promise<TeamInvite>;
+  listTeamMembers(teamId: string): Promise<TeamMember[]>;
+  listPendingTeamInvites(teamId: string): Promise<TeamInvite[]>;
   getTeamInvite(inviteId: string): Promise<TeamInvite | null>;
   addTeamMembership(input: {
     teamId: string;
@@ -410,6 +418,28 @@ export async function inviteTeamMember(
 
     return result;
   });
+}
+
+export async function listTeamDirectory(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+): Promise<TeamDirectory> {
+  const access = await resolveTeamAccess(
+    repository,
+    context,
+    "team.manage",
+    "You cannot manage members for this team",
+  );
+  const [members, pendingInvites] = await Promise.all([
+    repository.listTeamMembers(access.teamId),
+    repository.listPendingTeamInvites(access.teamId),
+  ]);
+
+  return {
+    teamId: access.teamId,
+    members,
+    pendingInvites,
+  };
 }
 
 export async function acceptTeamInvite(

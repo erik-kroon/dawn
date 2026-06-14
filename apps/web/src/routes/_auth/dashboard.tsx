@@ -36,6 +36,11 @@ function RouteComponent() {
   const transactionReview = useQuery(
     orpc.transactionReview.list.queryOptions({ input: { teamId: currentTeamId } }),
   );
+  const canManageTeam = transactionReview.data?.permissions.includes("team.manage") ?? false;
+  const teamDirectory = useQuery({
+    ...orpc.teams.directory.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: canManageTeam && Boolean(currentTeamId),
+  });
   const reviewMutation = useMutation(
     orpc.transactionReview.review.mutationOptions({
       onSuccess: async () => {
@@ -47,9 +52,18 @@ function RouteComponent() {
   );
   const inviteTeamMemberMutation = useMutation(
     orpc.teams.invite.mutationOptions({
-      onSuccess: () => {
+      onSuccess: async () => {
         setInviteEmail("");
         setInviteRole("member");
+        await queryClient.invalidateQueries({ queryKey: orpc.teams.directory.queryKey() });
+      },
+    }),
+  );
+  const updateTeamMemberRoleMutation = useMutation(
+    orpc.teams.updateMemberRole.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.teams.directory.queryKey() });
+        await queryClient.invalidateQueries({ queryKey: orpc.teams.list.queryKey() });
       },
     }),
   );
@@ -159,43 +173,93 @@ function RouteComponent() {
                   {transactionReview.data.role}
                 </p>
               </div>
-              {transactionReview.data.permissions.includes("team.manage") ? (
-                <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
-                  <Input
-                    aria-label="Invite email"
-                    onChange={(event) => setInviteEmail(event.target.value)}
-                    placeholder="teammate@example.com"
-                    value={inviteEmail}
-                  />
-                  <select
-                    aria-label="Invite role"
-                    className="h-9 rounded-none border bg-background px-2 text-sm"
-                    onChange={(event) => setInviteRole(event.target.value as TeamInviteRole)}
-                    value={inviteRole}
-                  >
-                    {teamInviteRoles.map((role) => (
-                      <option key={role} value={role}>
-                        {role}
-                      </option>
-                    ))}
-                  </select>
-                  <Button
-                    disabled={
-                      inviteTeamMemberMutation.isPending ||
-                      !inviteEmail.trim() ||
-                      !transactionReview.data.teamId
-                    }
-                    onClick={() =>
-                      inviteTeamMemberMutation.mutate({
-                        teamId: transactionReview.data.teamId,
-                        email: inviteEmail,
-                        role: inviteRole,
-                        idempotencyKey: crypto.randomUUID(),
-                      })
-                    }
-                  >
-                    Invite
-                  </Button>
+              {canManageTeam ? (
+                <div className="flex flex-col gap-3">
+                  <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                    <Input
+                      aria-label="Invite email"
+                      onChange={(event) => setInviteEmail(event.target.value)}
+                      placeholder="teammate@example.com"
+                      value={inviteEmail}
+                    />
+                    <select
+                      aria-label="Invite role"
+                      className="h-9 rounded-none border bg-background px-2 text-sm"
+                      onChange={(event) => setInviteRole(event.target.value as TeamInviteRole)}
+                      value={inviteRole}
+                    >
+                      {teamInviteRoles.map((role) => (
+                        <option key={role} value={role}>
+                          {role}
+                        </option>
+                      ))}
+                    </select>
+                    <Button
+                      disabled={
+                        inviteTeamMemberMutation.isPending ||
+                        !inviteEmail.trim() ||
+                        !transactionReview.data.teamId
+                      }
+                      onClick={() =>
+                        inviteTeamMemberMutation.mutate({
+                          teamId: transactionReview.data.teamId,
+                          email: inviteEmail,
+                          role: inviteRole,
+                          idempotencyKey: crypto.randomUUID(),
+                        })
+                      }
+                    >
+                      Invite
+                    </Button>
+                  </div>
+                  {teamDirectory.data ? (
+                    <div className="grid gap-2 text-sm">
+                      {teamDirectory.data.members.map((member) => (
+                        <div
+                          className="grid gap-2 border p-2 sm:grid-cols-[1fr_auto]"
+                          key={member.id}
+                        >
+                          <div>
+                            <p className="font-medium">
+                              {member.name ?? member.email ?? member.userId}
+                            </p>
+                            <p className="text-muted-foreground">{member.email ?? member.userId}</p>
+                          </div>
+                          <select
+                            aria-label={`Role for ${member.email ?? member.userId}`}
+                            className="h-9 rounded-none border bg-background px-2 text-sm"
+                            disabled={
+                              updateTeamMemberRoleMutation.isPending ||
+                              member.role === "owner" ||
+                              member.userId === session.data?.user.id
+                            }
+                            onChange={(event) =>
+                              updateTeamMemberRoleMutation.mutate({
+                                teamId: teamDirectory.data.teamId,
+                                userId: member.userId,
+                                role: event.target.value as TeamInviteRole,
+                                idempotencyKey: crypto.randomUUID(),
+                              })
+                            }
+                            value={member.role}
+                          >
+                            {member.role === "owner" ? <option value="owner">owner</option> : null}
+                            {teamInviteRoles.map((role) => (
+                              <option key={role} value={role}>
+                                {role}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      ))}
+                      {teamDirectory.data.pendingInvites.map((invite) => (
+                        <div className="border p-2" key={invite.id}>
+                          <p className="font-medium">{invite.email}</p>
+                          <p className="text-muted-foreground">pending · {invite.role}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -203,6 +267,11 @@ function RouteComponent() {
           {inviteTeamMemberMutation.error ? (
             <p className="mt-2 text-sm text-destructive">
               {inviteTeamMemberMutation.error.message}
+            </p>
+          ) : null}
+          {updateTeamMemberRoleMutation.error ? (
+            <p className="mt-2 text-sm text-destructive">
+              {updateTeamMemberRoleMutation.error.message}
             </p>
           ) : null}
         </CardContent>

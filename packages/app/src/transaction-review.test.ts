@@ -152,6 +152,14 @@ class MemoryTransactionReviewRepository implements TransactionReviewRepository {
     return invite;
   }
 
+  async listTeamMembers(): Promise<TeamMember[]> {
+    throw new Error("Unexpected team member list");
+  }
+
+  async listPendingTeamInvites(): Promise<TeamInvite[]> {
+    throw new Error("Unexpected team invite list");
+  }
+
   async getTeamInvite(): Promise<TeamInvite | null> {
     throw new Error("Unexpected invite lookup");
   }

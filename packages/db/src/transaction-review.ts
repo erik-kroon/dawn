@@ -317,6 +317,39 @@ export class DrizzleTransactionReviewRepository implements TransactionReviewRepo
     return mapTeamInvite(invite);
   }
 
+  async listTeamMembers(teamId: string) {
+    const members = await this.client
+      .select({
+        id: schema.teamMembership.id,
+        teamId: schema.teamMembership.teamId,
+        userId: schema.teamMembership.userId,
+        role: schema.teamMembership.role,
+        name: schema.user.name,
+        email: schema.user.email,
+      })
+      .from(schema.teamMembership)
+      .innerJoin(schema.user, eq(schema.user.id, schema.teamMembership.userId))
+      .where(eq(schema.teamMembership.teamId, teamId));
+
+    return members.map((member) => ({
+      id: member.id,
+      teamId: member.teamId,
+      userId: member.userId,
+      role: member.role as TeamRole,
+      name: member.name,
+      email: member.email,
+    }));
+  }
+
+  async listPendingTeamInvites(teamId: string) {
+    const invites = await this.client
+      .select()
+      .from(schema.teamInvite)
+      .where(and(eq(schema.teamInvite.teamId, teamId), eq(schema.teamInvite.status, "pending")));
+
+    return invites.map(mapTeamInvite);
+  }
+
   async getTeamInvite(inviteId: string) {
     const [invite] = await this.client
       .select()

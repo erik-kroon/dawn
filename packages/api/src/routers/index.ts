@@ -5,6 +5,7 @@ import {
   acceptTeamInvite,
   createTeam,
   inviteTeamMember,
+  listTeamDirectory,
   listTeams,
   listTransactionReviewWorkspace,
   reviewTransaction,
@@ -89,6 +90,21 @@ export const appRouter = {
           },
           input,
         );
+      } catch (error) {
+        mapAppError(error);
+      }
+    }),
+    directory: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
+      try {
+        return await listTeamDirectory(transactionReviewRepository, {
+          actor: {
+            id: context.session.user.id,
+            type: "user",
+            email: context.session.user.email,
+          },
+          requestId: context.requestId,
+          teamId: input?.teamId,
+        });
       } catch (error) {
         mapAppError(error);
       }

@@ -19,6 +19,7 @@ import {
   type ReviewWorkspaceData,
   type TransactionReviewRepository,
   inviteTeamMember,
+  listTeamDirectory,
   resolveTeamAccess,
   updateTeamMemberRole,
 } from "./index";
@@ -133,6 +134,28 @@ class MemoryTeamRepository implements TransactionReviewRepository {
     return invite;
   }
 
+  async listTeamMembers(teamId: string) {
+    return [...this.memberships.entries()]
+      .filter(([key]) => key.endsWith(`:${teamId}`))
+      .map(([key, role]) => {
+        const userId = key.split(":")[0] ?? "user_1";
+        return {
+          id: `${teamId}:${userId}`,
+          teamId,
+          userId,
+          role,
+          name: null,
+          email: null,
+        };
+      });
+  }
+
+  async listPendingTeamInvites(teamId: string) {
+    return [...this.invites.values()].filter(
+      (invite) => invite.teamId === teamId && invite.status === "pending",
+    );
+  }
+
   async getTeamInvite(inviteId: string) {
     return this.invites.get(inviteId) ?? null;
   }
@@ -235,6 +258,39 @@ describe("team permissions", () => {
         idempotencyKey: "idem_1",
       }),
     ).rejects.toEqual(new AppError("FORBIDDEN", "You cannot invite members to this team"));
+  });
+
+  test("lists team directory for team managers", async () => {
+    const repository = new MemoryTeamRepository();
+    repository.memberships.set("user_1:team_1", "admin");
+    repository.memberships.set("user_2:team_1", "viewer");
+    repository.invites.set("invite_1", {
+      id: "invite_1",
+      teamId: "team_1",
+      email: "pending@example.com",
+      role: "member",
+      status: "pending",
+      invitedByActorId: "user_1",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const directory = await listTeamDirectory(repository, context);
+
+    expect(directory.members.map((member) => [member.userId, member.role])).toEqual([
+      ["user_1", "admin"],
+      ["user_2", "viewer"],
+    ]);
+    expect(directory.pendingInvites).toHaveLength(1);
+    expect(directory.pendingInvites[0]?.email).toBe("pending@example.com");
+  });
+
+  test("denies team directory to non-managers", async () => {
+    const repository = new MemoryTeamRepository();
+    repository.memberships.set("user_1:team_1", "viewer");
+
+    await expect(listTeamDirectory(repository, context)).rejects.toEqual(
+      new AppError("FORBIDDEN", "You cannot manage members for this team"),
+    );
   });
 
   test("creates team invites with audit, outbox, and idempotent replay", async () => {

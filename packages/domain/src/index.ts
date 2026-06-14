@@ -35,6 +35,8 @@ export type TeamMembership = {
 
 export type TeamMember = TeamMembership & {
   id: string;
+  name?: string | null;
+  email?: string | null;
 };
 
 export type TeamInviteStatus = "pending" | "accepted" | "revoked" | "expired";
