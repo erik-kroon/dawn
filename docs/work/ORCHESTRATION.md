@@ -48,7 +48,7 @@ pass, and the implementing agent has inspected the diff.
 | 4   | Money And Ledger Core                                        | API-verified foundation in progress                      | Slice 3                  | Money/domain tests; duplicate and split tests; report fixture tests; typecheck/check.                                    |
 | 5   | CSV Transaction Import                                       | UI/API-verified foundation in progress                   | Slice 4                  | Parser tests; preview/duplicate/commit tests; typecheck/check; web build.                                                |
 | 6   | TanStack DB Sync Tracer                                      | UI/API-verified foundation in progress                   | Slices 2, 3              | Sync contract tests; API cursor tests; dashboard collection wiring; typecheck/check.                                     |
-| 7   | Cloudflare Infrastructure Baseline                           | Not started                                              | Slice 1                  | Typecheck; deployment dry run/local equivalent; secret review.                                                           |
+| 7   | Cloudflare Infrastructure Baseline                           | Verified foundation, live plan blocked on CF auth        | Slice 1                  | Infra contract test; server bundle; `bun run check-types`; `bun run check`; credentialed Alchemy plan blocked.           |
 | 8   | Outbox Dispatcher And Queue Bridge                           | Not started                                              | Slices 2, 7              | Outbox transaction tests; worker/queue retry tests; manual dispatch.                                                     |
 | 9   | Tenant Durable Object Realtime Fanout                        | Not started                                              | Slices 6, 8              | Multi-client invalidation test; Worker binding typecheck.                                                                |
 | 10  | Banking Provider Adapter Interface And Mock Provider         | Not started                                              | Slices 4, 8              | Adapter contract tests; sync idempotency tests; manual mock sync.                                                        |
@@ -145,6 +145,13 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 6      | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 197 files.                                                                                    |
 | 2026-06-15 slice 6      | `bun test packages/sync/src/transactions.test.ts packages/app/src/transaction-review.test.ts packages/api/src/router.test.ts`                                                                                                                                                                                                | Pass    | Final focused run after formatting: 20 tests passed.                                                                                        |
 | 2026-06-15 slice 6      | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Final full workspace typecheck/build after formatting passed; Vite reported the existing large chunk warning.                               |
+| 2026-06-15 slice 7      | `bun run --filter @dawn/infra check-types`                                                                                                                                                                                                                                                                                   | Pass    | Infra package typecheck passed after adding the Cloudflare resource graph and binding contracts.                                            |
+| 2026-06-15 slice 7      | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                      |
+| 2026-06-15 slice 7      | `bun run --filter @dawn/infra plan -- --stage preview`                                                                                                                                                                                                                                                                       | Blocked | Alchemy read-only run requires Cloudflare provider configuration or credentials (`alchemy login` or `CLOUDFLARE_API_TOKEN`).                |
+| 2026-06-15 slice 7      | `bun test packages/infra/src/environments.test.ts`                                                                                                                                                                                                                                                                           | Pass    | 4 offline infra contract tests passed for stages, resource names, protected deletion, and runtime binding names.                            |
+| 2026-06-15 slice 7      | `bun run --filter server build`                                                                                                                                                                                                                                                                                              | Pass    | Server bundle built successfully; output includes `pg-cloudflare` compatibility path alongside current Postgres driver.                     |
+| 2026-06-15 slice 7      | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 204 files.                                                                                    |
+| 2026-06-15 slice 7      | `bun test packages/infra/src/environments.test.ts`                                                                                                                                                                                                                                                                           | Pass    | Final focused run after formatting: 4 tests passed.                                                                                         |
 
 ## Commit Log
 
@@ -159,6 +166,7 @@ pass, and the implementing agent has inspected the diff.
 | `350c577` | Money and ledger core foundation     | Added exact money arithmetic, ledger drafts, duplicate keys, report totals, app/API use cases, DB schema, and migration.   |
 | `dc2b2d5` | CSV transaction import foundation    | Added CSV parsing, preview/commit use cases, import sessions, API routes, dashboard upload UI, and verification.           |
 | `6d7d4f3` | Transaction sync collection          | Added the sync package, cursor-scoped transaction endpoint, TanStack DB collection hook, and optimistic dashboard review.  |
+| `55adf24` | Cloudflare runtime baseline          | Added stage-aware Alchemy resources, Worker bindings, typed runtime helpers, infra contract tests, and environment docs.   |
 
 ## Implementation Notes
 
@@ -212,6 +220,15 @@ repository reads team-scoped changes after `updatedAt` cursors, and the
 dashboard review list is backed by a TanStack DB query collection with optimistic
 review updates and server-refetch reconciliation.
 
+Slice 7 foundation replaced the web-only Alchemy scaffold with a stage-aware
+Cloudflare resource graph for preview, staging, and production. It defines the
+API Worker, R2 document bucket, jobs queue and dead-letter queue, KV cache,
+TenantCoordinator Durable Object placeholder, and optional Hyperdrive binding.
+Shared binding types now make R2, Queue, KV, Durable Object, and Hyperdrive
+bindings available to server/runtime code, and the server exports a minimal
+TenantCoordinator class for Worker migration compatibility. Environment and
+secret expectations are documented in `docs/deployment/CLOUDFLARE.md`.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -223,6 +240,9 @@ review updates and server-refetch reconciliation.
   `packages/ai` should be introduced only when their slice owns real contracts.
 - Checked-in server env lacks `POLAR_ACCESS_TOKEN`; full authenticated dashboard
   smoke needs valid local auth/payment env or a test-mode auth bypass.
+- Cloudflare live planning/deploy remains blocked until `alchemy login` is run or
+  `CLOUDFLARE_API_TOKEN` is set for the target account. Offline infra contract
+  tests and typechecks cover the baseline in the meantime.
 - Authenticated transaction-review UI exercise remains blocked until a local
   session/test auth path is available. Current local smoke verifies server,
   RPC health, auth-session null response, and the web shell only.
