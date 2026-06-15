@@ -88,6 +88,7 @@ import {
   applyTransactionReview,
   assertCanEditInvoiceDraft,
   assertCanSendInvoice,
+  assertCanSendInvoiceReminder,
   assertInvoiceDraftInput,
   assertLedgerTransactionDraft,
   assertProjectInput,
@@ -856,6 +857,22 @@ export type SendInvoiceCommand = {
 };
 
 export type SendInvoiceResult = {
+  invoice: InvoiceDraft;
+  providerMessageId: string;
+  replayed: boolean;
+};
+
+export type SendInvoiceReminderCommand = {
+  teamId: string;
+  invoiceId: string;
+  toEmail?: string | null;
+  subject?: string | null;
+  message?: string | null;
+  confirm: boolean;
+  idempotencyKey: string;
+};
+
+export type SendInvoiceReminderResult = {
   invoice: InvoiceDraft;
   providerMessageId: string;
   replayed: boolean;
@@ -2144,6 +2161,7 @@ const createProductOperation = "product.create";
 const createDraftInvoiceOperation = "invoice.draft.create";
 const updateDraftInvoiceOperation = "invoice.draft.update";
 const sendInvoiceOperation = "invoice.send";
+const sendInvoiceReminderOperation = "invoice.reminder.send";
 const recordInvoicePaymentOperation = "invoice.payment.record";
 const createRecurringInvoiceScheduleOperation = "invoice.recurring.create";
 const generateRecurringInvoiceOperation = "invoice.recurring.generate";
@@ -7186,6 +7204,169 @@ export async function sendInvoice(
       teamId: command.teamId,
       actorId: context.actor.id,
       operation: sendInvoiceOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function sendInvoiceReminder(
+  repository: DawnRepository,
+  renderer: InvoicePdfRenderer,
+  emailProvider: InvoiceEmailDeliveryProvider,
+  context: TransactionReviewContext,
+  command: SendInvoiceReminderCommand,
+): Promise<SendInvoiceReminderResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const billingRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Invoice not found");
+
+    await resolveTeamAccess(
+      billingRepository,
+      { ...context, teamId: command.teamId },
+      "invoices.send",
+      "You cannot send invoice reminders for this team",
+    );
+
+    if (!command.confirm) {
+      throw new AppError("CONFLICT", "Invoice reminder requires explicit confirmation");
+    }
+
+    const normalized = {
+      teamId: command.teamId,
+      invoiceId: command.invoiceId,
+      toEmail: normalizeOptionalEmail(command.toEmail),
+      subject: command.subject?.trim() || null,
+      message: command.message?.trim() || null,
+      confirm: command.confirm,
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await billingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      sendInvoiceReminderOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError("CONFLICT", "Idempotency key was already used for a different reminder");
+      }
+
+      return { ...(replayed.result as SendInvoiceReminderResult), replayed: true };
+    }
+
+    const invoice = await billingRepository.getInvoiceForTeam(command.teamId, command.invoiceId);
+
+    if (!invoice) {
+      throw new AppError("NOT_FOUND", "Invoice not found");
+    }
+
+    try {
+      assertCanSendInvoiceReminder(invoice);
+    } catch (error) {
+      throw new AppError("CONFLICT", errorMessage(error));
+    }
+
+    const amountDueMinor = invoice.totals.total.amountMinor - invoice.amountPaid.amountMinor;
+
+    if (amountDueMinor <= 0) {
+      throw new AppError("CONFLICT", "Invoice reminder requires an outstanding balance");
+    }
+
+    const customer = await billingRepository.getCustomerForTeam(command.teamId, invoice.customerId);
+
+    if (!customer) {
+      throw new AppError("NOT_FOUND", "Customer not found");
+    }
+
+    const contact = await billingRepository.getCustomerContactForCustomer(
+      command.teamId,
+      customer.id,
+    );
+    const toEmail =
+      normalized.toEmail ?? invoice.deliveryToEmail ?? contact?.email ?? customer.email;
+
+    if (!toEmail) {
+      throw new AppError("CONFLICT", "Invoice reminder requires a recipient email");
+    }
+
+    const pdf = await renderer.render({ invoice, customer, contact });
+    const amountDue = formatMoney({ amountMinor: amountDueMinor, currency: invoice.currency });
+    const subject = normalized.subject ?? `Reminder: Invoice ${invoice.invoiceNumber}`;
+    const delivery = await emailProvider.sendInvoice({
+      teamId: command.teamId,
+      invoiceId: invoice.id,
+      to: toEmail,
+      subject,
+      text:
+        normalized.message ??
+        `Reminder for invoice ${invoice.invoiceNumber}. Amount due: ${amountDue}.`,
+      attachment: {
+        fileName: pdf.fileName,
+        contentType: pdf.contentType,
+        bodyBase64: pdf.bodyBase64,
+      },
+    });
+
+    await billingRepository.createInvoiceEvent({
+      eventId: crypto.randomUUID(),
+      teamId: command.teamId,
+      invoiceId: invoice.id,
+      type: "invoice.reminder_sent",
+      occurredAt: delivery.acceptedAt,
+      actorId: context.actor.id,
+      metadata: {
+        toEmail,
+        provider: emailProvider.provider,
+        providerMessageId: delivery.providerMessageId,
+        amountDue: { amountMinor: amountDueMinor, currency: invoice.currency },
+      },
+    });
+
+    await billingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "invoice.reminder.sent",
+      entityType: "invoice",
+      entityId: invoice.id,
+      metadata: {
+        toEmail,
+        providerMessageId: delivery.providerMessageId,
+        amountDue: { amountMinor: amountDueMinor, currency: invoice.currency },
+      },
+    });
+
+    await billingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "invoice.reminder_sent",
+      version: 1,
+      payload: {
+        invoiceId: invoice.id,
+        customerId: invoice.customerId,
+        toEmail,
+        providerMessageId: delivery.providerMessageId,
+        amountDue: { amountMinor: amountDueMinor, currency: invoice.currency },
+      },
+    });
+
+    const result = {
+      invoice,
+      providerMessageId: delivery.providerMessageId,
+      replayed: false,
+    };
+
+    await billingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: sendInvoiceReminderOperation,
       key: command.idempotencyKey,
       fingerprint,
       result,

@@ -64,6 +64,7 @@ import {
   grantOAuthConsent,
   runAutomationsForOutboxEvent,
   sendInvoice,
+  sendInvoiceReminder,
   sendAssistantMessage,
   sendIntegrationEmail,
   sendIntegrationMessage,
@@ -476,6 +477,8 @@ const sendInvoiceInput = invoiceReferenceInput.extend({
   confirm: z.literal(true),
   idempotencyKey: z.string().min(1),
 });
+
+const sendInvoiceReminderInput = sendInvoiceInput;
 
 const recordInvoicePaymentInput = invoiceReferenceInput.extend({
   amount: moneyInput,
@@ -1662,6 +1665,30 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await sendInvoice(
+              transactionReviewRepository,
+              invoicePdfRenderer,
+              invoiceEmailDeliveryProvider,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                toEmail: input.toEmail ?? null,
+                subject: input.subject ?? null,
+                message: input.message ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      sendReminder: protectedProcedure
+        .input(sendInvoiceReminderInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await sendInvoiceReminder(
               transactionReviewRepository,
               invoicePdfRenderer,
               invoiceEmailDeliveryProvider,

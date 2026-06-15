@@ -259,6 +259,7 @@ export type InvoiceEventType =
   | "invoice.created"
   | "invoice.updated"
   | "invoice.sent"
+  | "invoice.reminder_sent"
   | "invoice.viewed"
   | "invoice.payment_recorded"
   | "invoice.overdue"
@@ -1114,6 +1115,17 @@ export function assertCanSendInvoice(invoice: { status: InvoiceStatus; totals: I
 
   if (invoice.totals.total.amountMinor <= 0) {
     throw new Error("Invoice total must be positive before sending");
+  }
+}
+
+export function assertCanSendInvoiceReminder(invoice: { status: InvoiceStatus }): void {
+  if (
+    invoice.status !== "sent" &&
+    invoice.status !== "viewed" &&
+    invoice.status !== "overdue" &&
+    invoice.status !== "partially_paid"
+  ) {
+    throw new Error("Only open sent invoices can receive reminders");
   }
 }
 

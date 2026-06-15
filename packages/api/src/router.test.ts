@@ -2921,6 +2921,16 @@ describe("appRouter", () => {
       },
       context,
     );
+    const reminder = await call(
+      router.billing.sendReminder,
+      {
+        teamId: "team_1",
+        invoiceId: invoice.invoice.id,
+        confirm: true,
+        idempotencyKey: "reminder_1",
+      },
+      context,
+    );
     const payment = await call(
       router.billing.recordPayment,
       {
@@ -2953,6 +2963,8 @@ describe("appRouter", () => {
       true,
     );
     expect(sent.invoice.status).toBe("sent");
+    expect(reminder.invoice.status).toBe("sent");
+    expect(reminder.providerMessageId).toBe("mock_email_team_1_" + invoice.invoice.id);
     expect(payment.invoice.status).toBe("paid");
     expect(recurring.schedule.frequency).toBe("monthly");
     expect(list.customers).toHaveLength(1);
@@ -2961,8 +2973,8 @@ describe("appRouter", () => {
     expect(list.draftInvoices).toHaveLength(0);
     expect(list.payments).toHaveLength(1);
     expect(list.recurringSchedules).toHaveLength(1);
-    expect(repository.auditEvents).toHaveLength(7);
-    expect(repository.outboxEvents).toHaveLength(7);
+    expect(repository.auditEvents).toHaveLength(8);
+    expect(repository.outboxEvents).toHaveLength(8);
   });
 
   test("creates projects, tracks time, and invoices billable entries through protected routes", async () => {

@@ -592,6 +592,13 @@ function RouteComponent() {
       },
     }),
   );
+  const sendInvoiceReminderMutation = useMutation(
+    orpc.billing.sendReminder.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
+      },
+    }),
+  );
   const recordInvoicePaymentMutation = useMutation(
     orpc.billing.recordPayment.mutationOptions({
       onSuccess: async () => {
@@ -2888,6 +2895,27 @@ function RouteComponent() {
                           >
                             Send
                           </Button>
+                          <Button
+                            disabled={
+                              sendInvoiceReminderMutation.isPending ||
+                              (invoice.status !== "sent" &&
+                                invoice.status !== "viewed" &&
+                                invoice.status !== "overdue" &&
+                                invoice.status !== "partially_paid")
+                            }
+                            onClick={() =>
+                              sendInvoiceReminderMutation.mutate({
+                                teamId: invoice.teamId,
+                                invoiceId: invoice.id,
+                                confirm: true,
+                                idempotencyKey: crypto.randomUUID(),
+                              })
+                            }
+                            size="sm"
+                            variant="outline"
+                          >
+                            Send reminder
+                          </Button>
                         </div>
                         <div className="grid gap-2 md:col-span-2 md:grid-cols-[1fr_auto_1fr_auto]">
                           <Input
@@ -3007,6 +3035,11 @@ function RouteComponent() {
               ) : null}
               {sendInvoiceMutation.error ? (
                 <p className="text-sm text-destructive">{sendInvoiceMutation.error.message}</p>
+              ) : null}
+              {sendInvoiceReminderMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {sendInvoiceReminderMutation.error.message}
+                </p>
               ) : null}
               {recordInvoicePaymentMutation.error ? (
                 <p className="text-sm text-destructive">

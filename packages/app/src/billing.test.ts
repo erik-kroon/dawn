@@ -11,6 +11,7 @@ import {
   previewInvoicePdf,
   recordInvoicePayment,
   sendInvoice,
+  sendInvoiceReminder,
   updateDraftInvoice,
   type DawnRepository,
 } from "./index";
@@ -708,5 +709,74 @@ describe("billing use cases", () => {
     expect(repository.invoiceEvents.size).toBe(4);
     expect(generated.invoice.invoiceNumber).toBe("INV-001-R20260715");
     expect(generated.schedule.nextRunAt).toBe("2026-08-15T00:00:00.000Z");
+  });
+
+  test("sends invoice reminders for open sent invoices", async () => {
+    const repository = new MemoryBillingRepository();
+    repository.role = "admin";
+    const renderer = createDeterministicInvoicePdfRenderer();
+    const emailProvider = createMockInvoiceEmailDeliveryProvider();
+    const customer = await createCustomer(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      name: "Acme Co",
+      email: "billing@acme.test",
+      idempotencyKey: "customer_1",
+    });
+    const created = await createDraftInvoice(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      customerId: customer.customer.id,
+      invoiceNumber: "INV-REM-001",
+      issueDate: "2026-06-15T00:00:00.000Z",
+      dueDate: "2026-07-15T00:00:00.000Z",
+      currency: "USD",
+      lines: [
+        {
+          description: "Consulting",
+          quantityMilli: 1_000,
+          unitPrice: { amountMinor: 100_00, currency: "USD" },
+        },
+      ],
+      idempotencyKey: "invoice_1",
+    });
+
+    await sendInvoice(repository as unknown as DawnRepository, renderer, emailProvider, context, {
+      teamId: "team_1",
+      invoiceId: created.invoice.id,
+      confirm: true,
+      idempotencyKey: "send_1",
+    });
+
+    const reminder = await sendInvoiceReminder(
+      repository as unknown as DawnRepository,
+      renderer,
+      emailProvider,
+      context,
+      {
+        teamId: "team_1",
+        invoiceId: created.invoice.id,
+        confirm: true,
+        idempotencyKey: "reminder_1",
+      },
+    );
+    const replayed = await sendInvoiceReminder(
+      repository as unknown as DawnRepository,
+      renderer,
+      emailProvider,
+      context,
+      {
+        teamId: "team_1",
+        invoiceId: created.invoice.id,
+        confirm: true,
+        idempotencyKey: "reminder_1",
+      },
+    );
+    const events = [...repository.invoiceEvents.values()];
+
+    expect(reminder.invoice.status).toBe("sent");
+    expect(reminder.providerMessageId).toBe("mock_email_team_1_" + created.invoice.id);
+    expect(replayed.replayed).toBe(true);
+    expect(events.map((event) => event.type)).toEqual(["invoice.sent", "invoice.reminder_sent"]);
+    expect(repository.auditEvents.at(-1)).toMatchObject({ action: "invoice.reminder.sent" });
+    expect(repository.outboxEvents.at(-1)).toMatchObject({ type: "invoice.reminder_sent" });
   });
 });
