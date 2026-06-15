@@ -1,7 +1,9 @@
 export type Actor = {
   id: string;
-  type: "user";
+  type: "user" | "api_key" | "oauth_app" | "system" | "assistant" | "provider_webhook";
   email?: string;
+  teamId?: string;
+  permissions?: readonly Permission[];
 };
 
 export type TeamRole = "owner" | "admin" | "member" | "accountant" | "viewer";
@@ -25,7 +27,15 @@ export type Permission =
   | "assistant.mutate"
   | "automations.read"
   | "automations.write"
-  | "automations.run";
+  | "automations.run"
+  | "webhooks.manage";
+
+export type PublicApiScope =
+  | "transactions.read"
+  | "transactions.write"
+  | "invoices.read"
+  | "invoices.write"
+  | "webhooks.manage";
 
 export type Team = {
   id: string;
@@ -601,6 +611,69 @@ export type AutomationRun = {
   finishedAt?: string | null;
 };
 
+export type ApiKey = {
+  id: string;
+  teamId: string;
+  name: string;
+  keyPrefix: string;
+  scopes: PublicApiScope[];
+  createdByActorId: string;
+  lastUsedAt?: string | null;
+  revokedAt?: string | null;
+  createdAt: string;
+};
+
+export type OAuthApp = {
+  id: string;
+  teamId: string;
+  name: string;
+  redirectUris: string[];
+  scopes: PublicApiScope[];
+  createdByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type OAuthGrant = {
+  id: string;
+  teamId: string;
+  appId: string;
+  actorId: string;
+  scopes: PublicApiScope[];
+  revokedAt?: string | null;
+  createdAt: string;
+};
+
+export type WebhookSubscription = {
+  id: string;
+  teamId: string;
+  url: string;
+  eventTypes: string[];
+  status: "active" | "disabled";
+  createdByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WebhookDeliveryStatus = "pending" | "delivered" | "failed";
+
+export type WebhookDelivery = {
+  id: string;
+  teamId: string;
+  subscriptionId: string;
+  outboxEventId: string;
+  status: WebhookDeliveryStatus;
+  attempt: number;
+  requestPayload: Record<string, unknown>;
+  responseStatus?: number | null;
+  responseBody?: string | null;
+  error?: string | null;
+  nextAttemptAt?: string | null;
+  deliveredAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export function automationActionPermission(actionType: AutomationActionType): Permission {
   if (actionType === "categorize_transaction") {
     return "transactions.categorize";
@@ -627,6 +700,30 @@ export function automationActionRisk(actionType: AutomationActionType): Assistan
 
 export function automationActionRequiresApproval(actionType: AutomationActionType) {
   return automationActionRisk(actionType) === "external_side_effect";
+}
+
+export function permissionForPublicApiScope(scope: PublicApiScope): Permission {
+  if (scope === "transactions.write") {
+    return "transactions.write";
+  }
+
+  if (scope === "invoices.read") {
+    return "invoices.read";
+  }
+
+  if (scope === "invoices.write") {
+    return "invoices.write";
+  }
+
+  if (scope === "webhooks.manage") {
+    return "webhooks.manage";
+  }
+
+  return "transactions.read";
+}
+
+export function permissionsForPublicApiScopes(scopes: readonly PublicApiScope[]) {
+  return scopes.map(permissionForPublicApiScope);
 }
 
 export type InboxMatchInput = {
@@ -705,6 +802,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "automations.read",
     "automations.write",
     "automations.run",
+    "webhooks.manage",
   ],
   admin: [
     "transactions.read",
@@ -725,6 +823,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "automations.read",
     "automations.write",
     "automations.run",
+    "webhooks.manage",
   ],
   member: [
     "transactions.read",

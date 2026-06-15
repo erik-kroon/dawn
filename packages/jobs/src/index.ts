@@ -80,6 +80,14 @@ export const automationRunJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const webhookDeliveryJobSchema = z.object({
+  type: z.literal("webhook.deliver"),
+  teamId: z.string().min(1),
+  sourceOutboxEventId: z.string().min(1),
+  eventType: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   outboxDispatchJobSchema,
   syncInvalidationJobSchema,
@@ -87,6 +95,7 @@ export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   recurringInvoiceGenerationJobSchema,
   weeklyInsightGenerationJobSchema,
   automationRunJobSchema,
+  webhookDeliveryJobSchema,
 ]);
 
 export type OutboxDispatchJob = z.infer<typeof outboxDispatchJobSchema>;
@@ -95,6 +104,7 @@ export type DocumentExtractionJob = z.infer<typeof documentExtractionJobSchema>;
 export type RecurringInvoiceGenerationJob = z.infer<typeof recurringInvoiceGenerationJobSchema>;
 export type WeeklyInsightGenerationJob = z.infer<typeof weeklyInsightGenerationJobSchema>;
 export type AutomationRunJob = z.infer<typeof automationRunJobSchema>;
+export type WebhookDeliveryJob = z.infer<typeof webhookDeliveryJobSchema>;
 export type DawnQueueMessage = z.infer<typeof dawnQueueMessageSchema>;
 
 export function createOutboxDispatchJob(event: OutboxEventForJob): OutboxDispatchJob {
@@ -119,6 +129,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const recurringInvoiceJob = createRecurringInvoiceGenerationJob(event);
   const weeklyInsightJob = createWeeklyInsightGenerationJob(event);
   const automationJob = createAutomationRunJob(event);
+  const webhookJob = createWebhookDeliveryJob(event);
 
   return [
     dispatchJob,
@@ -127,6 +138,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
     recurringInvoiceJob,
     weeklyInsightJob,
     automationJob,
+    webhookJob,
   ].filter((message): message is DawnQueueMessage => Boolean(message));
 }
 
@@ -255,6 +267,16 @@ function createAutomationRunJob(event: OutboxEventForJob): AutomationRunJob {
     sourceOutboxEventId: event.id,
     eventType: event.type,
     idempotencyKey: `automation:run:${event.id}`,
+  };
+}
+
+function createWebhookDeliveryJob(event: OutboxEventForJob): WebhookDeliveryJob {
+  return {
+    type: "webhook.deliver",
+    teamId: event.teamId,
+    sourceOutboxEventId: event.id,
+    eventType: event.type,
+    idempotencyKey: `webhook:deliver:${event.id}`,
   };
 }
 

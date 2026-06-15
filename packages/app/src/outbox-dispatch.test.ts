@@ -139,12 +139,13 @@ describe("dispatchOutboxEvents", () => {
       dispatched: 1,
       failed: 0,
       skipped: 0,
-      queuedMessages: 3,
+      queuedMessages: 4,
     });
     expect(publisher.messages.map((message) => message.type)).toEqual([
       "outbox.dispatch",
       "sync.invalidate",
       "automation.run",
+      "webhook.deliver",
     ]);
     expect(repository.events.get("outbox_1")).toMatchObject({
       status: "dispatched",
@@ -172,6 +173,13 @@ describe("dispatchOutboxEvents", () => {
         status: "queued",
         attempt: 1,
         idempotencyKey: "automation:run:outbox_1",
+      },
+      {
+        outboxEventId: "outbox_1",
+        jobType: "webhook.deliver",
+        status: "queued",
+        attempt: 1,
+        idempotencyKey: "webhook:deliver:outbox_1",
       },
     ]);
   });

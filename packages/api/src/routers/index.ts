@@ -8,6 +8,7 @@ import {
   commitCsvTransactionImport,
   createDeterministicInvoicePdfRenderer,
   connectMockBankConnection,
+  createApiKey,
   createCustomer,
   createDocumentDownload,
   createDocumentUpload,
@@ -20,6 +21,7 @@ import {
   createInvoiceFromTimeEntries,
   createRecurringInvoiceSchedule,
   createTeam,
+  createWebhookSubscription,
   generateInboxMatchSuggestions,
   getAssistantConversation,
   inviteTeamMember,
@@ -28,6 +30,7 @@ import {
   listAutomationWorkspace,
   listBankConnections,
   listBillingWorkspace,
+  listDeveloperWorkspace,
   listDocuments,
   listInboxItems,
   listLedgerSummary,
@@ -163,6 +166,34 @@ const createAutomationRuleInput = z.object({
 const runAutomationForOutboxEventInput = z.object({
   teamId: z.string().min(1),
   outboxEventId: z.string().min(1),
+});
+
+const publicApiScopeInput = z.enum([
+  "transactions.read",
+  "transactions.write",
+  "invoices.read",
+  "invoices.write",
+  "webhooks.manage",
+]);
+
+const developerWorkspaceInput = z
+  .object({
+    teamId: z.string().min(1).optional(),
+  })
+  .optional();
+
+const createApiKeyInput = z.object({
+  teamId: z.string().min(1),
+  name: z.string().trim().min(1).max(120),
+  scopes: z.array(publicApiScopeInput).min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const createWebhookSubscriptionInput = z.object({
+  teamId: z.string().min(1),
+  url: z.url(),
+  eventTypes: z.array(z.string().trim().min(1).max(120)).min(1),
+  idempotencyKey: z.string().min(1),
 });
 
 const bankConnectionInput = z.object({
@@ -810,6 +841,55 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await runAutomationsForOutboxEvent(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    developers: {
+      list: protectedProcedure
+        .input(developerWorkspaceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listDeveloperWorkspace(transactionReviewRepository, {
+              actor: { id: context.session.user.id, type: "user" },
+              requestId: context.requestId,
+              teamId: input?.teamId,
+            });
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createApiKey: protectedProcedure
+        .input(createApiKeyInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createApiKey(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createWebhookSubscription: protectedProcedure
+        .input(createWebhookSubscriptionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createWebhookSubscription(
               transactionReviewRepository,
               {
                 actor: { id: context.session.user.id, type: "user" },

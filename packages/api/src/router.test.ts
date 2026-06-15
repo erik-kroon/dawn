@@ -3,6 +3,7 @@ import { call } from "@orpc/server";
 import { createDeterministicInvoicePdfRenderer } from "@dawn/app";
 import type {
   Actor,
+  ApiKey,
   AutomationRule,
   AutomationRun,
   AssistantActionApproval,
@@ -30,6 +31,9 @@ import type {
   TeamRole,
   TimeEntry,
   Transaction,
+  OAuthApp,
+  WebhookDelivery,
+  WebhookSubscription,
 } from "@dawn/domain";
 import type {
   ActorTeam,
@@ -92,6 +96,10 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   assistantApprovals = new Map<string, AssistantActionApproval>();
   automationRules = new Map<string, AutomationRule>();
   automationRuns = new Map<string, AutomationRun>();
+  apiKeys = new Map<string, ApiKey & { keyHash: string }>();
+  oauthApps = new Map<string, OAuthApp>();
+  webhookSubscriptions = new Map<string, WebhookSubscription & { signingSecretHash: string }>();
+  webhookDeliveries = new Map<string, WebhookDelivery>();
   outboxEventRecords = new Map<string, OutboxEvent>();
   aliases: TeamAlias[] = [];
   hardNegatives: HardNegativeTransactionMatch[] = [];
@@ -1608,6 +1616,129 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return run;
   }
 
+  async listApiKeys(teamId: string) {
+    return [...this.apiKeys.values()].filter((apiKey) => apiKey.teamId === teamId);
+  }
+
+  async listOAuthApps(teamId: string) {
+    return [...this.oauthApps.values()].filter((app) => app.teamId === teamId);
+  }
+
+  async listWebhookSubscriptions(teamId: string) {
+    return [...this.webhookSubscriptions.values()].filter(
+      (subscription) => subscription.teamId === teamId,
+    );
+  }
+
+  async listWebhookDeliveries(teamId: string, limit: number) {
+    return [...this.webhookDeliveries.values()]
+      .filter((delivery) => delivery.teamId === teamId)
+      .slice(0, limit);
+  }
+
+  async getApiKeyByHash(keyHash: string) {
+    return [...this.apiKeys.values()].find((apiKey) => apiKey.keyHash === keyHash) ?? null;
+  }
+
+  async markApiKeyUsed(input: { apiKeyId: string; lastUsedAt: string }) {
+    const apiKey = this.apiKeys.get(input.apiKeyId);
+
+    if (apiKey) {
+      this.apiKeys.set(apiKey.id, { ...apiKey, lastUsedAt: input.lastUsedAt });
+    }
+  }
+
+  async createApiKey(input: {
+    apiKeyId: string;
+    teamId: string;
+    name: string;
+    keyHash: string;
+    keyPrefix: string;
+    scopes: ApiKey["scopes"];
+    createdByActorId: string;
+  }) {
+    const apiKey = {
+      id: input.apiKeyId,
+      teamId: input.teamId,
+      name: input.name,
+      keyHash: input.keyHash,
+      keyPrefix: input.keyPrefix,
+      scopes: input.scopes,
+      createdByActorId: input.createdByActorId,
+      lastUsedAt: null,
+      revokedAt: null,
+      createdAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.apiKeys.set(apiKey.id, apiKey);
+    return apiKey;
+  }
+
+  async createWebhookSubscription(input: {
+    subscriptionId: string;
+    teamId: string;
+    url: string;
+    eventTypes: string[];
+    signingSecretHash: string;
+    createdByActorId: string;
+  }) {
+    const subscription = {
+      id: input.subscriptionId,
+      teamId: input.teamId,
+      url: input.url,
+      eventTypes: input.eventTypes,
+      signingSecretHash: input.signingSecretHash,
+      status: "active" as const,
+      createdByActorId: input.createdByActorId,
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.webhookSubscriptions.set(subscription.id, subscription);
+    return subscription;
+  }
+
+  async listActiveWebhookSubscriptionsForEvent(input: { teamId: string; eventType: string }) {
+    return [...this.webhookSubscriptions.values()].filter(
+      (subscription) =>
+        subscription.teamId === input.teamId &&
+        subscription.status === "active" &&
+        subscription.eventTypes.includes(input.eventType),
+    );
+  }
+
+  async createWebhookDelivery(input: {
+    deliveryId: string;
+    teamId: string;
+    subscriptionId: string;
+    outboxEventId: string;
+    status: WebhookDelivery["status"];
+    attempt: number;
+    requestPayload: Record<string, unknown>;
+    responseStatus?: number | null;
+    responseBody?: string | null;
+    error?: string | null;
+    nextAttemptAt?: string | null;
+    deliveredAt?: string | null;
+  }) {
+    const delivery = {
+      id: input.deliveryId,
+      teamId: input.teamId,
+      subscriptionId: input.subscriptionId,
+      outboxEventId: input.outboxEventId,
+      status: input.status,
+      attempt: input.attempt,
+      requestPayload: input.requestPayload,
+      responseStatus: input.responseStatus ?? null,
+      responseBody: input.responseBody ?? null,
+      error: input.error ?? null,
+      nextAttemptAt: input.nextAttemptAt ?? null,
+      deliveredAt: input.deliveredAt ?? null,
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.webhookDeliveries.set(delivery.id, delivery);
+    return delivery;
+  }
+
   private invoiceFromInput(
     invoiceId: string,
     input: {
@@ -2598,6 +2729,42 @@ describe("appRouter", () => {
       categoryId: "cat_software",
       reviewState: "reviewed",
     });
+  });
+
+  test("manages developer API keys and webhook subscriptions through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+
+    const apiKey = await call(
+      router.developers.createApiKey,
+      {
+        teamId: "team_1",
+        name: "Reporting client",
+        scopes: ["transactions.read"],
+        idempotencyKey: "api_key_1",
+      },
+      context,
+    );
+    const webhook = await call(
+      router.developers.createWebhookSubscription,
+      {
+        teamId: "team_1",
+        url: "https://example.com/webhooks/dawn",
+        eventTypes: ["transaction.created"],
+        idempotencyKey: "webhook_1",
+      },
+      context,
+    );
+    const workspace = await call(router.developers.list, { teamId: "team_1" }, context);
+
+    expect(apiKey.token.startsWith("dawn_")).toBe(true);
+    expect(repository.apiKeys.get(apiKey.apiKey.id)?.keyHash).not.toBe(apiKey.token);
+    expect(webhook.signingSecret.startsWith("whsec_")).toBe(true);
+    expect(workspace.apiKeys).toHaveLength(1);
+    expect(workspace.webhookSubscriptions).toHaveLength(1);
   });
 
   test("creates and signs document uploads and downloads through protected routes", async () => {

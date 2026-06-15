@@ -120,6 +120,13 @@
       "when": 1781490980065,
       "tag": "0016_previous_killmonger",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1781492123914,
+      "tag": "0017_demonic_fenris",
+      "breakpoints": true
     }
   ]
 }

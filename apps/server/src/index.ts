@@ -9,11 +9,18 @@ import { appRouter } from "@dawn/api/routers/index";
 import {
   AppError,
   completeDocumentUpload,
+  createLedgerTransaction,
+  createWebhookSubscription,
+  deliverWebhooksForOutboxEvent,
   dispatchOutboxEvents,
   generateRecurringInvoice,
   generateWeeklyInsights,
+  listBillingWorkspace,
+  listTransactionReviewWorkspace,
   resolveTeamAccess,
+  resolvePublicApiKey,
   runAutomationsForOutboxEvent,
+  type WebhookDeliveryProvider,
 } from "@dawn/app";
 import { createMockInsightGenerationProvider } from "@dawn/ai";
 import { auth } from "@dawn/auth";
@@ -25,7 +32,7 @@ import { transactionSyncCollection } from "@dawn/sync";
 import { initLogger } from "evlog";
 import { createAuthMiddleware, type BetterAuthInstance } from "evlog/better-auth";
 import { evlog, type EvlogVariables } from "evlog/hono";
-import { Hono } from "hono";
+import { Hono, type Context as HonoContext } from "hono";
 import { cors } from "hono/cors";
 
 import { processDocumentExtractionJob } from "./document-extraction";
@@ -47,6 +54,7 @@ const identifyUser = createAuthMiddleware(auth as BetterAuthInstance, {
 type ServerHonoEnv = EvlogVariables & {
   Bindings: DawnCloudflareBindings;
 };
+type PublicApiPermission = Parameters<typeof resolveTeamAccess>[2];
 
 const app = new Hono<ServerHonoEnv>();
 
@@ -242,6 +250,126 @@ export const rpcHandler = new RPCHandler(appRouter, {
   ],
 });
 
+app.get("/api/v1/openapi.json", (c) => {
+  return c.json(publicApiOpenApiDocument(c.req.url));
+});
+
+app.get("/api/v1/transactions", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+  const teamId = c.req.query("teamId");
+
+  if (!teamId) {
+    return c.json({ error: "teamId is required" }, 400);
+  }
+
+  try {
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "transactions.read");
+    const workspace = await listTransactionReviewWorkspace(repository, {
+      actor,
+      requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+      teamId,
+    });
+
+    return c.json({
+      data: workspace.transactions,
+    });
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/transactions", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "transactions.write");
+    const result = await createLedgerTransaction(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        accountId: requireString(body.accountId, "accountId"),
+        description: requireString(body.description, "description"),
+        postedAt: requireString(body.postedAt, "postedAt"),
+        money: body.money as { amountMinor: number; currency: string },
+        type:
+          (body.type as "income" | "expense" | "transfer" | "fee" | "refund" | "adjustment") ??
+          "expense",
+        source:
+          (body.source as "manual" | "csv_import" | "bank_sync" | "provider_webhook") ?? "manual",
+        categoryId: typeof body.categoryId === "string" ? body.categoryId : null,
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.get("/api/v1/invoices", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+  const teamId = c.req.query("teamId");
+
+  if (!teamId) {
+    return c.json({ error: "teamId is required" }, 400);
+  }
+
+  try {
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.read");
+    const billing = await listBillingWorkspace(repository, {
+      actor,
+      requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+      teamId,
+    });
+
+    return c.json({
+      data: billing.invoices,
+    });
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/webhook-subscriptions", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "webhooks.manage");
+    const result = await createWebhookSubscription(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        url: requireString(body.url, "url"),
+        eventTypes: Array.isArray(body.eventTypes)
+          ? body.eventTypes.filter(
+              (eventType): eventType is string => typeof eventType === "string",
+            )
+          : [],
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
 app.use("/*", async (c, next) => {
   const context = await createContext({ context: c });
 
@@ -288,6 +416,100 @@ function errorMessage(error: unknown) {
 
 function safeHeaderFileName(fileName: string) {
   return fileName.replace(/["\r\n]/g, "_");
+}
+
+async function requirePublicApiActor(
+  headers: Headers,
+  repository: DrizzleTransactionReviewRepository,
+  permission: PublicApiPermission,
+) {
+  const authorization = headers.get("authorization");
+  const token = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : null;
+
+  if (!token) {
+    throw new AppError("FORBIDDEN", "Missing API key");
+  }
+
+  const resolved = await resolvePublicApiKey(repository, token);
+
+  if (!resolved.actor.permissions?.includes(permission)) {
+    throw new AppError("FORBIDDEN", "API key scope does not allow this operation");
+  }
+
+  return resolved.actor;
+}
+
+function idempotencyKeyFromRequest(headers: Headers, body: Record<string, unknown>) {
+  const key = headers.get("idempotency-key") ?? body.idempotencyKey;
+
+  if (typeof key !== "string" || !key.trim()) {
+    throw new AppError("CONFLICT", "Idempotency-Key header is required");
+  }
+
+  return key.trim();
+}
+
+function requireString(value: unknown, name: string) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new AppError("CONFLICT", `${name} is required`);
+  }
+
+  return value.trim();
+}
+
+function publicApiError(c: HonoContext<ServerHonoEnv>, error: unknown) {
+  if (error instanceof AppError) {
+    return c.json({ error: error.message }, appErrorStatus(error));
+  }
+
+  return c.json({ error: errorMessage(error) }, 500);
+}
+
+export function publicApiOpenApiDocument(requestUrl: string) {
+  const url = new URL(requestUrl);
+  const origin = `${url.protocol}//${url.host}`;
+
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "Dawn Public API",
+      version: "v1",
+    },
+    servers: [{ url: `${origin}/api/v1` }],
+    components: {
+      securitySchemes: {
+        bearerApiKey: {
+          type: "http",
+          scheme: "bearer",
+        },
+      },
+    },
+    security: [{ bearerApiKey: [] }],
+    paths: {
+      "/transactions": {
+        get: {
+          summary: "List team transactions",
+          parameters: [{ name: "teamId", in: "query", required: true }],
+        },
+        post: {
+          summary: "Create a ledger transaction",
+          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
+        },
+      },
+      "/invoices": {
+        get: {
+          summary: "List team invoices",
+          parameters: [{ name: "teamId", in: "query", required: true }],
+        },
+      },
+      "/webhook-subscriptions": {
+        post: {
+          summary: "Create a webhook subscription",
+          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
+        },
+      },
+    },
+  };
 }
 
 async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnCloudflareBindings) {
@@ -340,6 +562,38 @@ async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnC
       },
     );
   }
+
+  if (message.body.type === "webhook.deliver") {
+    const result = await deliverWebhooksForOutboxEvent(
+      new DrizzleTransactionReviewRepository(),
+      createFetchWebhookDeliveryProvider(),
+      {
+        teamId: message.body.teamId,
+        outboxEventId: message.body.sourceOutboxEventId,
+      },
+    );
+
+    if (result.failed > 0) {
+      throw new Error(`${result.failed} webhook deliveries failed`);
+    }
+  }
+}
+
+function createFetchWebhookDeliveryProvider(): WebhookDeliveryProvider {
+  return {
+    async deliver(input) {
+      const response = await fetch(input.url, {
+        method: "POST",
+        headers: input.headers,
+        body: JSON.stringify(input.body),
+      });
+
+      return {
+        status: response.status,
+        body: await response.text(),
+      };
+    },
+  };
 }
 
 export default {

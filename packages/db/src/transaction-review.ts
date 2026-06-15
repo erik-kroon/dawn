@@ -27,6 +27,7 @@ import type {
 } from "@dawn/app";
 import type {
   Actor,
+  ApiKey,
   AutomationRule,
   AutomationRun,
   AssistantActionApproval,
@@ -41,6 +42,7 @@ import type {
   InvoiceDraft,
   InvoiceLineDraft,
   InvoicePayment,
+  OAuthApp,
   LedgerAccount,
   LedgerTransactionDraft,
   Product,
@@ -54,6 +56,8 @@ import type {
   TeamRole,
   TimeEntry,
   Transaction,
+  WebhookDelivery,
+  WebhookSubscription,
 } from "@dawn/domain";
 import { calculateInvoiceTotals, ledgerDuplicateKey } from "@dawn/domain";
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
@@ -2517,6 +2521,179 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return mapAutomationRun(run);
   }
 
+  async listApiKeys(teamId: string): Promise<ApiKey[]> {
+    const keys = await this.client
+      .select()
+      .from(schema.apiKey)
+      .where(eq(schema.apiKey.teamId, teamId))
+      .orderBy(desc(schema.apiKey.createdAt));
+
+    return keys.map(mapApiKey);
+  }
+
+  async listOAuthApps(teamId: string): Promise<OAuthApp[]> {
+    const apps = await this.client
+      .select()
+      .from(schema.oauthApp)
+      .where(eq(schema.oauthApp.teamId, teamId))
+      .orderBy(desc(schema.oauthApp.createdAt));
+
+    return apps.map(mapOAuthApp);
+  }
+
+  async listWebhookSubscriptions(teamId: string): Promise<WebhookSubscription[]> {
+    const subscriptions = await this.client
+      .select()
+      .from(schema.webhookSubscription)
+      .where(eq(schema.webhookSubscription.teamId, teamId))
+      .orderBy(desc(schema.webhookSubscription.createdAt));
+
+    return subscriptions.map(mapWebhookSubscription);
+  }
+
+  async listWebhookDeliveries(teamId: string, limit: number): Promise<WebhookDelivery[]> {
+    const deliveries = await this.client
+      .select()
+      .from(schema.webhookDelivery)
+      .where(eq(schema.webhookDelivery.teamId, teamId))
+      .orderBy(desc(schema.webhookDelivery.createdAt))
+      .limit(limit);
+
+    return deliveries.map(mapWebhookDelivery);
+  }
+
+  async getApiKeyByHash(keyHash: string): Promise<ApiKey | null> {
+    const [apiKey] = await this.client
+      .select()
+      .from(schema.apiKey)
+      .where(eq(schema.apiKey.keyHash, keyHash))
+      .limit(1);
+
+    return apiKey ? mapApiKey(apiKey) : null;
+  }
+
+  async markApiKeyUsed(input: { apiKeyId: string; lastUsedAt: string }): Promise<void> {
+    await this.client
+      .update(schema.apiKey)
+      .set({ lastUsedAt: new Date(input.lastUsedAt) })
+      .where(eq(schema.apiKey.id, input.apiKeyId));
+  }
+
+  async createApiKey(input: {
+    apiKeyId: string;
+    teamId: string;
+    name: string;
+    keyHash: string;
+    keyPrefix: string;
+    scopes: ApiKey["scopes"];
+    createdByActorId: string;
+  }): Promise<ApiKey> {
+    const [apiKey] = await this.client
+      .insert(schema.apiKey)
+      .values({
+        id: input.apiKeyId,
+        teamId: input.teamId,
+        name: input.name,
+        keyHash: input.keyHash,
+        keyPrefix: input.keyPrefix,
+        scopes: input.scopes,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!apiKey) {
+      throw new Error("Failed to create API key");
+    }
+
+    return mapApiKey(apiKey);
+  }
+
+  async createWebhookSubscription(input: {
+    subscriptionId: string;
+    teamId: string;
+    url: string;
+    eventTypes: string[];
+    signingSecretHash: string;
+    createdByActorId: string;
+  }): Promise<WebhookSubscription> {
+    const [subscription] = await this.client
+      .insert(schema.webhookSubscription)
+      .values({
+        id: input.subscriptionId,
+        teamId: input.teamId,
+        url: input.url,
+        eventTypes: input.eventTypes,
+        signingSecretHash: input.signingSecretHash,
+        status: "active",
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!subscription) {
+      throw new Error("Failed to create webhook subscription");
+    }
+
+    return mapWebhookSubscription(subscription);
+  }
+
+  async listActiveWebhookSubscriptionsForEvent(input: {
+    teamId: string;
+    eventType: string;
+  }): Promise<WebhookSubscription[]> {
+    const subscriptions = await this.client
+      .select()
+      .from(schema.webhookSubscription)
+      .where(
+        and(
+          eq(schema.webhookSubscription.teamId, input.teamId),
+          eq(schema.webhookSubscription.status, "active"),
+        ),
+      );
+
+    return subscriptions
+      .map(mapWebhookSubscription)
+      .filter((subscription) => subscription.eventTypes.includes(input.eventType));
+  }
+
+  async createWebhookDelivery(input: {
+    deliveryId: string;
+    teamId: string;
+    subscriptionId: string;
+    outboxEventId: string;
+    status: WebhookDelivery["status"];
+    attempt: number;
+    requestPayload: Record<string, unknown>;
+    responseStatus?: number | null;
+    responseBody?: string | null;
+    error?: string | null;
+    nextAttemptAt?: string | null;
+    deliveredAt?: string | null;
+  }): Promise<WebhookDelivery> {
+    const [delivery] = await this.client
+      .insert(schema.webhookDelivery)
+      .values({
+        id: input.deliveryId,
+        teamId: input.teamId,
+        subscriptionId: input.subscriptionId,
+        outboxEventId: input.outboxEventId,
+        status: input.status,
+        attempt: input.attempt,
+        requestPayload: input.requestPayload,
+        responseStatus: input.responseStatus ?? null,
+        responseBody: input.responseBody ?? null,
+        error: input.error ?? null,
+        nextAttemptAt: input.nextAttemptAt ? new Date(input.nextAttemptAt) : null,
+        deliveredAt: input.deliveredAt ? new Date(input.deliveredAt) : null,
+      })
+      .returning();
+
+    if (!delivery) {
+      throw new Error("Failed to create webhook delivery");
+    }
+
+    return mapWebhookDelivery(delivery);
+  }
+
   private async insertInvoiceLines(input: {
     teamId: string;
     invoiceId: string;
@@ -3552,6 +3729,67 @@ function mapAutomationRun(run: typeof schema.automationRun.$inferSelect): Automa
     error: run.error,
     startedAt: run.startedAt.toISOString(),
     finishedAt: run.finishedAt?.toISOString() ?? null,
+  };
+}
+
+function mapApiKey(apiKey: typeof schema.apiKey.$inferSelect): ApiKey {
+  return {
+    id: apiKey.id,
+    teamId: apiKey.teamId,
+    name: apiKey.name,
+    keyPrefix: apiKey.keyPrefix,
+    scopes: apiKey.scopes as ApiKey["scopes"],
+    createdByActorId: apiKey.createdByActorId,
+    lastUsedAt: apiKey.lastUsedAt?.toISOString() ?? null,
+    revokedAt: apiKey.revokedAt?.toISOString() ?? null,
+    createdAt: apiKey.createdAt.toISOString(),
+  };
+}
+
+function mapOAuthApp(app: typeof schema.oauthApp.$inferSelect): OAuthApp {
+  return {
+    id: app.id,
+    teamId: app.teamId,
+    name: app.name,
+    redirectUris: app.redirectUris,
+    scopes: app.scopes as OAuthApp["scopes"],
+    createdByActorId: app.createdByActorId,
+    createdAt: app.createdAt.toISOString(),
+    updatedAt: app.updatedAt.toISOString(),
+  };
+}
+
+function mapWebhookSubscription(
+  subscription: typeof schema.webhookSubscription.$inferSelect,
+): WebhookSubscription {
+  return {
+    id: subscription.id,
+    teamId: subscription.teamId,
+    url: subscription.url,
+    eventTypes: subscription.eventTypes,
+    status: subscription.status as WebhookSubscription["status"],
+    createdByActorId: subscription.createdByActorId,
+    createdAt: subscription.createdAt.toISOString(),
+    updatedAt: subscription.updatedAt.toISOString(),
+  };
+}
+
+function mapWebhookDelivery(delivery: typeof schema.webhookDelivery.$inferSelect): WebhookDelivery {
+  return {
+    id: delivery.id,
+    teamId: delivery.teamId,
+    subscriptionId: delivery.subscriptionId,
+    outboxEventId: delivery.outboxEventId,
+    status: delivery.status as WebhookDelivery["status"],
+    attempt: delivery.attempt,
+    requestPayload: delivery.requestPayload,
+    responseStatus: delivery.responseStatus,
+    responseBody: delivery.responseBody,
+    error: delivery.error,
+    nextAttemptAt: delivery.nextAttemptAt?.toISOString() ?? null,
+    deliveredAt: delivery.deliveredAt?.toISOString() ?? null,
+    createdAt: delivery.createdAt.toISOString(),
+    updatedAt: delivery.updatedAt.toISOString(),
   };
 }
 

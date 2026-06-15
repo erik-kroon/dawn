@@ -11,6 +11,16 @@ const event = {
   dispatchAttempts: 0,
 };
 
+function webhookDeliveryJob(eventType: string) {
+  return {
+    type: "webhook.deliver" as const,
+    teamId: "team_1",
+    sourceOutboxEventId: "outbox_1",
+    eventType,
+    idempotencyKey: "webhook:deliver:outbox_1",
+  };
+}
+
 describe("job contracts", () => {
   test("creates idempotent outbox dispatch jobs", () => {
     expect(createOutboxDispatchJob(event)).toEqual({
@@ -51,6 +61,7 @@ describe("job contracts", () => {
         eventType: "transaction.created",
         idempotencyKey: "automation:run:outbox_1",
       },
+      webhookDeliveryJob("transaction.created"),
     ]);
   });
 
@@ -87,6 +98,7 @@ describe("job contracts", () => {
         eventType: "bank_connection.synced",
         idempotencyKey: "automation:run:outbox_1",
       },
+      webhookDeliveryJob("bank_connection.synced"),
     ]);
   });
 
@@ -129,6 +141,7 @@ describe("job contracts", () => {
         eventType: "document.uploaded",
         idempotencyKey: "automation:run:outbox_1",
       },
+      webhookDeliveryJob("document.uploaded"),
     ]);
   });
 
@@ -169,6 +182,7 @@ describe("job contracts", () => {
         eventType: "recurring_invoice.due",
         idempotencyKey: "automation:run:outbox_1",
       },
+      webhookDeliveryJob("recurring_invoice.due"),
     ]);
   });
 
@@ -207,6 +221,7 @@ describe("job contracts", () => {
         eventType: "insights.weekly.due",
         idempotencyKey: "automation:run:outbox_1",
       },
+      webhookDeliveryJob("insights.weekly.due"),
     ]);
   });
 

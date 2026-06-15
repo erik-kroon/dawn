@@ -1153,6 +1153,127 @@ export const automationRun = pgTable(
   ],
 );
 
+export const apiKey = pgTable(
+  "api_key",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    keyHash: text("key_hash").notNull(),
+    keyPrefix: text("key_prefix").notNull(),
+    scopes: jsonb("scopes").$type<string[]>().notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    lastUsedAt: timestamp("last_used_at"),
+    revokedAt: timestamp("revoked_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("api_key_hash_idx").on(table.keyHash),
+    index("api_key_team_idx").on(table.teamId, table.createdAt),
+  ],
+);
+
+export const oauthApp = pgTable(
+  "oauth_app",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+    scopes: jsonb("scopes").$type<string[]>().notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [index("oauth_app_team_idx").on(table.teamId, table.createdAt)],
+);
+
+export const oauthGrant = pgTable(
+  "oauth_grant",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    appId: text("app_id")
+      .notNull()
+      .references(() => oauthApp.id, { onDelete: "cascade" }),
+    actorId: text("actor_id").notNull(),
+    scopes: jsonb("scopes").$type<string[]>().notNull(),
+    revokedAt: timestamp("revoked_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("oauth_grant_team_idx").on(table.teamId, table.createdAt),
+    index("oauth_grant_app_idx").on(table.appId, table.createdAt),
+  ],
+);
+
+export const webhookSubscription = pgTable(
+  "webhook_subscription",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    eventTypes: jsonb("event_types").$type<string[]>().notNull(),
+    signingSecretHash: text("signing_secret_hash").notNull(),
+    status: text("status").default("active").notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("webhook_subscription_team_status_idx").on(table.teamId, table.status),
+    index("webhook_subscription_team_created_idx").on(table.teamId, table.createdAt),
+  ],
+);
+
+export const webhookDelivery = pgTable(
+  "webhook_delivery",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    subscriptionId: text("subscription_id")
+      .notNull()
+      .references(() => webhookSubscription.id, { onDelete: "cascade" }),
+    outboxEventId: text("outbox_event_id")
+      .notNull()
+      .references(() => outboxEvent.id, { onDelete: "cascade" }),
+    status: text("status").default("pending").notNull(),
+    attempt: integer("attempt").default(0).notNull(),
+    requestPayload: jsonb("request_payload").$type<Record<string, unknown>>().notNull(),
+    responseStatus: integer("response_status"),
+    responseBody: text("response_body"),
+    error: text("error"),
+    nextAttemptAt: timestamp("next_attempt_at"),
+    deliveredAt: timestamp("delivered_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("webhook_delivery_subscription_idx").on(table.subscriptionId, table.createdAt),
+    index("webhook_delivery_status_idx").on(table.status, table.nextAttemptAt),
+    index("webhook_delivery_outbox_idx").on(table.outboxEventId),
+  ],
+);
+
 export const idempotencyKey = pgTable(
   "idempotency_key",
   {
