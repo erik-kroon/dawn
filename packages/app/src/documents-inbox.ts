@@ -6,7 +6,7 @@ import type {
   TeamMatchFeedback,
   Transaction,
 } from "@dawn/domain";
-import { suggestInboxTransactionMatches } from "@dawn/domain";
+import { calibrateMatchPolicy, suggestInboxTransactionMatches } from "@dawn/domain";
 
 import {
   AppError,
@@ -991,6 +991,12 @@ export async function generateInboxMatchSuggestions(
     inboxItem,
     limit: normalizeMatchCandidateLimit(command.limit),
   });
+  const memory = {
+    aliases,
+    feedback,
+    hardNegatives,
+  };
+  const policy = calibrateMatchPolicy(memory);
   const suggestions = suggestInboxTransactionMatches(
     {
       inboxItemId: inboxItem.id,
@@ -1000,13 +1006,10 @@ export async function generateInboxMatchSuggestions(
       fields: inboxItem.latestExtraction.fields,
     },
     candidates,
-    {
-      aliases,
-      feedback,
-      hardNegatives,
-    },
+    memory,
+    policy,
   )
-    .filter((suggestion) => suggestion.score >= 0.35)
+    .filter((suggestion) => suggestion.score >= policy.suggestedScoreThreshold)
     .slice(0, 5);
 
   return {
@@ -1093,6 +1096,12 @@ export async function matchPendingInboxForTransaction(
         command.teamId,
         inboxItem.id,
       );
+      const memory = {
+        aliases,
+        feedback,
+        hardNegatives,
+      };
+      const policy = calibrateMatchPolicy(memory);
       const [suggestion] = suggestInboxTransactionMatches(
         inboxMatchInputForItem(inboxItem),
         [
@@ -1101,12 +1110,9 @@ export async function matchPendingInboxForTransaction(
             providerReference: transaction.providerTransactionId,
           },
         ],
-        {
-          aliases,
-          feedback,
-          hardNegatives,
-        },
-      ).filter((candidate) => candidate.score >= 0.35);
+        memory,
+        policy,
+      ).filter((candidate) => candidate.score >= policy.suggestedScoreThreshold);
 
       if (!suggestion) {
         continue;

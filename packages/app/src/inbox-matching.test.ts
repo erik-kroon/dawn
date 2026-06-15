@@ -430,6 +430,71 @@ describe("inbox matching use cases", () => {
     ).toHaveLength(1);
   });
 
+  test("uses calibrated thresholds for reverse-generated suggestions", async () => {
+    const repository = new MemoryMatchingRepository();
+    repository.inboxItem = {
+      ...repository.inboxItem,
+      latestExtraction: {
+        ...repository.inboxItem.latestExtraction!,
+        fields: {
+          merchantName: "Figma Inc",
+          totalAmountMinor: 1200,
+          currency: "USD",
+        },
+        rawText: null,
+      },
+    };
+    repository.transactions = [
+      {
+        ...repository.transactions[0]!,
+        description: "Unknown merchant",
+        providerTransactionId: "provider_unknown",
+      },
+    ];
+
+    for (const [index, description] of ["Coffee Shop", "Taxi Ride", "Office Supplies"].entries()) {
+      const transaction = {
+        ...repository.transactions[0]!,
+        id: `txn_history_${index + 1}`,
+        description,
+        providerTransactionId: `provider_history_${index + 1}`,
+      };
+      repository.suggestions.set(`history_${index + 1}`, {
+        id: `history_${index + 1}`,
+        teamId: "team_1",
+        inboxItemId: "history_inbox",
+        transactionId: transaction.id,
+        score: 0.35,
+        confidence: "low",
+        explanation: ["Historical rejected suggestion"],
+        status: "rejected",
+        createdAt: "2026-06-14T00:00:00.000Z",
+        updatedAt: "2026-06-14T00:00:00.000Z",
+        transaction,
+      });
+    }
+
+    const result = await matchPendingInboxForTransaction(
+      repository as unknown as DawnRepository,
+      systemMatchingContext,
+      {
+        teamId: "team_1",
+        transactionId: "txn_1",
+        sourceOutboxEventId: "outbox_low_precision",
+        idempotencyKey: "inbox:match-pending:outbox_low_precision:txn_1",
+        enforceCallerPermission: false,
+      },
+    );
+
+    expect(result.suggestions).toEqual([]);
+    expect(
+      [...repository.suggestions.values()].filter(
+        (suggestion) =>
+          suggestion.inboxItemId === "inbox_1" && suggestion.transactionId === "txn_1",
+      ),
+    ).toEqual([]);
+  });
+
   test("accepts and rejects reverse-generated suggestions through existing flows", async () => {
     const acceptedRepository = new MemoryMatchingRepository();
     const generated = await matchPendingInboxForTransaction(

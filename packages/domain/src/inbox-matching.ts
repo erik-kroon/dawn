@@ -58,8 +58,19 @@ export type MatchSignals = {
 
 export type MatchPolicy = {
   minimumScore: number;
+  suggestedScoreThreshold: number;
+  autoMatchScoreThreshold: number;
   mediumConfidenceScore: number;
   highConfidenceScore: number;
+  calibration?: MatchCalibration;
+};
+
+export type MatchCalibration = {
+  sampleCount: number;
+  acceptedCount: number;
+  rejectedCount: number;
+  precision: number | null;
+  posture: "low_sample" | "high_precision" | "low_precision" | "default";
 };
 
 export type MatchType = "suggested" | "none" | "hard_negative";
@@ -73,6 +84,11 @@ export type MatchDecision = {
   matchType: MatchType;
   explanation: string[];
   signals: MatchSignals;
+  thresholds: {
+    suggested: number;
+    autoMatch: number;
+  };
+  calibration?: MatchCalibration;
 };
 
 export type MatchCandidate = {
@@ -148,19 +164,74 @@ export type InboxMatchSuggestion = {
 
 export const defaultMatchPolicy: MatchPolicy = {
   minimumScore: 0,
+  suggestedScoreThreshold: 0.35,
+  autoMatchScoreThreshold: 0.95,
   mediumConfidenceScore: 0.5,
   highConfidenceScore: 0.75,
+  calibration: {
+    sampleCount: 0,
+    acceptedCount: 0,
+    rejectedCount: 0,
+    precision: null,
+    posture: "low_sample",
+  },
 };
+
+export function calibrateMatchPolicy(memory: InboxMatchMemory = {}): MatchPolicy {
+  const feedback = memory.feedback ?? [];
+  const acceptedCount = feedback
+    .filter((entry) => entry.status === "accepted")
+    .reduce((total, entry) => total + feedbackCount(entry), 0);
+  const rejectedCount = feedback
+    .filter((entry) => entry.status === "rejected")
+    .reduce((total, entry) => total + feedbackCount(entry), 0);
+  const sampleCount = acceptedCount + rejectedCount;
+  const precision = sampleCount > 0 ? acceptedCount / sampleCount : null;
+  let posture: MatchCalibration["posture"] = "default";
+  let suggestedScoreThreshold = defaultMatchPolicy.suggestedScoreThreshold;
+  let autoMatchScoreThreshold = defaultMatchPolicy.autoMatchScoreThreshold;
+
+  if (sampleCount < 3 || precision == null) {
+    posture = "low_sample";
+  } else if (precision >= 0.8) {
+    posture = "high_precision";
+    suggestedScoreThreshold = 0.32;
+    autoMatchScoreThreshold = 0.92;
+  } else if (precision < 0.5) {
+    posture = "low_precision";
+    suggestedScoreThreshold = 0.42;
+    autoMatchScoreThreshold = 0.97;
+  }
+
+  return {
+    ...defaultMatchPolicy,
+    suggestedScoreThreshold: clampThreshold(suggestedScoreThreshold, 0.3, 0.5),
+    autoMatchScoreThreshold: clampThreshold(
+      Math.max(autoMatchScoreThreshold, suggestedScoreThreshold + 0.25),
+      0.9,
+      0.99,
+    ),
+    calibration: {
+      sampleCount,
+      acceptedCount,
+      rejectedCount,
+      precision,
+      posture,
+    },
+  };
+}
 
 export function suggestInboxTransactionMatches(
   input: InboxMatchInput,
   candidates: readonly InboxMatchCandidate[],
   memory: InboxMatchMemory = {},
+  policy: Partial<MatchPolicy> = {},
 ): InboxMatchSuggestion[] {
   return scoreDocumentTransactionMatches(
     inboxInputToDocumentSubject(input),
     candidates,
     memory,
+    policy,
   )
     .filter((decision) => decision.matchType === "suggested")
     .map(inboxSuggestionFromDecision)
@@ -222,6 +293,11 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
       matchType: "hard_negative",
       explanation: ["Pair was previously rejected"],
       signals,
+      thresholds: {
+        suggested: policy.suggestedScoreThreshold,
+        autoMatch: policy.autoMatchScoreThreshold,
+      },
+      calibration: policy.calibration,
     };
   }
 
@@ -408,6 +484,11 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
     matchType: score > policy.minimumScore ? "suggested" : "none",
     explanation,
     signals,
+    thresholds: {
+      suggested: policy.suggestedScoreThreshold,
+      autoMatch: policy.autoMatchScoreThreshold,
+    },
+    calibration: policy.calibration,
   };
 }
 
@@ -463,11 +544,25 @@ function addSignal(
 }
 
 function normalizeMatchPolicy(policy: Partial<MatchPolicy> | undefined): MatchPolicy {
+  const suggestedScoreThreshold =
+    typeof policy?.suggestedScoreThreshold === "number"
+      ? clampThreshold(policy.suggestedScoreThreshold, 0.3, 0.5)
+      : defaultMatchPolicy.suggestedScoreThreshold;
+
   return {
     minimumScore:
       typeof policy?.minimumScore === "number"
         ? clampMatchScore(policy.minimumScore)
         : defaultMatchPolicy.minimumScore,
+    suggestedScoreThreshold,
+    autoMatchScoreThreshold:
+      typeof policy?.autoMatchScoreThreshold === "number"
+        ? clampThreshold(
+            Math.max(policy.autoMatchScoreThreshold, suggestedScoreThreshold + 0.25),
+            0.9,
+            0.99,
+          )
+        : defaultMatchPolicy.autoMatchScoreThreshold,
     mediumConfidenceScore:
       typeof policy?.mediumConfidenceScore === "number"
         ? clampMatchScore(policy.mediumConfidenceScore)
@@ -476,6 +571,7 @@ function normalizeMatchPolicy(policy: Partial<MatchPolicy> | undefined): MatchPo
       typeof policy?.highConfidenceScore === "number"
         ? clampMatchScore(policy.highConfidenceScore)
         : defaultMatchPolicy.highConfidenceScore,
+    calibration: policy?.calibration ?? defaultMatchPolicy.calibration,
   };
 }
 
@@ -915,6 +1011,10 @@ function latestFeedbackTimestamp(feedback: readonly TeamMatchFeedback[]) {
 
 function clampFeedbackScore(score: number) {
   return Math.max(-0.12, Math.min(0.08, Math.round(score * 100) / 100));
+}
+
+function clampThreshold(score: number, minimum: number, maximum: number) {
+  return Math.max(minimum, Math.min(maximum, Math.round(score * 100) / 100));
 }
 
 function addConservativeRiskSignals(

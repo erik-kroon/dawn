@@ -2,7 +2,7 @@
 
 Triage: ready-for-agent
 Publication: Local repo artifact. No project issue tracker or remote is assumed.
-Status: Slice 5 implemented; Slice 6 next
+Status: Slice 6 implemented; Slice 7 next
 Date: 2026-06-15
 Source material: `docs/PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, Dawn matching code, and Midday reference matching docs/code under `ref/midday`.
 
@@ -344,17 +344,26 @@ Replace global hard-coded thresholds with team-specific suggested and auto-match
 
 ## Acceptance Criteria
 
-- [ ] Low-sample teams use conservative default thresholds.
-- [ ] Teams with strong recent confirmation history can get slightly lower suggested thresholds.
-- [ ] Teams with bad precision get stricter suggested thresholds.
-- [ ] Auto-match threshold stays strict and bounded above suggested threshold.
-- [ ] Forward and reverse matching use the same calibration result.
-- [ ] Calibration is explainable through metadata or logs.
+- [x] Low-sample teams use conservative default thresholds.
+- [x] Teams with strong recent confirmation history can get slightly lower suggested thresholds.
+- [x] Teams with bad precision get stricter suggested thresholds.
+- [x] Auto-match threshold stays strict and bounded above suggested threshold.
+- [x] Forward and reverse matching use the same calibration result.
+- [x] Calibration is explainable through metadata or logs.
+
+## Implementation Notes
+
+- Added `calibrateMatchPolicy` in the pure domain matcher, deriving team posture from accepted/rejected suggestion feedback counts.
+- Added bounded suggested and auto-match thresholds, with low-sample defaults, high-precision relaxation, low-precision tightening, and strict auto-match bounds.
+- Match decisions now include threshold and calibration metadata for debugging and future evaluation tooling.
+- Forward and reverse app use cases now compute one calibrated policy from team memory and filter suggestions against `policy.suggestedScoreThreshold`.
+- Unmatched-outcome analysis is still deferred to the read-only evaluation harness slice because Dawn does not yet persist unmatched candidates as authoritative feedback.
 
 ## Verification
 
-- App/domain tests for low-sample defaults, high-precision history, low-precision history, confidence-gap adjustment, threshold bounds, and reverse-path threshold use.
-- `bun run check-types`
+- [x] App/domain tests for low-sample defaults, high-precision history, low-precision history, confidence-gap adjustment, threshold bounds, and reverse-path threshold use.
+- [x] `bun test packages/domain/src/matching.test.ts packages/app/src/inbox-matching.test.ts`
+- [x] `bun run check-types`
 
 ## Dependencies
 

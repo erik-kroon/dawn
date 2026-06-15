@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  calibrateMatchPolicy,
   scoreDocumentTransactionMatch,
   suggestInboxTransactionMatches,
   type DocumentMatchSubject,
@@ -190,6 +191,148 @@ describe("inbox transaction matching", () => {
     expect(suggestions[0]?.transactionId).toBe("txn_feedback_override");
     expect(suggestions[0]?.signals.feedback).toBeGreaterThan(0);
     expect(suggestions[0]?.explanation).toContain("Team feedback supports this match");
+  });
+
+  test("uses conservative default thresholds for low-sample teams", () => {
+    const policy = calibrateMatchPolicy({
+      feedback: [
+        {
+          source: "Figma Inc",
+          target: "Figma subscription",
+          status: "accepted",
+          count: 2,
+        },
+      ],
+    });
+
+    expect(policy.suggestedScoreThreshold).toBe(0.35);
+    expect(policy.autoMatchScoreThreshold).toBe(0.95);
+    expect(policy.calibration).toMatchObject({
+      sampleCount: 2,
+      acceptedCount: 2,
+      rejectedCount: 0,
+      precision: 1,
+      posture: "low_sample",
+    });
+  });
+
+  test("lowers suggested thresholds for high-precision team feedback", () => {
+    const policy = calibrateMatchPolicy({
+      feedback: [
+        {
+          source: "Figma Inc",
+          target: "Figma subscription",
+          status: "accepted",
+          count: 4,
+        },
+        {
+          source: "Acme",
+          target: "Acme Consulting",
+          status: "rejected",
+          count: 1,
+        },
+      ],
+    });
+
+    expect(policy.suggestedScoreThreshold).toBe(0.32);
+    expect(policy.autoMatchScoreThreshold).toBe(0.92);
+    expect(policy.calibration).toMatchObject({
+      sampleCount: 5,
+      acceptedCount: 4,
+      rejectedCount: 1,
+      precision: 0.8,
+      posture: "high_precision",
+    });
+  });
+
+  test("raises suggested thresholds for low-precision team feedback", () => {
+    const policy = calibrateMatchPolicy({
+      feedback: [
+        {
+          source: "Figma Inc",
+          target: "Figma subscription",
+          status: "accepted",
+          count: 1,
+        },
+        {
+          source: "Acme",
+          target: "Acme Consulting",
+          status: "rejected",
+          count: 3,
+        },
+      ],
+    });
+
+    expect(policy.suggestedScoreThreshold).toBe(0.42);
+    expect(policy.autoMatchScoreThreshold).toBe(0.97);
+    expect(policy.calibration).toMatchObject({
+      sampleCount: 4,
+      acceptedCount: 1,
+      rejectedCount: 3,
+      precision: 0.25,
+      posture: "low_precision",
+    });
+  });
+
+  test("emits calibrated thresholds and metadata with match decisions", () => {
+    const policy = calibrateMatchPolicy({
+      feedback: [
+        {
+          source: "Figma Inc",
+          target: "Figma subscription",
+          status: "accepted",
+          count: 4,
+        },
+      ],
+    });
+    const document: DocumentMatchSubject = {
+      id: baseInput.documentId,
+      inboxItemId: baseInput.inboxItemId,
+      documentText: baseInput.documentText,
+      fields: baseInput.fields,
+    };
+    const decision = scoreDocumentTransactionMatch({
+      document,
+      transaction: {
+        transaction: transaction({ id: "txn_calibrated" }),
+        counterpartyName: "Figma Inc",
+      },
+      policy,
+    });
+
+    expect(decision.thresholds).toEqual({
+      suggested: 0.32,
+      autoMatch: 0.92,
+    });
+    expect(decision.calibration).toMatchObject({
+      posture: "high_precision",
+      sampleCount: 4,
+    });
+  });
+
+  test("bounds explicit thresholds before emitting match decisions", () => {
+    const document: DocumentMatchSubject = {
+      id: baseInput.documentId,
+      inboxItemId: baseInput.inboxItemId,
+      documentText: baseInput.documentText,
+      fields: baseInput.fields,
+    };
+    const decision = scoreDocumentTransactionMatch({
+      document,
+      transaction: {
+        transaction: transaction({ id: "txn_bounded" }),
+        counterpartyName: "Figma Inc",
+      },
+      policy: {
+        suggestedScoreThreshold: 0.1,
+        autoMatchScoreThreshold: 0.2,
+      },
+    });
+
+    expect(decision.thresholds).toEqual({
+      suggested: 0.3,
+      autoMatch: 0.9,
+    });
   });
 
   test("uses sender text as a supporting signal", () => {
