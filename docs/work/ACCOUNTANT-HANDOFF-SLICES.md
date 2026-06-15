@@ -472,6 +472,12 @@ accountant email delivery, and queued export retry remain open.
 
 Make accountant collaboration better than Midday's email-only path where Dawn's team role model can help.
 
+Status: Partially completed on 2026-06-15 for accountant role access. The
+accountant role can be invited and can export ready packets, but it no longer
+has transaction categorization or other write-oriented product permissions.
+Export history, link revocation, and access audit remain blocked on the signed
+export package storage work from Slice 6.
+
 ## Scope
 
 - Use the existing accountant role as a first-class workflow participant.
@@ -493,17 +499,21 @@ Make accountant collaboration better than Midday's email-only path where Dawn's 
 
 ## Acceptance Criteria
 
-- [ ] A team can invite an accountant role.
-- [ ] An accountant can view the review/export queue and download allowed accountant packets.
-- [ ] An accountant cannot review, categorize, delete, or alter transactions unless a permission explicitly allows it.
+- [x] A team can invite an accountant role.
+- [x] An accountant can view the review/export queue and download allowed accountant packets.
+- [x] An accountant cannot review, categorize, delete, or alter transactions unless a permission explicitly allows it.
 - [ ] Export history shows who generated and who accessed each package.
 - [ ] Revoked or expired links cannot be used.
 - [ ] Email-only handoff still works without creating a team member.
 
 ## Verification
 
-- Permission matrix tests for accountant role.
-- App/API tests for export access and revoked/expired links.
+- `bun test packages/domain/src/permissions.test.ts` passed: 7 tests.
+- `bun test packages/app/src/team-permissions.test.ts packages/app/src/accountant-packet.test.ts packages/app/src/transaction-review.test.ts`
+  passed: 33 tests.
+- Permission matrix tests cover the accountant role.
+- App tests cover accountant export access and denied transaction review.
+- App/API tests for revoked/expired links remain open.
 - Browser smoke with owner and accountant accounts if test auth supports it.
 - `bun run check-types`
 

@@ -142,6 +142,44 @@ describe("exportAccountantPacket", () => {
     expect(zipText).toContain("worksheet");
   });
 
+  test("allows accountants to export ready packets", async () => {
+    const repository = createReviewRepository("accountant");
+    repository.transactions.set(
+      "txn_1",
+      createTestTransaction({
+        id: "txn_1",
+        categoryId: "cat_1",
+        reviewState: "reviewed",
+      }),
+    );
+    repository.packetAttachments.push({
+      transactionId: "txn_1",
+      documentId: "doc_1",
+      inboxItemId: "inbox_1",
+      versionId: "ver_1",
+      objectKey: "receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 12,
+      title: "Receipt",
+    });
+
+    const result = await exportAccountantPacket(
+      repository,
+      { actor: testActor, requestId: "request_1" },
+      {
+        teamId: "team_1",
+        from: "2026-06-01T00:00:00.000Z",
+        to: "2026-06-30T23:59:59.999Z",
+        transactionIds: ["txn_1"],
+        idempotencyKey: "accountant_packet_1",
+      },
+    );
+
+    expect(result.manifest.transactionCount).toBe(1);
+    expect(repository.transactions.get("txn_1")?.accountantStatus).toBe("exported");
+  });
+
   test("requires at least one export format", async () => {
     const repository = createReviewRepository("member");
 

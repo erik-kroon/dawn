@@ -83,6 +83,23 @@ describe("reviewTransaction", () => {
     ).rejects.toEqual(new AppError("FORBIDDEN", "You cannot review transactions for this team"));
   });
 
+  test("rejects accountants categorizing transactions", async () => {
+    const repository = createReviewRepository("accountant");
+
+    await expect(
+      reviewTransaction(
+        repository,
+        { actor: testActor, requestId: "request_1" },
+        {
+          teamId: "team_1",
+          transactionId: "txn_1",
+          categoryId: "cat_1",
+          idempotencyKey: "accountant_review_1",
+        },
+      ),
+    ).rejects.toEqual(new AppError("FORBIDDEN", "You cannot review transactions for this team"));
+  });
+
   test("replays an idempotent mutation without duplicate side effects", async () => {
     const repository = createReviewRepository("owner");
     const context = { actor: testActor, requestId: "request_1" };

@@ -21,9 +21,15 @@ describe("team role permissions", () => {
     expect(roleHasPermission("admin", "operations.read")).toBe(true);
   });
 
-  test("accountants can categorize transactions without managing teams", () => {
-    expect(roleHasPermission("accountant", "transactions.categorize")).toBe(true);
+  test("accountants can read and export without mutating financial state", () => {
+    expect(roleHasPermission("accountant", "transactions.read")).toBe(true);
     expect(roleHasPermission("accountant", "transactions.export")).toBe(true);
+    expect(roleHasPermission("accountant", "documents.read")).toBe(true);
+    expect(roleHasPermission("accountant", "transactions.write")).toBe(false);
+    expect(roleHasPermission("accountant", "transactions.categorize")).toBe(false);
+    expect(roleHasPermission("accountant", "documents.write")).toBe(false);
+    expect(roleHasPermission("accountant", "invoices.write")).toBe(false);
+    expect(roleHasPermission("accountant", "integrations.write")).toBe(false);
     expect(roleHasPermission("accountant", "team.manage")).toBe(false);
   });
 

@@ -262,27 +262,20 @@ describe("team permissions", () => {
     const repository = new MemoryTeamRepository();
     repository.memberships.set("user_1:team_1", "accountant");
 
-    const access = await resolveTeamAccess(repository, context, "transactions.categorize");
+    const access = await resolveTeamAccess(repository, context, "transactions.export");
 
     expect(access).toEqual({
       teamId: "team_1",
       role: "accountant",
       permissions: [
         "transactions.read",
-        "transactions.categorize",
         "transactions.export",
         "documents.read",
-        "documents.write",
         "projects.read",
-        "projects.write",
         "invoices.read",
-        "invoices.write",
         "integrations.read",
-        "integrations.write",
         "assistant.use",
         "automations.read",
-        "automations.write",
-        "automations.run",
       ],
     });
     expect(repository.defaultWorkspaceCalls).toBe(0);
