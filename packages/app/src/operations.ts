@@ -102,6 +102,17 @@ export type DataWorkflowStatus = {
   nextStep: string;
 };
 
+export type JobRunAction = {
+  jobRunId: string;
+  outboxEventId: string;
+  jobType: JobRun["jobType"];
+  status: "queued" | "retryable" | "dead_lettered";
+  canRetry: boolean;
+  reason: string;
+  nextStep: string;
+  nextAttemptAt: string | null;
+};
+
 export type RequestTeamDataExportCommand = {
   teamId: string;
   format?: "json";
@@ -238,6 +249,7 @@ export type OperationsWorkspace = {
   auditEvents: AuditLogEntry[];
   accountantClose: AccountantCloseReadiness | null;
   dataWorkflows: DataWorkflowStatus[];
+  jobRunActions: JobRunAction[];
 };
 
 export type OperationsRepository = {
@@ -708,6 +720,7 @@ export async function listOperationsWorkspace(
         ? buildAccountantCloseReadiness(closeWorkspace, accountantClosePeriod)
         : null,
     dataWorkflows: dataWorkflowStatuses(outboxEvents),
+    jobRunActions: jobRunActions(redactedJobRuns, redactedOutboxEvents),
   };
 }
 
@@ -1261,6 +1274,62 @@ function dataWorkflowStatuses(outboxEvents: OutboxEvent[]): DataWorkflowStatus[]
       latestWorkflowRequestAt(outboxEvents, "team_data.deletion_requested"),
     ),
   ];
+}
+
+function jobRunActions(jobRuns: JobRun[], outboxEvents: OutboxEvent[]): JobRunAction[] {
+  const outboxEventsById = new Map(outboxEvents.map((event) => [event.id, event]));
+
+  return jobRuns
+    .filter((run) => run.status === "failed" || run.status === "queued")
+    .map((run) => {
+      const event = outboxEventsById.get(run.outboxEventId) ?? null;
+      const deadLettered =
+        event?.status === "failed" &&
+        event.dispatchAttempts >= outboxDispatchRetryPolicy.maxAttempts;
+
+      if (deadLettered) {
+        return {
+          jobRunId: run.id,
+          outboxEventId: run.outboxEventId,
+          jobType: run.jobType,
+          status: "dead_lettered" as const,
+          canRetry: false,
+          reason:
+            run.error ??
+            event.lastError ??
+            "Job exhausted the retry policy and needs operator review.",
+          nextStep:
+            "Inspect the redacted error, fix the underlying provider or payload issue, then manually requeue or replay the originating outbox event.",
+          nextAttemptAt: null,
+        };
+      }
+
+      if (run.status === "failed") {
+        return {
+          jobRunId: run.id,
+          outboxEventId: run.outboxEventId,
+          jobType: run.jobType,
+          status: "retryable" as const,
+          canRetry: true,
+          reason: run.error ?? event?.lastError ?? "Job failed and is eligible for retry.",
+          nextStep: event?.nextAttemptAt
+            ? `Worker retry is scheduled for ${event.nextAttemptAt}.`
+            : "Requeue the originating outbox event after fixing the redacted error cause.",
+          nextAttemptAt: event?.nextAttemptAt ?? null,
+        };
+      }
+
+      return {
+        jobRunId: run.id,
+        outboxEventId: run.outboxEventId,
+        jobType: run.jobType,
+        status: "queued" as const,
+        canRetry: false,
+        reason: "Job is queued or dispatching.",
+        nextStep: "Wait for the worker to process this job before retrying.",
+        nextAttemptAt: event?.nextAttemptAt ?? null,
+      };
+    });
 }
 
 function queuedDataWorkflowStatus(

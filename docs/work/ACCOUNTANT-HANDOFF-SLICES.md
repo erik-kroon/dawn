@@ -53,7 +53,7 @@ Live Gmail OAuth and email delivery should not block completion of local product
 | 5. Receipt Matching Parity Plus                         | Completed   | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Browser smoke remains deferred while inbox/transactions UI files are under concurrent coss work.                                                                   |
 | 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, signed download links, skipped attachment counts, exported-after-storage status, packet download token policy, accountant email-link delivery, and failed export telemetry landed. Visible export history UI and live email provider setup remain open. |
 | 7. Accountant Access And Handoff Audit                  | Partial     | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Stored packet records, export history API, signed download/email success and failure audits, revocable packet links, and email-only handoff API exist; visible history UI remains open. |
-| 8. Operational Hardening And Accountant Close Loop      | Partial     | Operations API now returns selected-period accountant close readiness from lifecycle states, and a deterministic CSV-to-export close-loop fixture covers duplicate-safe reruns. Operations UI and live Gmail close smoke remain open.                                                                        |
+| 8. Operational Hardening And Accountant Close Loop      | Partial     | Operations API now returns selected-period accountant close readiness from lifecycle states, job-run retry/dead-letter guidance with redacted actionable errors, and a deterministic CSV-to-export close-loop fixture covers duplicate-safe reruns. Operations UI and live Gmail close smoke remain open. |
 
 ## Outcome
 
@@ -582,9 +582,9 @@ now exist. Visible export history UI remains open.
 
 Make the workflow dependable for repeated monthly closes.
 
-Status: Partially completed on 2026-06-15 for backend/API close readiness and
-deterministic close-loop fixture coverage. Operations UI and live Gmail close
-smoke remain open.
+Status: Partially completed on 2026-06-15 for backend/API close readiness,
+job-run retry/dead-letter guidance, and deterministic close-loop fixture
+coverage. Operations UI and live Gmail close smoke remain open.
 
 ## Scope
 
@@ -608,7 +608,8 @@ smoke remain open.
 
 - [ ] Operations UI can explain the latest import, sync, match, and export runs.
 - [x] Operations API can report whether a selected month is ready to send to an accountant.
-- [ ] Failed jobs have retry affordances and actionable error messages.
+- [x] Failed jobs have retry affordances and actionable error messages in the
+  Operations API.
 - [x] A representative monthly close fixture exercises CSV import, receipt evidence, review, and export.
 - [x] The system can rerun the close flow without duplicate transactions, documents, or exports.
 
@@ -630,6 +631,18 @@ smoke remain open.
   export, package attachments, export replay, and duplicate prevention. Live
   Gmail ingestion remains covered by provider-boundary tests and still needs a
   credentialed smoke.
+- Operations app/API tests cover `jobRunActions` for dead-lettered and retryable
+  failed jobs with redacted reasons, retry eligibility, next attempts, and
+  operator next steps.
+- `bun test packages/app/src/operations.test.ts` passed: 9 tests.
+- `DATABASE_URL=postgres://test BETTER_AUTH_SECRET=0123456789abcdef0123456789abcdef BETTER_AUTH_URL=http://localhost:3000 CORS_ORIGIN=http://localhost:3001 POLAR_ACCESS_TOKEN=test POLAR_SUCCESS_URL=http://localhost:3001/success bun test packages/api/src/router.test.ts --test-name-pattern "operations workspace"`
+  passed: 1 test.
+- `bun run check-types` passed.
+- `bunx oxlint` passed.
+- `bunx oxfmt --check packages/app/src/operations.ts packages/app/src/operations.test.ts packages/api/src/router.test.ts`
+  passed.
+- `git diff --check -- packages/app/src/operations.ts packages/app/src/operations.test.ts packages/api/src/router.test.ts docs/work/ACCOUNTANT-HANDOFF-SLICES.md`
+  passed.
 - Browser smoke for operations visibility and month-ready summary remains
   deferred while operations/web UI files are under concurrent coss work.
 

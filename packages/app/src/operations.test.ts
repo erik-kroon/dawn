@@ -517,6 +517,32 @@ describe("operations workspace", () => {
       createdAt: "2026-06-15T00:00:00.000Z",
       updatedAt: "2026-06-15T00:00:01.000Z",
     });
+    repository.outboxEvents.push({
+      id: "outbox_2",
+      teamId: "team_1",
+      type: "accountant_packet.export_requested",
+      version: 1,
+      payload: { packetId: "packet_1" },
+      dispatchAttempts: 2,
+      status: "failed",
+      lastError: "packet export failed for accountant@example.com",
+      nextAttemptAt: "2026-06-15T00:05:00.000Z",
+      occurredAt: "2026-06-15T00:00:02.000Z",
+      processedAt: null,
+    });
+    repository.jobRuns.push({
+      id: "job_2",
+      teamId: "team_1",
+      outboxEventId: "outbox_2",
+      jobType: "accountant_packet.export",
+      queueName: "dawn-jobs",
+      status: "failed",
+      attempt: 2,
+      idempotencyKey: "accountant-packet:export:outbox_2",
+      error: "packet export failed for accountant@example.com",
+      createdAt: "2026-06-15T00:00:02.000Z",
+      updatedAt: "2026-06-15T00:00:03.000Z",
+    });
     repository.providerSyncRuns.push({
       id: "sync_1",
       teamId: "team_1",
@@ -581,7 +607,7 @@ describe("operations workspace", () => {
     );
 
     expect(workspace.metrics).toMatchObject({
-      failedJobs: 1,
+      failedJobs: 2,
       deadLetters: 1,
       providerFailures: 1,
       integrationFailures: 1,
@@ -597,7 +623,25 @@ describe("operations workspace", () => {
       invoiceId: "invoice_1",
       secret: "[redacted]",
     });
-    expect(workspace.recentJobRuns[0]?.error).toContain("[redacted-email]");
+    expect(workspace.recentJobRuns.map((run) => run.error)).toEqual([
+      "Authorization Bearer [redacted-token] failed for [redacted-email]",
+      "packet export failed for [redacted-email]",
+    ]);
+    expect(workspace.jobRunActions).toEqual([
+      expect.objectContaining({
+        jobRunId: "job_1",
+        status: "dead_lettered",
+        canRetry: false,
+        reason: "Authorization Bearer [redacted-token] failed for [redacted-email]",
+      }),
+      expect.objectContaining({
+        jobRunId: "job_2",
+        status: "retryable",
+        canRetry: true,
+        nextAttemptAt: "2026-06-15T00:05:00.000Z",
+        nextStep: "Worker retry is scheduled for 2026-06-15T00:05:00.000Z.",
+      }),
+    ]);
     expect(workspace.recentProviderSyncRuns[0]?.error).toContain("[redacted-token]");
     expect(workspace.recentIntegrationSyncRuns[0]?.rawPayload).toEqual({
       accessToken: "[redacted]",

@@ -4244,6 +4244,14 @@ describe("appRouter", () => {
     expect(workspace.recentJobRuns[0]?.error).toBe(
       "Bearer [redacted-token] failed for [redacted-email]",
     );
+    expect(workspace.jobRunActions).toEqual([
+      expect.objectContaining({
+        jobRunId: "job_1",
+        status: "dead_lettered",
+        canRetry: false,
+        reason: "Bearer [redacted-token] failed for [redacted-email]",
+      }),
+    ]);
     expect(workspace.accountantClose).toMatchObject({
       status: "ready",
       transactionCount: 1,
