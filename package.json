@@ -45,6 +45,7 @@
     "db:studio": "vp run --filter @dawn/db db:studio",
     "db:generate": "vp run --filter @dawn/db db:generate",
     "db:migrate": "vp run --filter @dawn/db db:migrate",
+    "eval:ai": "vp run --filter @dawn/ai eval",
     "deploy": "vp run --filter @dawn/infra deploy",
     "destroy": "vp run --filter @dawn/infra destroy"
   },

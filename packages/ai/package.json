@@ -11,6 +11,7 @@
   },
   "scripts": {
     "test": "bun test",
+    "eval": "bun run src/evals.cli.ts",
     "check-types": "tsgo --noEmit"
   },
   "dependencies": {
