@@ -3832,6 +3832,24 @@ describe("appRouter", () => {
       },
       context,
     );
+    const connectedMessaging = await call(
+      router.integrations.connect,
+      {
+        teamId: "team_1",
+        provider: "mock-messaging",
+        idempotencyKey: "integration_connect_messaging_1",
+      },
+      context,
+    );
+    const connectedEmail = await call(
+      router.integrations.connect,
+      {
+        teamId: "team_1",
+        provider: "mock-email",
+        idempotencyKey: "integration_connect_email_1",
+      },
+      context,
+    );
     repository.transactions.set("txn_export_1", {
       id: "txn_export_1",
       teamId: "team_1",
@@ -3929,6 +3947,31 @@ describe("appRouter", () => {
       },
       context,
     );
+    const sentMessage = await call(
+      router.integrations.sendMessage,
+      {
+        teamId: "team_1",
+        connectionId: connectedMessaging.connection.id,
+        channel: "#finance",
+        text: "Invoice paid",
+        confirm: true,
+        idempotencyKey: "integration_message_1",
+      },
+      context,
+    );
+    const sentEmail = await call(
+      router.integrations.sendEmail,
+      {
+        teamId: "team_1",
+        connectionId: connectedEmail.connection.id,
+        to: "owner@example.com",
+        subject: "Invoice paid",
+        text: "Acme paid INV-EXPORT-1.",
+        confirm: true,
+        idempotencyKey: "integration_email_1",
+      },
+      context,
+    );
     const disabled = await call(
       router.integrations.disable,
       {
@@ -3971,9 +4014,15 @@ describe("appRouter", () => {
       payment: { method: "card" },
       syncRun: { status: "completed", recordsSynced: 1 },
     });
+    expect(sentMessage).toMatchObject({
+      syncRun: { status: "completed", recordsSynced: 1 },
+    });
+    expect(sentEmail).toMatchObject({
+      syncRun: { status: "completed", recordsSynced: 1 },
+    });
     expect(disabled.connection.status).toBe("disabled");
     expect(repository.invoicePayments).toHaveLength(1);
-    expect(repository.integrationSyncRuns).toHaveLength(4);
+    expect(repository.integrationSyncRuns).toHaveLength(6);
   });
 
   test("returns operations workspace with redacted failure and audit records", async () => {

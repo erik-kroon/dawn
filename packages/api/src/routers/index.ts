@@ -65,6 +65,8 @@ import {
   runAutomationsForOutboxEvent,
   sendInvoice,
   sendAssistantMessage,
+  sendIntegrationEmail,
+  sendIntegrationMessage,
   syncIntegration,
   syncBankConnection,
   createLedgerTransferPair,
@@ -332,6 +334,19 @@ const exportAccountingIntegrationInput = syncIntegrationInput.extend({
 
 const recordPaymentProviderEventInput = syncIntegrationInput.extend({
   rawPayload: z.record(z.string(), z.unknown()),
+});
+
+const sendIntegrationMessageInput = syncIntegrationInput.extend({
+  channel: z.string().min(1),
+  text: z.string().min(1),
+  confirm: z.literal(true),
+});
+
+const sendIntegrationEmailInput = syncIntegrationInput.extend({
+  to: z.email(),
+  subject: z.string().min(1),
+  text: z.string().min(1),
+  confirm: z.literal(true),
 });
 
 const disableIntegrationInput = z.object({
@@ -1444,6 +1459,42 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await recordPaymentProviderEvent(
+              transactionReviewRepository,
+              integrationProviders,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      sendMessage: protectedProcedure
+        .input(sendIntegrationMessageInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await sendIntegrationMessage(
+              transactionReviewRepository,
+              integrationProviders,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      sendEmail: protectedProcedure
+        .input(sendIntegrationEmailInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await sendIntegrationEmail(
               transactionReviewRepository,
               integrationProviders,
               {

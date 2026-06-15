@@ -132,4 +132,42 @@ describe("integration provider contracts", () => {
       }),
     ).rejects.toThrow("mock-messaging does not receive payment events");
   });
+
+  test("sends messaging and email deliveries through typed contracts", async () => {
+    const providers = createMockIntegrationProviders();
+    const messaging = providers.find((provider) => provider.provider === "mock-messaging")!;
+    const email = providers.find((provider) => provider.provider === "mock-email")!;
+    const accounting = providers.find((provider) => provider.provider === "mock-accounting")!;
+
+    const message = await messaging.sendMessage!({
+      teamId: "team_1",
+      providerConnectionId: "mock-messaging_team_1",
+      channel: "#finance",
+      text: "Invoice paid",
+    });
+    const sentEmail = await email.sendEmail!({
+      teamId: "team_1",
+      providerConnectionId: "mock-email_team_1",
+      to: "owner@example.com",
+      subject: "Invoice paid",
+      text: "Acme paid INV-001.",
+    });
+
+    expect(message).toMatchObject({
+      status: "completed",
+      rawPayload: { channel: "#finance", textLength: 12 },
+    });
+    expect(sentEmail).toMatchObject({
+      status: "completed",
+      rawPayload: { to: "owner@example.com", subject: "Invoice paid" },
+    });
+    await expect(
+      accounting.sendMessage!({
+        teamId: "team_1",
+        providerConnectionId: "mock-accounting_team_1",
+        channel: "#finance",
+        text: "Invoice paid",
+      }),
+    ).rejects.toThrow("mock-accounting does not send messages");
+  });
 });

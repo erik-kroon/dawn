@@ -6,6 +6,8 @@ import {
   exportAccountingIntegration,
   listIntegrationWorkspace,
   recordPaymentProviderEvent,
+  sendIntegrationEmail,
+  sendIntegrationMessage,
   syncIntegration,
   type DawnRepository,
   type IdempotencyResult,
@@ -570,6 +572,92 @@ describe("integration use cases", () => {
     expect(repository.outboxEvents.at(-1)).toMatchObject({
       type: "invoice.payment_recorded",
       payload: { provider: "mock-payments", providerEventId: "evt_payment_1" },
+    });
+  });
+
+  test("sends messaging and email deliveries through connected adapters", async () => {
+    const repository = new MemoryIntegrationRepository();
+    const providers = createMockIntegrationProviders();
+    const messaging = await connectIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-messaging",
+        idempotencyKey: "connect_messaging_1",
+      },
+    );
+    const email = await connectIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-email",
+        idempotencyKey: "connect_email_1",
+      },
+    );
+
+    const message = await sendIntegrationMessage(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: messaging.connection.id,
+        channel: "#finance",
+        text: "Invoice paid",
+        confirm: true,
+        idempotencyKey: "message_1",
+      },
+    );
+    const messageReplay = await sendIntegrationMessage(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: messaging.connection.id,
+        channel: "#finance",
+        text: "Invoice paid",
+        confirm: true,
+        idempotencyKey: "message_1",
+      },
+    );
+    const sentEmail = await sendIntegrationEmail(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: email.connection.id,
+        to: "Owner@Example.com",
+        subject: "Invoice paid",
+        text: "Acme paid INV-001.",
+        confirm: true,
+        idempotencyKey: "email_1",
+      },
+    );
+
+    expect(message.syncRun).toMatchObject({
+      status: "completed",
+      recordsSynced: 1,
+      rawPayload: { channel: "#finance" },
+    });
+    expect(messageReplay).toMatchObject({ replayed: true });
+    expect(sentEmail.syncRun).toMatchObject({
+      status: "completed",
+      recordsSynced: 1,
+      rawPayload: { to: "owner@example.com", subject: "Invoice paid" },
+    });
+    expect(repository.outboxEvents.at(-2)).toMatchObject({
+      type: "integration.message_sent",
+      payload: { channel: "#finance", textLength: 12 },
+    });
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "integration.email_sent",
+      payload: { to: "owner@example.com", subject: "Invoice paid" },
     });
   });
 

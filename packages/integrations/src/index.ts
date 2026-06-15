@@ -177,6 +177,12 @@ export type IntegrationProviderPaymentEventResult = {
   rawPayload: ProviderRawPayload;
 };
 
+export type IntegrationProviderDeliveryResult = {
+  status: "completed";
+  providerDeliveryId: string;
+  rawPayload: ProviderRawPayload;
+};
+
 export type IntegrationProvider = {
   provider: IntegrationProviderName;
   category: IntegrationCategory;
@@ -206,6 +212,19 @@ export type IntegrationProvider = {
     providerConnectionId: string;
     rawPayload: ProviderRawPayload;
   }): Promise<IntegrationProviderPaymentEventResult>;
+  sendMessage?(input: {
+    teamId: string;
+    providerConnectionId: string;
+    channel: string;
+    text: string;
+  }): Promise<IntegrationProviderDeliveryResult>;
+  sendEmail?(input: {
+    teamId: string;
+    providerConnectionId: string;
+    to: string;
+    subject: string;
+    text: string;
+  }): Promise<IntegrationProviderDeliveryResult>;
 };
 
 export function canonicalProviderTransactionId(input: {
@@ -657,6 +676,51 @@ export function createMockIntegrationProvider(input: {
         },
       };
     },
+    async sendMessage(command) {
+      if (!input.capabilities.includes("sendMessage")) {
+        throw new Error(`${input.provider} does not send messages`);
+      }
+
+      const providerDeliveryId = `${input.provider}_${command.providerConnectionId}_${hashMockDelivery(
+        [command.channel, command.text],
+      )}`;
+
+      return {
+        status: "completed",
+        providerDeliveryId,
+        rawPayload: {
+          mock: true,
+          provider: input.provider,
+          providerConnectionId: command.providerConnectionId,
+          providerDeliveryId,
+          channel: command.channel,
+          textLength: command.text.length,
+        },
+      };
+    },
+    async sendEmail(command) {
+      if (!input.capabilities.includes("sendEmail")) {
+        throw new Error(`${input.provider} does not send email`);
+      }
+
+      const providerDeliveryId = `${input.provider}_${command.providerConnectionId}_${hashMockDelivery(
+        [command.to, command.subject, command.text],
+      )}`;
+
+      return {
+        status: "completed",
+        providerDeliveryId,
+        rawPayload: {
+          mock: true,
+          provider: input.provider,
+          providerConnectionId: command.providerConnectionId,
+          providerDeliveryId,
+          to: command.to,
+          subject: command.subject,
+          textLength: command.text.length,
+        },
+      };
+    },
   };
 }
 
@@ -703,6 +767,13 @@ function requiredNumber(value: unknown, field: string) {
   }
 
   return value;
+}
+
+function hashMockDelivery(parts: readonly string[]) {
+  return createHmac("sha256", "mock-integration-delivery")
+    .update(parts.join("\n"))
+    .digest("hex")
+    .slice(0, 12);
 }
 
 function mockEncryptedProviderToken(input: {

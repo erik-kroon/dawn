@@ -440,6 +440,32 @@ export type RecordPaymentProviderEventResult = {
   replayed: boolean;
 };
 
+export type SendIntegrationMessageCommand = {
+  teamId: string;
+  connectionId: string;
+  channel: string;
+  text: string;
+  confirm: true;
+  idempotencyKey: string;
+};
+
+export type SendIntegrationEmailCommand = {
+  teamId: string;
+  connectionId: string;
+  to: string;
+  subject: string;
+  text: string;
+  confirm: true;
+  idempotencyKey: string;
+};
+
+export type SendIntegrationDeliveryResult = {
+  connection: IntegrationConnection;
+  syncRun: IntegrationSyncRun;
+  providerDeliveryId: string | null;
+  replayed: boolean;
+};
+
 export type DisableIntegrationCommand = {
   teamId: string;
   connectionId: string;
@@ -2137,6 +2163,8 @@ const connectIntegrationOperation = "integration.connect";
 const syncIntegrationOperation = "integration.sync";
 const exportAccountingIntegrationOperation = "integration.accounting_export";
 const recordPaymentProviderEventOperation = "integration.payment_event.record";
+const sendIntegrationMessageOperation = "integration.message.send";
+const sendIntegrationEmailOperation = "integration.email.send";
 const disableIntegrationOperation = "integration.disable";
 const requestTeamDataExportOperation = "team_data.export.request";
 const requestTeamDataDeletionOperation = "team_data.deletion.request";
@@ -5684,6 +5712,95 @@ export async function recordPaymentProviderEvent(
 
       return result;
     }
+  });
+}
+
+export async function sendIntegrationMessage(
+  repository: DawnRepository,
+  providers: readonly IntegrationProvider[],
+  context: TransactionReviewContext,
+  command: SendIntegrationMessageCommand,
+): Promise<SendIntegrationDeliveryResult> {
+  return sendIntegrationDelivery(repository, providers, context, {
+    teamId: command.teamId,
+    connectionId: command.connectionId,
+    category: "messaging",
+    capability: "sendMessage",
+    operation: sendIntegrationMessageOperation,
+    idempotencyKey: command.idempotencyKey,
+    fingerprint: JSON.stringify({
+      teamId: command.teamId,
+      connectionId: command.connectionId,
+      channel: command.channel.trim(),
+      text: command.text.trim(),
+    }),
+    notFoundMessage: "Messaging integration not found",
+    permissionMessage: "You cannot send integration messages for this team",
+    unsupportedMessage: "Integration does not support messages",
+    auditAction: "integration.message_sent",
+    outboxType: "integration.message_sent",
+    send: async (provider, connection) => {
+      if (!provider.sendMessage) {
+        throw new AppError("CONFLICT", "Integration does not support messages");
+      }
+
+      return await provider.sendMessage({
+        teamId: command.teamId,
+        providerConnectionId: connection.providerConnectionId,
+        channel: nonEmptyString(command.channel, "Message channel"),
+        text: nonEmptyString(command.text, "Message text"),
+      });
+    },
+    metadata: {
+      channel: command.channel.trim(),
+      textLength: command.text.trim().length,
+    },
+  });
+}
+
+export async function sendIntegrationEmail(
+  repository: DawnRepository,
+  providers: readonly IntegrationProvider[],
+  context: TransactionReviewContext,
+  command: SendIntegrationEmailCommand,
+): Promise<SendIntegrationDeliveryResult> {
+  return sendIntegrationDelivery(repository, providers, context, {
+    teamId: command.teamId,
+    connectionId: command.connectionId,
+    category: "email",
+    capability: "sendEmail",
+    operation: sendIntegrationEmailOperation,
+    idempotencyKey: command.idempotencyKey,
+    fingerprint: JSON.stringify({
+      teamId: command.teamId,
+      connectionId: command.connectionId,
+      to: command.to.trim().toLowerCase(),
+      subject: command.subject.trim(),
+      text: command.text.trim(),
+    }),
+    notFoundMessage: "Email integration not found",
+    permissionMessage: "You cannot send integration email for this team",
+    unsupportedMessage: "Integration does not support email",
+    auditAction: "integration.email_sent",
+    outboxType: "integration.email_sent",
+    send: async (provider, connection) => {
+      if (!provider.sendEmail) {
+        throw new AppError("CONFLICT", "Integration does not support email");
+      }
+
+      return await provider.sendEmail({
+        teamId: command.teamId,
+        providerConnectionId: connection.providerConnectionId,
+        to: normalizeInviteEmail(command.to),
+        subject: nonEmptyString(command.subject, "Email subject"),
+        text: nonEmptyString(command.text, "Email text"),
+      });
+    },
+    metadata: {
+      to: command.to.trim().toLowerCase(),
+      subject: command.subject.trim(),
+      textLength: command.text.trim().length,
+    },
   });
 }
 
@@ -9651,6 +9768,182 @@ async function exportInvoicesToProvider(
   });
 }
 
+async function sendIntegrationDelivery(
+  repository: DawnRepository,
+  providers: readonly IntegrationProvider[],
+  context: TransactionReviewContext,
+  input: {
+    teamId: string;
+    connectionId: string;
+    category: IntegrationCategory;
+    capability: IntegrationProviderCapability;
+    operation: string;
+    idempotencyKey: string;
+    fingerprint: string;
+    notFoundMessage: string;
+    permissionMessage: string;
+    unsupportedMessage: string;
+    auditAction: string;
+    outboxType: string;
+    metadata: Record<string, unknown>;
+    send: (
+      provider: IntegrationProvider,
+      connection: IntegrationConnection,
+    ) => Promise<{
+      status: "completed";
+      providerDeliveryId: string;
+      rawPayload: Record<string, unknown>;
+    }>;
+  },
+): Promise<SendIntegrationDeliveryResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const integrationRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, input.teamId, input.notFoundMessage);
+
+    await resolveTeamAccess(
+      integrationRepository,
+      { ...context, teamId: input.teamId },
+      "integrations.write",
+      input.permissionMessage,
+    );
+
+    const replayed = await integrationRepository.getIdempotencyResult(
+      input.teamId,
+      context.actor.id,
+      input.operation,
+      input.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== input.fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different integration delivery",
+        );
+      }
+
+      return { ...(replayed.result as SendIntegrationDeliveryResult), replayed: true };
+    }
+
+    const connection = await integrationRepository.getIntegrationConnectionForTeam(
+      input.teamId,
+      input.connectionId,
+    );
+
+    if (!connection || connection.status === "disabled" || connection.category !== input.category) {
+      throw new AppError("NOT_FOUND", input.notFoundMessage);
+    }
+
+    const provider = requireIntegrationProvider(providers, connection.provider);
+    const syncRun = await integrationRepository.createIntegrationSyncRun({
+      syncRunId: crypto.randomUUID(),
+      teamId: input.teamId,
+      integrationConnectionId: connection.id,
+      category: connection.category,
+      provider: connection.provider,
+    });
+
+    try {
+      if (!connection.capabilities.includes(input.capability)) {
+        throw new AppError("CONFLICT", input.unsupportedMessage);
+      }
+
+      const delivery = await input.send(provider, connection);
+      const completedSyncRun = await integrationRepository.finishIntegrationSyncRun({
+        syncRunId: syncRun.id,
+        status: delivery.status,
+        recordsSynced: 1,
+        error: null,
+        rawPayload: delivery.rawPayload,
+      });
+      const syncedConnection = await integrationRepository.markIntegrationConnectionSynced({
+        connectionId: connection.id,
+        syncedAt: new Date(completedSyncRun.completedAt ?? completedSyncRun.startedAt),
+        status: "connected",
+        lastError: null,
+      });
+      const metadata = {
+        provider: connection.provider,
+        providerDeliveryId: delivery.providerDeliveryId,
+        ...input.metadata,
+      };
+
+      await integrationRepository.appendAuditEvent({
+        teamId: input.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        action: input.auditAction,
+        entityType: "integration_connection",
+        entityId: connection.id,
+        metadata,
+      });
+
+      await integrationRepository.appendOutboxEvent({
+        teamId: input.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        type: input.outboxType,
+        version: 1,
+        payload: {
+          connectionId: connection.id,
+          ...metadata,
+        },
+      });
+
+      const result = {
+        connection: syncedConnection,
+        syncRun: completedSyncRun,
+        providerDeliveryId: delivery.providerDeliveryId,
+        replayed: false,
+      };
+
+      await integrationRepository.saveIdempotencyResult({
+        teamId: input.teamId,
+        actorId: context.actor.id,
+        operation: input.operation,
+        key: input.idempotencyKey,
+        fingerprint: input.fingerprint,
+        result,
+      });
+
+      return result;
+    } catch (error) {
+      const message = errorMessage(error);
+      const failedSyncRun = await integrationRepository.finishIntegrationSyncRun({
+        syncRunId: syncRun.id,
+        status: "failed",
+        recordsSynced: 0,
+        error: message,
+        rawPayload: { error: message, deliveryType: input.category },
+      });
+      const failedConnection = await integrationRepository.markIntegrationConnectionSynced({
+        connectionId: connection.id,
+        syncedAt: new Date(failedSyncRun.completedAt ?? failedSyncRun.startedAt),
+        status: "error",
+        lastError: message,
+      });
+      const result = {
+        connection: failedConnection,
+        syncRun: failedSyncRun,
+        providerDeliveryId: null,
+        replayed: false,
+      };
+
+      await integrationRepository.saveIdempotencyResult({
+        teamId: input.teamId,
+        actorId: context.actor.id,
+        operation: input.operation,
+        key: input.idempotencyKey,
+        fingerprint: input.fingerprint,
+        result,
+      });
+
+      return result;
+    }
+  });
+}
+
 async function recordProviderPaymentInRepository(
   repository: DawnRepository,
   context: TransactionReviewContext,
@@ -9745,6 +10038,16 @@ async function recordProviderPaymentInRepository(
   });
 
   return paymentResult;
+}
+
+function nonEmptyString(value: string, field: string) {
+  const normalized = value.trim();
+
+  if (!normalized) {
+    throw new AppError("CONFLICT", `${field} is required`);
+  }
+
+  return normalized;
 }
 
 export function connectMockBankConnectionFingerprint(
