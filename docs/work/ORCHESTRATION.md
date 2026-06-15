@@ -40,35 +40,35 @@ pass, and the implementing agent has inspected the diff.
 
 ## Slice Status
 
-| #   | Slice                                                        | Status                                                   | Dependencies             | Verification                                                                                                             |
-| --- | ------------------------------------------------------------ | -------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| 1   | Architecture Decision Baseline                               | Accepted for startup                                     | None                     | Manual ADR review complete; markdown/link check if added.                                                                |
-| 2   | Transaction Review Tracer Slice                              | Verified foundation, authenticated manual review blocked | Slice 1                  | Focused domain/app tests, `bun run check-types`, `bun run check`, local server/web smoke.                                |
-| 3   | Team Context And Permission Model                            | API-verified foundation in progress                      | Slice 2                  | Role matrix, directory, invite, acceptance, role update, and API contract tests; `bun run check-types`; `bun run check`. |
-| 4   | Money And Ledger Core                                        | API-verified foundation in progress                      | Slice 3                  | Money/domain tests; duplicate and split tests; report fixture tests; typecheck/check.                                    |
-| 5   | CSV Transaction Import                                       | UI/API-verified foundation in progress                   | Slice 4                  | Parser tests; preview/duplicate/commit tests; typecheck/check; web build.                                                |
-| 6   | TanStack DB Sync Tracer                                      | UI/API-verified foundation in progress                   | Slices 2, 3              | Sync contract tests; API cursor tests; dashboard collection wiring; typecheck/check.                                     |
-| 7   | Cloudflare Infrastructure Baseline                           | Verified foundation, live plan blocked on CF auth        | Slice 1                  | Infra contract test; server bundle; `bun run check-types`; `bun run check`; credentialed Alchemy plan blocked.           |
-| 8   | Outbox Dispatcher And Queue Bridge                           | Verified foundation in progress                          | Slices 2, 7              | Job contract tests; dispatcher retry/idempotency tests; typecheck/check.                                                 |
-| 9   | Tenant Durable Object Realtime Fanout                        | Verified foundation, live multi-client blocked           | Slices 6, 8              | Subscription routing tests; sync protocol tests; Worker/server build; typecheck/check.                                   |
-| 10  | Banking Provider Adapter Interface And Mock Provider         | Verified foundation, live manual sync blocked            | Slices 4, 8              | Adapter/app/API tests; migration; dashboard/server smoke; typecheck/check.                                               |
-| 11  | First Real Banking Provider                                  | Blocked on provider choice/credentials                   | Slice 10                 | Sandbox/provider tests; webhook signature tests; manual sandbox connection.                                              |
-| 12  | Documents And R2 Storage                                     | Verified foundation, manual upload/download blocked      | Slices 3, 7, 8           | Metadata/permission tests; R2 mock/local test; web/server smoke.                                                         |
-| 13  | Inbox And Document Extraction Pipeline                       | Verified foundation, manual inbox review blocked         | Slice 12                 | Extraction/job/app/API/server tests; migration; web/server smoke.                                                        |
-| 14  | Inbox-To-Transaction Matching                                | Verified foundation, manual matching review blocked      | Slices 4, 13             | Matching domain/app/API tests; migration; typecheck/check.                                                               |
-| 15  | Customers And Invoice Drafts                                 | Verified foundation, manual draft review blocked         | Slices 3, 4              | Invoice domain/app/API tests; migration; typecheck/check.                                                                |
-| 16  | Invoice Delivery, PDF, Payments, And Recurrence              | Verified foundation, manual sandbox send blocked         | Slices 15, 8             | Lifecycle/app/API/job tests; migration; typecheck/check; HTTP web smoke.                                                 |
-| 17  | Projects And Time Tracking                                   | Verified foundation, manual time flow blocked            | Slice 15                 | Time totals/conversion tests; project/time API tests; migration; typecheck/check; HTTP web smoke.                        |
-| 18  | Reporting And Weekly Insights                                | Not started                                              | Slices 4, 14, 16, 17     | Report fixture tests; mocked insight tests; manual dashboard.                                                            |
-| 19  | TanStack AI Assistant Read And Suggest Tools                 | Not started                                              | Slice 18                 | Tool schema tests; permission/refusal tests; manual grounded questions.                                                  |
-| 20  | AI Draft, Mutate, And Approval Gates                         | Not started                                              | Slice 19                 | Approval tests; AI actor permission tests; manual approval flow.                                                         |
-| 21  | AI Evaluation Harness                                        | Not started                                              | Slices 19, 20            | Eval runner with deterministic fixtures.                                                                                 |
-| 22  | Automation Rules                                             | Not started                                              | Slices 8, 20             | Trigger/action tests; manual event-driven automation.                                                                    |
-| 23  | Public API, OAuth Apps, API Keys, And Webhooks               | Not started                                              | Slices 3, 8              | API contract tests; scope tests; webhook retry/failure tests.                                                            |
-| 24  | Accounting, Payments, Messaging, And Email Provider Adapters | Not started                                              | Slices 16, 23            | Adapter contract tests; sandbox tests where available; manual status review.                                             |
-| 25  | Desktop Quick Capture And Native Shell Deepening             | Not started                                              | Slices 12, 13            | Desktop build/smoke; file capture test.                                                                                  |
-| 26  | Observability, Admin Tools, And Operations                   | Not started                                              | Slices 8, 11, 16, 20     | Controlled failure; redaction review; data workflow tests.                                                               |
-| 27  | Security Hardening And Release Gates                         | Not started                                              | Broad product foundation | Full check suite; integration tests; ignored-error review.                                                               |
+| #   | Slice                                                        | Status                                                      | Dependencies             | Verification                                                                                                             |
+| --- | ------------------------------------------------------------ | ----------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Architecture Decision Baseline                               | Accepted for startup                                        | None                     | Manual ADR review complete; markdown/link check if added.                                                                |
+| 2   | Transaction Review Tracer Slice                              | Verified foundation, authenticated manual review blocked    | Slice 1                  | Focused domain/app tests, `bun run check-types`, `bun run check`, local server/web smoke.                                |
+| 3   | Team Context And Permission Model                            | API-verified foundation in progress                         | Slice 2                  | Role matrix, directory, invite, acceptance, role update, and API contract tests; `bun run check-types`; `bun run check`. |
+| 4   | Money And Ledger Core                                        | API-verified foundation in progress                         | Slice 3                  | Money/domain tests; duplicate and split tests; report fixture tests; typecheck/check.                                    |
+| 5   | CSV Transaction Import                                       | UI/API-verified foundation in progress                      | Slice 4                  | Parser tests; preview/duplicate/commit tests; typecheck/check; web build.                                                |
+| 6   | TanStack DB Sync Tracer                                      | UI/API-verified foundation in progress                      | Slices 2, 3              | Sync contract tests; API cursor tests; dashboard collection wiring; typecheck/check.                                     |
+| 7   | Cloudflare Infrastructure Baseline                           | Verified foundation, live plan blocked on CF auth           | Slice 1                  | Infra contract test; server bundle; `bun run check-types`; `bun run check`; credentialed Alchemy plan blocked.           |
+| 8   | Outbox Dispatcher And Queue Bridge                           | Verified foundation in progress                             | Slices 2, 7              | Job contract tests; dispatcher retry/idempotency tests; typecheck/check.                                                 |
+| 9   | Tenant Durable Object Realtime Fanout                        | Verified foundation, live multi-client blocked              | Slices 6, 8              | Subscription routing tests; sync protocol tests; Worker/server build; typecheck/check.                                   |
+| 10  | Banking Provider Adapter Interface And Mock Provider         | Verified foundation, live manual sync blocked               | Slices 4, 8              | Adapter/app/API tests; migration; dashboard/server smoke; typecheck/check.                                               |
+| 11  | First Real Banking Provider                                  | Blocked on provider choice/credentials                      | Slice 10                 | Sandbox/provider tests; webhook signature tests; manual sandbox connection.                                              |
+| 12  | Documents And R2 Storage                                     | Verified foundation, manual upload/download blocked         | Slices 3, 7, 8           | Metadata/permission tests; R2 mock/local test; web/server smoke.                                                         |
+| 13  | Inbox And Document Extraction Pipeline                       | Verified foundation, manual inbox review blocked            | Slice 12                 | Extraction/job/app/API/server tests; migration; web/server smoke.                                                        |
+| 14  | Inbox-To-Transaction Matching                                | Verified foundation, manual matching review blocked         | Slices 4, 13             | Matching domain/app/API tests; migration; typecheck/check.                                                               |
+| 15  | Customers And Invoice Drafts                                 | Verified foundation, manual draft review blocked            | Slices 3, 4              | Invoice domain/app/API tests; migration; typecheck/check.                                                                |
+| 16  | Invoice Delivery, PDF, Payments, And Recurrence              | Verified foundation, manual sandbox send blocked            | Slices 15, 8             | Lifecycle/app/API/job tests; migration; typecheck/check; HTTP web smoke.                                                 |
+| 17  | Projects And Time Tracking                                   | Verified foundation, manual time flow blocked               | Slice 15                 | Time totals/conversion tests; project/time API tests; migration; typecheck/check; HTTP web smoke.                        |
+| 18  | Reporting And Weekly Insights                                | Verified foundation, authenticated dashboard review blocked | Slices 4, 14, 16, 17     | Report fixture tests; mocked insight tests; job/API tests; typecheck/check; HTTP/browser smoke.                          |
+| 19  | TanStack AI Assistant Read And Suggest Tools                 | Not started                                                 | Slice 18                 | Tool schema tests; permission/refusal tests; manual grounded questions.                                                  |
+| 20  | AI Draft, Mutate, And Approval Gates                         | Not started                                                 | Slice 19                 | Approval tests; AI actor permission tests; manual approval flow.                                                         |
+| 21  | AI Evaluation Harness                                        | Not started                                                 | Slices 19, 20            | Eval runner with deterministic fixtures.                                                                                 |
+| 22  | Automation Rules                                             | Not started                                                 | Slices 8, 20             | Trigger/action tests; manual event-driven automation.                                                                    |
+| 23  | Public API, OAuth Apps, API Keys, And Webhooks               | Not started                                                 | Slices 3, 8              | API contract tests; scope tests; webhook retry/failure tests.                                                            |
+| 24  | Accounting, Payments, Messaging, And Email Provider Adapters | Not started                                                 | Slices 16, 23            | Adapter contract tests; sandbox tests where available; manual status review.                                             |
+| 25  | Desktop Quick Capture And Native Shell Deepening             | Not started                                                 | Slices 12, 13            | Desktop build/smoke; file capture test.                                                                                  |
+| 26  | Observability, Admin Tools, And Operations                   | Not started                                                 | Slices 8, 11, 16, 20     | Controlled failure; redaction review; data workflow tests.                                                               |
+| 27  | Security Hardening And Release Gates                         | Not started                                                 | Broad product foundation | Full check suite; integration tests; ignored-error review.                                                               |
 
 ## Exploration Log
 
@@ -198,6 +198,11 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 17     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                                   |
 | 2026-06-15 slice 17     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 240 files.                                                                                                 |
 | 2026-06-15 slice 17     | `curl -i http://localhost:3001/` and `/dashboard`                                                                                                                                                                                                                                                                            | Partial | Vite served both routes with 200 responses; authenticated manual project/time/invoice flow remains blocked.                                              |
+| 2026-06-15 slice 18     | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0013_far_stick.sql` for persisted business insights.                                                               |
+| 2026-06-15 slice 18     | `bun test packages/ai/src/insights.test.ts packages/app/src/reporting.test.ts packages/jobs/src/index.test.ts packages/api/src/router.test.ts`                                                                                                                                                                               | Pass    | 26 tests passed for source-cited reports, mocked insight generation, weekly insight jobs, and protected report routes.                                   |
+| 2026-06-15 slice 18     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                                   |
+| 2026-06-15 slice 18     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 246 files.                                                                                                 |
+| 2026-06-15 slice 18     | `curl -I http://localhost:3001/` and `/dashboard`; Browser reload with local API server                                                                                                                                                                                                                                      | Partial | Vite served both routes with 200 responses; Browser reached `/login` after auth check, so authenticated dashboard review remains blocked.                |
 
 ## Commit Log
 
@@ -221,7 +226,8 @@ pass, and the implementing agent has inspected the diff.
 | `7171264` | Inbox transaction matching           | Added deterministic match scoring, suggestion persistence, accept/reject flows, hard-negative memory, and dashboard controls. |
 | `abdb187` | Billing draft foundation             | Added customers, contacts, products/services, exact invoice totals, draft invoice API/UI, and migration.                      |
 | `8499997` | Invoice delivery foundation          | Added invoice PDF preview, confirmed send, payment recording, recurrence jobs, mock email delivery, and dashboard controls.   |
-| `a639988` | Project time foundation              | Added customer-linked projects, time entries, billable reports, invoice conversion, sync contracts, and dashboard controls.    |
+| `a639988` | Project time foundation              | Added customer-linked projects, time entries, billable reports, invoice conversion, sync contracts, and dashboard controls.   |
+| `d9ecab3` | Reporting and insight foundation     | Added source-cited report queries, weekly insight jobs, persisted insights, protected API route, and dashboard overview.       |
 
 ## Implementation Notes
 
@@ -356,6 +362,33 @@ audit/outbox events. The API exposes a protected billing router, and the
 dashboard has a compact billing panel for creating customers, products/services,
 and creating or updating one-line draft invoices.
 
+Slice 16 foundation added invoice preview and delivery lifecycle behavior. The
+domain layer owns send, payment, and recurrence state transitions; the app layer
+adds confirmed email delivery, payment recording, and recurring invoice
+generation behind idempotency, audit, and outbox writes. Postgres stores invoice
+events, payments, recurring schedules, and lifecycle fields, while the jobs
+package maps recurring due events into generation jobs. The dashboard can
+preview PDFs, send invoices through the mock provider, record payments, and set
+up recurring schedules.
+
+Slice 17 foundation added customer-linked projects, project members, and time
+entries. The domain layer totals billable and non-billable time with exact money
+values; the app layer creates projects, records time, reports utilization, and
+converts billable entries into invoice lines with audit/outbox writes. Postgres
+stores `project`, `project_member`, and `time_entry`, and the dashboard includes
+a projects/time panel for creating projects, tracking time, and invoicing
+selected billable entries.
+
+Slice 18 foundation added source-cited business reporting and weekly insight
+generation. The app layer now builds team-scoped overview reports for
+profit/loss, cashflow, revenue by customer, expenses by category, unpaid
+invoices, tax summary, time utilization, and inbox backlog. `packages/ai`
+defines the insight provider port with a deterministic mock provider, Postgres
+stores generated `business_insight` records with source refs, the jobs package
+maps weekly insight due events into generation jobs, and the API exposes a
+protected `reports.overview` route. The dashboard Overview card reads the route
+and links insight sources back to the relevant workflow sections.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -412,3 +445,7 @@ and creating or updating one-line draft invoices.
   migrated local or preview database. Current verification covers invoice domain
   math/state rules, app use cases, API routes, migration generation, and
   dashboard build/type contracts plus unauthenticated web-shell smoke.
+- Slice 18 still needs authenticated dashboard review with seeded source records
+  and generated insight rows against a migrated local or preview database.
+  Current verification covers report/insight/app/API/job contracts, migration
+  generation, typecheck/check, HTTP smoke, and Browser unauthenticated redirect.
