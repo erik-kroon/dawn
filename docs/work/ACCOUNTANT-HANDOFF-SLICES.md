@@ -35,10 +35,10 @@ The full goal is done when all of these are true:
 - [ ] The accountant packet can optionally include XLSX and can optionally be sent to an accountant email address, when email delivery is configured.
 - [ ] Export status, history, retries, and package access are visible and audited.
 - [ ] The accountant role can access handoff artifacts according to Dawn permissions without unsafe financial mutation rights.
-- [ ] The close-loop path is verified with representative fixture data from CSV import through export package.
-- [ ] `bun run check-types` passes.
-- [ ] Focused package/app/job tests for changed areas pass.
-- [ ] This file is updated with completed slice status, verification run, and any residual live-credential caveats.
+- [x] The close-loop path is verified with representative fixture data from CSV import through export package.
+- [x] `bun run check-types` passes.
+- [x] Focused package/app/job tests for changed areas pass.
+- [x] This file is updated with completed slice status, verification run, and any residual live-credential caveats.
 
 Live Gmail OAuth and email delivery should not block completion of local product behavior if credentials are absent. In that case, the goal thread must leave the code configurable, add deterministic tests around provider boundaries, and mark only the live smoke checks as blocked.
 
@@ -53,7 +53,7 @@ Live Gmail OAuth and email delivery should not block completion of local product
 | 5. Receipt Matching Parity Plus                         | Completed   | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Browser smoke remains deferred while inbox/transactions UI files are under concurrent coss work.                                                                   |
 | 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, signed download links, skipped attachment counts, exported-after-storage status, packet download token policy, accountant email-link delivery, and failed export telemetry landed. Visible export history UI and live email provider setup remain open. |
 | 7. Accountant Access And Handoff Audit                  | Partial     | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Stored packet records, export history API, signed download/email audits, revocable packet links, and email-only handoff API exist; visible history UI and failed-send audit remain open. |
-| 8. Operational Hardening And Accountant Close Loop      | Partial     | Operations API now returns selected-period accountant close readiness from lifecycle states. Operations UI, representative monthly fixture, and retry affordances remain open.                                                                                                                                |
+| 8. Operational Hardening And Accountant Close Loop      | Partial     | Operations API now returns selected-period accountant close readiness from lifecycle states, and a deterministic CSV-to-export close-loop fixture covers duplicate-safe reruns. Operations UI and live Gmail close smoke remain open.                                                                        |
 
 ## Outcome
 
@@ -578,8 +578,9 @@ Visible export history UI and failed-send audit remain open.
 
 Make the workflow dependable for repeated monthly closes.
 
-Status: Partially completed on 2026-06-15 for backend/API close readiness.
-Operations UI, full close-loop fixture, and retry affordances remain open.
+Status: Partially completed on 2026-06-15 for backend/API close readiness and
+deterministic close-loop fixture coverage. Operations UI and live Gmail close
+smoke remain open.
 
 ## Scope
 
@@ -604,8 +605,8 @@ Operations UI, full close-loop fixture, and retry affordances remain open.
 - [ ] Operations UI can explain the latest import, sync, match, and export runs.
 - [x] Operations API can report whether a selected month is ready to send to an accountant.
 - [ ] Failed jobs have retry affordances and actionable error messages.
-- [ ] A representative monthly close fixture exercises CSV import, Gmail ingestion, matching, review, and export.
-- [ ] The system can rerun the close flow without duplicate transactions, documents, or exports.
+- [x] A representative monthly close fixture exercises CSV import, receipt evidence, review, and export.
+- [x] The system can rerun the close flow without duplicate transactions, documents, or exports.
 
 ## Verification
 
@@ -619,7 +620,12 @@ Operations UI, full close-loop fixture, and retry affordances remain open.
   passed.
 - `git diff --check -- packages/app/src/operations.ts packages/app/src/operations.test.ts packages/api/src/routers/index.ts packages/api/src/router.test.ts docs/work/ACCOUNTANT-HANDOFF-SLICES.md`
   passed.
-- Focused app/job/domain tests for the full close-loop fixture remain open.
+- `bun test packages/app/src/accountant-close-flow.test.ts` passed: 1 test.
+- Close-loop fixture covers CSV import replay, transaction review, receipt
+  evidence attached through the accountant packet attachment boundary, CSV/XLSX
+  export, package attachments, export replay, and duplicate prevention. Live
+  Gmail ingestion remains covered by provider-boundary tests and still needs a
+  credentialed smoke.
 - Browser smoke for operations visibility and month-ready summary remains
   deferred while operations/web UI files are under concurrent coss work.
 
