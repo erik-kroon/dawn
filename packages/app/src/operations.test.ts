@@ -239,6 +239,10 @@ class MemoryOperationsRepository {
     return [];
   }
 
+  async listOAuthGrants() {
+    return [];
+  }
+
   async listWebhookSubscriptions() {
     return [];
   }
@@ -536,7 +540,7 @@ describe("operations workspace", () => {
       assistant: { conversations: [], pendingApprovals: [] },
       automations: { rules: [], runs: [] },
       integrations: { connections: [], syncRuns: [] },
-      developer: { apiKeys: [], oauthApps: [], webhookSubscriptions: [] },
+      developer: { apiKeys: [], oauthApps: [], oauthGrants: [], webhookSubscriptions: [] },
     });
     expect(snapshot.banking.connections[0]?.latestSyncRun?.error).toContain("[redacted-token]");
     expect(snapshot.operations.auditEvents[0]?.metadata).toEqual({

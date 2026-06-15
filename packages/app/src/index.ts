@@ -37,6 +37,7 @@ import type {
   IntegrationSyncRun,
   IntegrationSyncRunStatus,
   OAuthApp,
+  OAuthGrant,
   RecurringInvoiceFrequency,
   RecurringInvoiceSchedule,
   LedgerAccount,
@@ -1166,6 +1167,7 @@ export type TeamDataExportSnapshot = {
   developer: {
     apiKeys: ApiKey[];
     oauthApps: OAuthApp[];
+    oauthGrants: OAuthGrant[];
     webhookSubscriptions: WebhookSubscription[];
     webhookDeliveries: WebhookDelivery[];
   };
@@ -1251,6 +1253,7 @@ export type DeveloperWorkspace = {
   teamId: string;
   apiKeys: ApiKey[];
   oauthApps: OAuthApp[];
+  oauthGrants: OAuthGrant[];
   webhookSubscriptions: WebhookSubscription[];
   recentWebhookDeliveries: WebhookDelivery[];
 };
@@ -1271,6 +1274,42 @@ export type CreateApiKeyResult = {
 export type ResolveApiKeyResult = {
   apiKey: ApiKey;
   actor: Actor;
+};
+
+export type CreateOAuthAppCommand = {
+  teamId: string;
+  name: string;
+  redirectUris: string[];
+  scopes: PublicApiScope[];
+  idempotencyKey: string;
+};
+
+export type CreateOAuthAppResult = {
+  app: OAuthApp;
+  replayed: boolean;
+};
+
+export type OAuthConsentCommand = {
+  teamId: string;
+  appId: string;
+  redirectUri: string;
+  scopes: PublicApiScope[];
+};
+
+export type OAuthConsentPreview = {
+  teamId: string;
+  app: OAuthApp;
+  redirectUri: string;
+  scopes: PublicApiScope[];
+};
+
+export type GrantOAuthConsentCommand = OAuthConsentCommand & {
+  idempotencyKey: string;
+};
+
+export type GrantOAuthConsentResult = OAuthConsentPreview & {
+  grant: OAuthGrant;
+  replayed: boolean;
 };
 
 export type CreateWebhookSubscriptionCommand = {
@@ -1819,9 +1858,11 @@ export type AutomationRepository = {
 export type DeveloperRepository = {
   listApiKeys(teamId: string): Promise<ApiKey[]>;
   listOAuthApps(teamId: string): Promise<OAuthApp[]>;
+  listOAuthGrants(teamId: string): Promise<OAuthGrant[]>;
   listWebhookSubscriptions(teamId: string): Promise<WebhookSubscription[]>;
   listWebhookDeliveries(teamId: string, limit: number): Promise<WebhookDelivery[]>;
   getApiKeyByHash(keyHash: string): Promise<ApiKey | null>;
+  getOAuthAppForTeam(teamId: string, appId: string): Promise<OAuthApp | null>;
   markApiKeyUsed(input: { apiKeyId: string; lastUsedAt: string }): Promise<void>;
   createApiKey(input: {
     apiKeyId: string;
@@ -1832,6 +1873,21 @@ export type DeveloperRepository = {
     scopes: PublicApiScope[];
     createdByActorId: string;
   }): Promise<ApiKey>;
+  createOAuthApp(input: {
+    appId: string;
+    teamId: string;
+    name: string;
+    redirectUris: string[];
+    scopes: PublicApiScope[];
+    createdByActorId: string;
+  }): Promise<OAuthApp>;
+  createOAuthGrant(input: {
+    grantId: string;
+    teamId: string;
+    appId: string;
+    actorId: string;
+    scopes: PublicApiScope[];
+  }): Promise<OAuthGrant>;
   createWebhookSubscription(input: {
     subscriptionId: string;
     teamId: string;
@@ -2045,6 +2101,8 @@ const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
 const createAutomationRuleOperation = "automation.rule.create";
 const createApiKeyOperation = "api_key.create";
+const createOAuthAppOperation = "oauth_app.create";
+const grantOAuthConsentOperation = "oauth_consent.grant";
 const createWebhookSubscriptionOperation = "webhook_subscription.create";
 const connectIntegrationOperation = "integration.connect";
 const syncIntegrationOperation = "integration.sync";
@@ -2705,6 +2763,7 @@ export async function listDeveloperWorkspace(
     teamId: access.teamId,
     apiKeys: await repository.listApiKeys(access.teamId),
     oauthApps: await repository.listOAuthApps(access.teamId),
+    oauthGrants: await repository.listOAuthGrants(access.teamId),
     webhookSubscriptions: await repository.listWebhookSubscriptions(access.teamId),
     recentWebhookDeliveries: await repository.listWebhookDeliveries(access.teamId, 10),
   };
@@ -2898,6 +2957,7 @@ export async function buildTeamDataExportSnapshot(
     integrationWorkflowSyncRuns,
     apiKeys,
     oauthApps,
+    oauthGrants,
     webhookSubscriptions,
     developerWebhookDeliveries,
     auditEvents,
@@ -2931,6 +2991,7 @@ export async function buildTeamDataExportSnapshot(
     repository.listIntegrationSyncRuns(input.teamId, limit),
     repository.listApiKeys(input.teamId),
     repository.listOAuthApps(input.teamId),
+    repository.listOAuthGrants(input.teamId),
     repository.listWebhookSubscriptions(input.teamId),
     repository.listWebhookDeliveries(input.teamId, limit),
     repository.listAuditEvents({ teamId: input.teamId, limit }),
@@ -2996,6 +3057,7 @@ export async function buildTeamDataExportSnapshot(
     developer: {
       apiKeys,
       oauthApps,
+      oauthGrants,
       webhookSubscriptions,
       webhookDeliveries: developerWebhookDeliveries.map(redactWebhookDelivery),
     },
@@ -3251,6 +3313,191 @@ export async function resolvePublicApiKey(
   };
 }
 
+export async function createOAuthApp(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: CreateOAuthAppCommand,
+): Promise<CreateOAuthAppResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const developerRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "OAuth app not found");
+
+    await resolveTeamAccess(
+      developerRepository,
+      { ...context, teamId: command.teamId },
+      "api_keys.manage",
+      "You cannot create OAuth apps for this team",
+    );
+
+    const normalized = normalizeCreateOAuthAppCommand(command);
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await developerRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createOAuthAppOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different OAuth app",
+        );
+      }
+
+      return { ...(replayed.result as CreateOAuthAppResult), replayed: true };
+    }
+
+    const app = await developerRepository.createOAuthApp({
+      appId: crypto.randomUUID(),
+      teamId: normalized.teamId,
+      name: normalized.name,
+      redirectUris: normalized.redirectUris,
+      scopes: normalized.scopes,
+      createdByActorId: context.actor.id,
+    });
+
+    await developerRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "oauth_app.created",
+      entityType: "oauth_app",
+      entityId: app.id,
+      metadata: {
+        redirectUris: app.redirectUris,
+        scopes: app.scopes,
+      },
+    });
+
+    const result = { app, replayed: false };
+
+    await developerRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createOAuthAppOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function previewOAuthConsent(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: OAuthConsentCommand,
+): Promise<OAuthConsentPreview> {
+  await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId },
+    "api_keys.manage",
+    "You cannot grant OAuth access for this team",
+  );
+
+  const normalized = normalizeOAuthConsentCommand(command);
+  const app = await repository.getOAuthAppForTeam(normalized.teamId, normalized.appId);
+
+  if (!app) {
+    throw new AppError("NOT_FOUND", "OAuth app was not found");
+  }
+
+  assertOAuthConsentAllowed(app, normalized);
+
+  return {
+    teamId: normalized.teamId,
+    app,
+    redirectUri: normalized.redirectUri,
+    scopes: normalized.scopes,
+  };
+}
+
+export async function grantOAuthConsent(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: GrantOAuthConsentCommand,
+): Promise<GrantOAuthConsentResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const developerRepository = transactionRepository as DawnRepository;
+    const preview = await previewOAuthConsent(developerRepository, context, command);
+    const fingerprint = JSON.stringify({
+      teamId: preview.teamId,
+      appId: preview.app.id,
+      redirectUri: preview.redirectUri,
+      scopes: preview.scopes,
+    });
+    const replayed = await developerRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      grantOAuthConsentOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different OAuth consent",
+        );
+      }
+
+      return { ...(replayed.result as GrantOAuthConsentResult), replayed: true };
+    }
+
+    const grant = await developerRepository.createOAuthGrant({
+      grantId: crypto.randomUUID(),
+      teamId: preview.teamId,
+      appId: preview.app.id,
+      actorId: context.actor.id,
+      scopes: preview.scopes,
+    });
+
+    await developerRepository.appendAuditEvent({
+      teamId: preview.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "oauth_consent.granted",
+      entityType: "oauth_grant",
+      entityId: grant.id,
+      metadata: {
+        appId: preview.app.id,
+        redirectUri: preview.redirectUri,
+        scopes: preview.scopes,
+      },
+    });
+
+    await developerRepository.appendOutboxEvent({
+      teamId: preview.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "oauth_consent.granted",
+      version: 1,
+      payload: {
+        appId: preview.app.id,
+        grantId: grant.id,
+        scopes: preview.scopes,
+      },
+    });
+
+    const result = { ...preview, grant, replayed: false };
+
+    await developerRepository.saveIdempotencyResult({
+      teamId: preview.teamId,
+      actorId: context.actor.id,
+      operation: grantOAuthConsentOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
 export async function createWebhookSubscription(
   repository: DawnRepository,
   context: TransactionReviewContext,
@@ -3431,6 +3678,77 @@ function normalizeCreateApiKeyCommand(command: CreateApiKeyCommand) {
     name,
     scopes,
   };
+}
+
+function normalizeCreateOAuthAppCommand(command: CreateOAuthAppCommand) {
+  const name = command.name.trim();
+  const redirectUris = [...new Set(command.redirectUris.map(normalizeOAuthRedirectUri))];
+  const scopes = normalizePublicApiScopes(command.scopes, "OAuth apps");
+
+  if (!name) {
+    throw new AppError("CONFLICT", "OAuth app name is required");
+  }
+
+  if (redirectUris.length === 0) {
+    throw new AppError("CONFLICT", "OAuth apps require at least one redirect URI");
+  }
+
+  return {
+    teamId: command.teamId,
+    name,
+    redirectUris,
+    scopes,
+  };
+}
+
+function normalizeOAuthConsentCommand(command: OAuthConsentCommand) {
+  return {
+    teamId: command.teamId,
+    appId: command.appId,
+    redirectUri: normalizeOAuthRedirectUri(command.redirectUri),
+    scopes: normalizePublicApiScopes(command.scopes, "OAuth consent"),
+  };
+}
+
+function assertOAuthConsentAllowed(
+  app: OAuthApp,
+  command: ReturnType<typeof normalizeOAuthConsentCommand>,
+) {
+  if (!app.redirectUris.includes(command.redirectUri)) {
+    throw new AppError("CONFLICT", "OAuth redirect URI is not registered for this app");
+  }
+
+  const appScopes = new Set(app.scopes);
+  const unsupportedScopes = command.scopes.filter((scope) => !appScopes.has(scope));
+
+  if (unsupportedScopes.length > 0) {
+    throw new AppError("CONFLICT", "OAuth consent requested scopes outside the app registration");
+  }
+}
+
+function normalizePublicApiScopes(scopes: PublicApiScope[], label: string) {
+  const normalized = [...new Set(scopes)];
+
+  if (normalized.length === 0) {
+    throw new AppError("CONFLICT", `${label} require at least one scope`);
+  }
+
+  return normalized;
+}
+
+function normalizeOAuthRedirectUri(value: string) {
+  const redirectUri = value.trim();
+
+  try {
+    const parsed = new URL(redirectUri);
+    if (parsed.protocol !== "https:" || parsed.hash) {
+      throw new Error("OAuth redirect URI must use HTTPS and cannot include a fragment");
+    }
+
+    return parsed.toString();
+  } catch {
+    throw new AppError("CONFLICT", "OAuth redirect URI must be a valid HTTPS URL");
+  }
 }
 
 function normalizeCreateWebhookSubscriptionCommand(command: CreateWebhookSubscriptionCommand) {

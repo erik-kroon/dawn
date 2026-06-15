@@ -19,6 +19,7 @@ import {
   createAutomationRule,
   createDraftInvoice,
   createLedgerTransaction,
+  createOAuthApp,
   createProduct,
   createProject,
   createTimeEntry,
@@ -50,6 +51,7 @@ import {
   listTransactionSyncCollection,
   listTransactionReviewWorkspace,
   previewCsvTransactionImport,
+  previewOAuthConsent,
   previewInvoicePdf,
   rejectInboxMatch,
   rejectAssistantAction,
@@ -57,6 +59,7 @@ import {
   reviewTransaction,
   requestTeamDataDeletion,
   requestTeamDataExport,
+  grantOAuthConsent,
   runAutomationsForOutboxEvent,
   sendInvoice,
   sendAssistantMessage,
@@ -233,6 +236,25 @@ const createApiKeyInput = z.object({
   teamId: z.string().min(1),
   name: z.string().trim().min(1).max(120),
   scopes: z.array(publicApiScopeInput).min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const createOAuthAppInput = z.object({
+  teamId: z.string().min(1),
+  name: z.string().trim().min(1).max(120),
+  redirectUris: z.array(z.url()).min(1),
+  scopes: z.array(publicApiScopeInput).min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const oauthConsentInput = z.object({
+  teamId: z.string().min(1),
+  appId: z.string().min(1),
+  redirectUri: z.url(),
+  scopes: z.array(publicApiScopeInput).min(1),
+});
+
+const grantOAuthConsentInput = oauthConsentInput.extend({
   idempotencyKey: z.string().min(1),
 });
 
@@ -1079,6 +1101,57 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createApiKey(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createOAuthApp: protectedProcedure
+        .input(createOAuthAppInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createOAuthApp(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      previewOAuthConsent: protectedProcedure
+        .input(oauthConsentInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await previewOAuthConsent(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      grantOAuthConsent: protectedProcedure
+        .input(grantOAuthConsentInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await grantOAuthConsent(
               transactionReviewRepository,
               {
                 actor: { id: context.session.user.id, type: "user" },

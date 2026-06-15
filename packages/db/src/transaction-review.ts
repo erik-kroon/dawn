@@ -49,6 +49,7 @@ import type {
   InvoiceLineDraft,
   InvoicePayment,
   OAuthApp,
+  OAuthGrant,
   LedgerAccount,
   LedgerTransactionDraft,
   Product,
@@ -2916,6 +2917,16 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return apps.map(mapOAuthApp);
   }
 
+  async listOAuthGrants(teamId: string): Promise<OAuthGrant[]> {
+    const grants = await this.client
+      .select()
+      .from(schema.oauthGrant)
+      .where(eq(schema.oauthGrant.teamId, teamId))
+      .orderBy(desc(schema.oauthGrant.createdAt));
+
+    return grants.map(mapOAuthGrant);
+  }
+
   async listWebhookSubscriptions(teamId: string): Promise<WebhookSubscription[]> {
     const subscriptions = await this.client
       .select()
@@ -2945,6 +2956,16 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       .limit(1);
 
     return apiKey ? mapApiKey(apiKey) : null;
+  }
+
+  async getOAuthAppForTeam(teamId: string, appId: string): Promise<OAuthApp | null> {
+    const [app] = await this.client
+      .select()
+      .from(schema.oauthApp)
+      .where(and(eq(schema.oauthApp.teamId, teamId), eq(schema.oauthApp.id, appId)))
+      .limit(1);
+
+    return app ? mapOAuthApp(app) : null;
   }
 
   async markApiKeyUsed(input: { apiKeyId: string; lastUsedAt: string }): Promise<void> {
@@ -2981,6 +3002,58 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     }
 
     return mapApiKey(apiKey);
+  }
+
+  async createOAuthApp(input: {
+    appId: string;
+    teamId: string;
+    name: string;
+    redirectUris: string[];
+    scopes: OAuthApp["scopes"];
+    createdByActorId: string;
+  }): Promise<OAuthApp> {
+    const [app] = await this.client
+      .insert(schema.oauthApp)
+      .values({
+        id: input.appId,
+        teamId: input.teamId,
+        name: input.name,
+        redirectUris: input.redirectUris,
+        scopes: input.scopes,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!app) {
+      throw new Error("Failed to create OAuth app");
+    }
+
+    return mapOAuthApp(app);
+  }
+
+  async createOAuthGrant(input: {
+    grantId: string;
+    teamId: string;
+    appId: string;
+    actorId: string;
+    scopes: OAuthGrant["scopes"];
+  }): Promise<OAuthGrant> {
+    const [grant] = await this.client
+      .insert(schema.oauthGrant)
+      .values({
+        id: input.grantId,
+        teamId: input.teamId,
+        appId: input.appId,
+        actorId: input.actorId,
+        scopes: input.scopes,
+      })
+      .returning();
+
+    if (!grant) {
+      throw new Error("Failed to create OAuth grant");
+    }
+
+    return mapOAuthGrant(grant);
   }
 
   async createWebhookSubscription(input: {
@@ -4230,6 +4303,18 @@ function mapOAuthApp(app: typeof schema.oauthApp.$inferSelect): OAuthApp {
     createdByActorId: app.createdByActorId,
     createdAt: app.createdAt.toISOString(),
     updatedAt: app.updatedAt.toISOString(),
+  };
+}
+
+function mapOAuthGrant(grant: typeof schema.oauthGrant.$inferSelect): OAuthGrant {
+  return {
+    id: grant.id,
+    teamId: grant.teamId,
+    appId: grant.appId,
+    actorId: grant.actorId,
+    scopes: grant.scopes as OAuthGrant["scopes"],
+    revokedAt: grant.revokedAt?.toISOString() ?? null,
+    createdAt: grant.createdAt.toISOString(),
   };
 }
 

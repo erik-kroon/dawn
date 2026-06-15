@@ -544,6 +544,13 @@ handler records delivery success/failure and retries failed webhook jobs through
 the queue, and Postgres stores API key/OAuth/webhook state via migration
 `0017_demonic_fenris`.
 
+Slice 23 follow-up added protected OAuth app creation and consent grant
+contracts. The app layer validates registered HTTPS redirect URIs, enforces
+requested scopes as a subset of the app registration, persists grants
+idempotently, and audits/emits `oauth_consent.granted`; the protected router
+exposes create, preview, and grant procedures for a future browser authorization
+screen.
+
 Slice 24 foundation added a generic integration provider boundary for
 accounting, payments, messaging, and email. `packages/integrations` now exposes
 mock adapters with declared capabilities, encrypted-token metadata, deterministic
@@ -686,11 +693,12 @@ provider cleanup, and compliance rules.
   approval-required risky actions, run logging, queue job mapping, protected API
   routes, migration generation, typecheck/check, and dashboard build.
 - Slice 23 still needs live public API requests against a migrated local or
-  preview database, OAuth authorization UI/consent flows, and webhook delivery
-  review against a reachable endpoint. Current verification covers hashed scoped
-  API keys, one-time credential replay behavior, protected developer routes,
-  public OpenAPI shape, queue retry signaling, delivery audit records,
-  migration generation, typecheck/check, and focused tests.
+  preview database, OAuth authorization browser UI, and webhook delivery review
+  against a reachable endpoint. Current verification covers hashed scoped API
+  keys, one-time credential replay behavior, OAuth app/consent grant route
+  contracts, protected developer routes, public OpenAPI shape, queue retry
+  signaling, delivery audit records, migration generation, typecheck/check, and
+  focused tests.
 - Slice 24 still needs real provider selection/credentials, sandbox contract
   runs where provider SDKs are chosen, and authenticated dashboard review against
   a migrated local or preview database. Current verification covers adapter

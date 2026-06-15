@@ -150,6 +150,10 @@ class MemoryDataExportRepository {
     return [];
   }
 
+  async listOAuthGrants() {
+    return [];
+  }
+
   async listWebhookSubscriptions() {
     return [];
   }

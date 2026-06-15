@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import {
   createApiKey,
+  createOAuthApp,
   createWebhookSubscription,
   deliverWebhooksForOutboxEvent,
+  grantOAuthConsent,
   listDeveloperWorkspace,
+  previewOAuthConsent,
   resolvePublicApiKey,
   type DawnRepository,
   type IdempotencyResult,
@@ -15,6 +18,7 @@ import type {
   Actor,
   ApiKey,
   OAuthApp,
+  OAuthGrant,
   TeamRole,
   WebhookDelivery,
   WebhookSubscription,
@@ -24,6 +28,7 @@ class MemoryDeveloperRepository {
   role: TeamRole | null = "owner";
   apiKeys = new Map<string, ApiKey & { keyHash: string }>();
   oauthApps = new Map<string, OAuthApp>();
+  oauthGrants = new Map<string, OAuthGrant>();
   webhookSubscriptions = new Map<string, WebhookSubscription & { signingSecretHash: string }>();
   webhookDeliveries = new Map<string, WebhookDelivery>();
   outboxEvents = new Map<string, OutboxEvent>();
@@ -68,6 +73,10 @@ class MemoryDeveloperRepository {
     return [...this.oauthApps.values()].filter((app) => app.teamId === teamId);
   }
 
+  async listOAuthGrants(teamId: string) {
+    return [...this.oauthGrants.values()].filter((grant) => grant.teamId === teamId);
+  }
+
   async listWebhookSubscriptions(teamId: string) {
     return [...this.webhookSubscriptions.values()].filter(
       (subscription) => subscription.teamId === teamId,
@@ -83,6 +92,11 @@ class MemoryDeveloperRepository {
   async getApiKeyByHash(keyHash: string) {
     const apiKey = [...this.apiKeys.values()].find((candidate) => candidate.keyHash === keyHash);
     return apiKey ?? null;
+  }
+
+  async getOAuthAppForTeam(teamId: string, appId: string) {
+    const app = this.oauthApps.get(appId);
+    return app?.teamId === teamId ? app : null;
   }
 
   async markApiKeyUsed(input: { apiKeyId: string; lastUsedAt: string }) {
@@ -115,6 +129,49 @@ class MemoryDeveloperRepository {
     };
     this.apiKeys.set(apiKey.id, apiKey);
     return apiKey;
+  }
+
+  async createOAuthApp(input: {
+    appId: string;
+    teamId: string;
+    name: string;
+    redirectUris: string[];
+    scopes: OAuthApp["scopes"];
+    createdByActorId: string;
+  }) {
+    const now = new Date().toISOString();
+    const app = {
+      id: input.appId,
+      teamId: input.teamId,
+      name: input.name,
+      redirectUris: input.redirectUris,
+      scopes: input.scopes,
+      createdByActorId: input.createdByActorId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.oauthApps.set(app.id, app);
+    return app;
+  }
+
+  async createOAuthGrant(input: {
+    grantId: string;
+    teamId: string;
+    appId: string;
+    actorId: string;
+    scopes: OAuthGrant["scopes"];
+  }) {
+    const grant = {
+      id: input.grantId,
+      teamId: input.teamId,
+      appId: input.appId,
+      actorId: input.actorId,
+      scopes: input.scopes,
+      revokedAt: null,
+      createdAt: new Date().toISOString(),
+    };
+    this.oauthGrants.set(grant.id, grant);
+    return grant;
   }
 
   async createWebhookSubscription(input: {
@@ -189,6 +246,25 @@ class MemoryDeveloperRepository {
     this.webhookDeliveries.set(delivery.id, delivery);
     return delivery;
   }
+
+  async appendOutboxEvent(input: {
+    teamId: string;
+    type: string;
+    version: number;
+    payload: Record<string, unknown>;
+  }) {
+    const id = `outbox_${this.outboxEvents.size + 1}`;
+    this.outboxEvents.set(id, {
+      id,
+      teamId: input.teamId,
+      type: input.type,
+      version: input.version,
+      payload: input.payload,
+      dispatchAttempts: 0,
+      status: "pending",
+      occurredAt: "2026-06-15T00:00:00.000Z",
+    });
+  }
 }
 
 const context = {
@@ -249,6 +325,117 @@ describe("developer and public API use cases", () => {
     expect(workspace.apiKeys[0]).toMatchObject({
       keyPrefix: created.token.slice(0, 14),
       scopes: ["transactions.read"],
+    });
+  });
+
+  test("creates OAuth apps and grants consent with registered redirect and scopes", async () => {
+    const repository = new MemoryDeveloperRepository();
+
+    const created = await createOAuthApp(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      name: "Partner reporting",
+      redirectUris: ["https://partner.example.com/oauth/callback"],
+      scopes: ["transactions.read", "invoices.read"],
+      idempotencyKey: "oauth_app_1",
+    });
+    const replayed = await createOAuthApp(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      name: "Partner reporting",
+      redirectUris: ["https://partner.example.com/oauth/callback"],
+      scopes: ["transactions.read", "invoices.read"],
+      idempotencyKey: "oauth_app_1",
+    });
+    const preview = await previewOAuthConsent(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      appId: created.app.id,
+      redirectUri: "https://partner.example.com/oauth/callback",
+      scopes: ["transactions.read"],
+    });
+    const grant = await grantOAuthConsent(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      appId: created.app.id,
+      redirectUri: "https://partner.example.com/oauth/callback",
+      scopes: ["transactions.read"],
+      idempotencyKey: "oauth_grant_1",
+    });
+    const grantReplay = await grantOAuthConsent(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      appId: created.app.id,
+      redirectUri: "https://partner.example.com/oauth/callback",
+      scopes: ["transactions.read"],
+      idempotencyKey: "oauth_grant_1",
+    });
+    const workspace = await listDeveloperWorkspace(
+      repository as unknown as DawnRepository,
+      context,
+      { teamId: "team_1" },
+    );
+
+    expect(created.app).toMatchObject({
+      name: "Partner reporting",
+      redirectUris: ["https://partner.example.com/oauth/callback"],
+      scopes: ["transactions.read", "invoices.read"],
+    });
+    expect(replayed.replayed).toBe(true);
+    expect(preview).toMatchObject({
+      app: { id: created.app.id },
+      redirectUri: "https://partner.example.com/oauth/callback",
+      scopes: ["transactions.read"],
+    });
+    expect(grant.grant).toMatchObject({
+      teamId: "team_1",
+      appId: created.app.id,
+      actorId: "user_1",
+      scopes: ["transactions.read"],
+    });
+    expect(grantReplay.replayed).toBe(true);
+    expect(workspace.oauthApps).toHaveLength(1);
+    expect(workspace.oauthGrants).toHaveLength(1);
+    expect(repository.auditEvents).toContainEqual(
+      expect.objectContaining({
+        action: "oauth_consent.granted",
+        entityType: "oauth_grant",
+      }),
+    );
+    expect([...repository.outboxEvents.values()]).toContainEqual(
+      expect.objectContaining({
+        type: "oauth_consent.granted",
+        payload: expect.objectContaining({ appId: created.app.id }),
+      }),
+    );
+  });
+
+  test("rejects OAuth consent outside app registration", async () => {
+    const repository = new MemoryDeveloperRepository();
+    const created = await createOAuthApp(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      name: "Partner reporting",
+      redirectUris: ["https://partner.example.com/oauth/callback"],
+      scopes: ["transactions.read"],
+      idempotencyKey: "oauth_app_1",
+    });
+
+    await expect(
+      previewOAuthConsent(repository as unknown as DawnRepository, context, {
+        teamId: "team_1",
+        appId: created.app.id,
+        redirectUri: "https://evil.example.com/oauth/callback",
+        scopes: ["transactions.read"],
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: "OAuth redirect URI is not registered for this app",
+    });
+    await expect(
+      previewOAuthConsent(repository as unknown as DawnRepository, context, {
+        teamId: "team_1",
+        appId: created.app.id,
+        redirectUri: "https://partner.example.com/oauth/callback",
+        scopes: ["invoices.write"],
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: "OAuth consent requested scopes outside the app registration",
     });
   });
 

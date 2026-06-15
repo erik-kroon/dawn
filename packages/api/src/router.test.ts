@@ -38,6 +38,7 @@ import type {
   Transaction,
   TransactionTag,
   OAuthApp,
+  OAuthGrant,
   WebhookDelivery,
   WebhookSubscription,
 } from "@dawn/domain";
@@ -112,6 +113,7 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   jobRuns = new Map<string, JobRun>();
   apiKeys = new Map<string, ApiKey & { keyHash: string }>();
   oauthApps = new Map<string, OAuthApp>();
+  oauthGrants = new Map<string, OAuthGrant>();
   webhookSubscriptions = new Map<string, WebhookSubscription & { signingSecretHash: string }>();
   webhookDeliveries = new Map<string, WebhookDelivery>();
   outboxEventRecords = new Map<string, OutboxEvent>();
@@ -1782,6 +1784,10 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return [...this.oauthApps.values()].filter((app) => app.teamId === teamId);
   }
 
+  async listOAuthGrants(teamId: string) {
+    return [...this.oauthGrants.values()].filter((grant) => grant.teamId === teamId);
+  }
+
   async listWebhookSubscriptions(teamId: string) {
     return [...this.webhookSubscriptions.values()].filter(
       (subscription) => subscription.teamId === teamId,
@@ -1796,6 +1802,11 @@ class MemoryTransactionReviewRepository implements DawnRepository {
 
   async getApiKeyByHash(keyHash: string) {
     return [...this.apiKeys.values()].find((apiKey) => apiKey.keyHash === keyHash) ?? null;
+  }
+
+  async getOAuthAppForTeam(teamId: string, appId: string) {
+    const app = this.oauthApps.get(appId);
+    return app?.teamId === teamId ? app : null;
   }
 
   async markApiKeyUsed(input: { apiKeyId: string; lastUsedAt: string }) {
@@ -1829,6 +1840,48 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     };
     this.apiKeys.set(apiKey.id, apiKey);
     return apiKey;
+  }
+
+  async createOAuthApp(input: {
+    appId: string;
+    teamId: string;
+    name: string;
+    redirectUris: string[];
+    scopes: OAuthApp["scopes"];
+    createdByActorId: string;
+  }) {
+    const app = {
+      id: input.appId,
+      teamId: input.teamId,
+      name: input.name,
+      redirectUris: input.redirectUris,
+      scopes: input.scopes,
+      createdByActorId: input.createdByActorId,
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.oauthApps.set(app.id, app);
+    return app;
+  }
+
+  async createOAuthGrant(input: {
+    grantId: string;
+    teamId: string;
+    appId: string;
+    actorId: string;
+    scopes: OAuthGrant["scopes"];
+  }) {
+    const grant = {
+      id: input.grantId,
+      teamId: input.teamId,
+      appId: input.appId,
+      actorId: input.actorId,
+      scopes: input.scopes,
+      revokedAt: null,
+      createdAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.oauthGrants.set(grant.id, grant);
+    return grant;
   }
 
   async createWebhookSubscription(input: {
@@ -3256,7 +3309,7 @@ describe("appRouter", () => {
     });
   });
 
-  test("manages developer API keys and webhook subscriptions through protected routes", async () => {
+  test("manages developer API keys, OAuth consent, and webhook subscriptions through protected routes", async () => {
     const repository = new MemoryTransactionReviewRepository();
     repository.teams.set("team_1", "Test Team");
     repository.memberships.set("user_1:team_1", "admin");
@@ -3283,12 +3336,59 @@ describe("appRouter", () => {
       },
       context,
     );
+    const oauthApp = await call(
+      router.developers.createOAuthApp,
+      {
+        teamId: "team_1",
+        name: "Partner reporting",
+        redirectUris: ["https://partner.example.com/oauth/callback"],
+        scopes: ["transactions.read", "invoices.read"],
+        idempotencyKey: "oauth_app_1",
+      },
+      context,
+    );
+    const consent = await call(
+      router.developers.previewOAuthConsent,
+      {
+        teamId: "team_1",
+        appId: oauthApp.app.id,
+        redirectUri: "https://partner.example.com/oauth/callback",
+        scopes: ["transactions.read"],
+      },
+      context,
+    );
+    const grant = await call(
+      router.developers.grantOAuthConsent,
+      {
+        teamId: "team_1",
+        appId: oauthApp.app.id,
+        redirectUri: "https://partner.example.com/oauth/callback",
+        scopes: ["transactions.read"],
+        idempotencyKey: "oauth_grant_1",
+      },
+      context,
+    );
     const workspace = await call(router.developers.list, { teamId: "team_1" }, context);
 
     expect(apiKey.token.startsWith("dawn_")).toBe(true);
     expect(repository.apiKeys.get(apiKey.apiKey.id)?.keyHash).not.toBe(apiKey.token);
     expect(webhook.signingSecret.startsWith("whsec_")).toBe(true);
+    expect(oauthApp.app).toMatchObject({
+      name: "Partner reporting",
+      scopes: ["transactions.read", "invoices.read"],
+    });
+    expect(consent).toMatchObject({
+      app: { id: oauthApp.app.id },
+      scopes: ["transactions.read"],
+    });
+    expect(grant.grant).toMatchObject({
+      appId: oauthApp.app.id,
+      actorId: "user_1",
+      scopes: ["transactions.read"],
+    });
     expect(workspace.apiKeys).toHaveLength(1);
+    expect(workspace.oauthApps).toHaveLength(1);
+    expect(workspace.oauthGrants).toHaveLength(1);
     expect(workspace.webhookSubscriptions).toHaveLength(1);
   });
 
