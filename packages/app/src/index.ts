@@ -23,6 +23,7 @@ import type {
   BusinessInsight,
   BusinessReport,
   Category,
+  Counterparty,
   CsvTransactionColumnMapping,
   Customer,
   CustomerContact,
@@ -51,6 +52,7 @@ import type {
   TeamMembership,
   TeamRole,
   Transaction,
+  TransactionTag,
   WebhookDelivery,
   WebhookSubscription,
   Product,
@@ -213,9 +215,51 @@ export type CreateLedgerTransactionResult = {
   replayed: boolean;
 };
 
+export type CreateLedgerCounterpartyCommand = {
+  teamId: string;
+  name: string;
+  idempotencyKey: string;
+};
+
+export type CreateLedgerCounterpartyResult = {
+  counterparty: Counterparty;
+  replayed: boolean;
+};
+
+export type CreateTransactionTagCommand = {
+  teamId: string;
+  name: string;
+  idempotencyKey: string;
+};
+
+export type CreateTransactionTagResult = {
+  tag: TransactionTag;
+  replayed: boolean;
+};
+
+export type CreateLedgerTransferPairCommand = {
+  teamId: string;
+  fromAccountId: string;
+  toAccountId: string;
+  postedAt: string;
+  description: string;
+  money: Money;
+  tagIds?: readonly string[];
+  idempotencyKey: string;
+};
+
+export type CreateLedgerTransferPairResult = {
+  transferGroupId: string;
+  fromTransaction: Transaction;
+  toTransaction: Transaction;
+  replayed: boolean;
+};
+
 export type LedgerSummary = {
   teamId: string;
   accounts: LedgerAccount[];
+  counterparties: Counterparty[];
+  tags: TransactionTag[];
   totals: ReportTotals;
   transactionCount: number;
 };
@@ -1520,6 +1564,7 @@ export type BillingRepository = {
 };
 
 export type DawnRepository = BankingUseCaseRepository &
+  LedgerRepository &
   DocumentRepository &
   InboxRepository &
   BillingRepository &
@@ -1890,8 +1935,22 @@ export type TransactionReviewRepository = {
   }): Promise<TeamMember>;
 };
 
+export type LedgerMetadataRepository = {
+  listCounterparties(teamId: string): Promise<Counterparty[]>;
+  listTransactionTags(teamId: string): Promise<TransactionTag[]>;
+  getCounterpartyForTeam(teamId: string, counterpartyId: string): Promise<Counterparty | null>;
+  getTransactionTagForTeam(teamId: string, tagId: string): Promise<TransactionTag | null>;
+  upsertCounterparty(input: { teamId: string; name: string }): Promise<Counterparty>;
+  upsertTransactionTag(input: { teamId: string; name: string }): Promise<TransactionTag>;
+};
+
+export type LedgerRepository = TransactionReviewRepository & LedgerMetadataRepository;
+
 const reviewTransactionOperation = "transaction.review";
 const createLedgerTransactionOperation = "ledger.transaction.create";
+const createLedgerCounterpartyOperation = "ledger.counterparty.create";
+const createTransactionTagOperation = "ledger.transaction_tag.create";
+const createLedgerTransferPairOperation = "ledger.transfer_pair.create";
 const commitCsvTransactionImportOperation = "csv_transaction_import.commit";
 const connectMockBankConnectionOperation = "banking.connection.mock.connect";
 const createBankConnectionSessionOperation = "banking.connection.session.create";
@@ -3358,7 +3417,7 @@ export function transactionReviewFingerprint(command: ReviewTransactionCommand) 
 }
 
 export async function listLedgerSummary(
-  repository: TransactionReviewRepository,
+  repository: LedgerRepository,
   context: TransactionReviewContext,
   input: { teamId?: string; accountId?: string; from?: string; to?: string } = {},
 ): Promise<LedgerSummary> {
@@ -3368,8 +3427,10 @@ export async function listLedgerSummary(
     "transactions.read",
     "You cannot read ledger data for this team",
   );
-  const [accounts, transactions] = await Promise.all([
+  const [accounts, counterparties, tags, transactions] = await Promise.all([
     repository.listLedgerAccounts(access.teamId),
+    repository.listCounterparties(access.teamId),
+    repository.listTransactionTags(access.teamId),
     repository.listTransactionsForReport({
       teamId: access.teamId,
       accountId: input.accountId,
@@ -3386,13 +3447,149 @@ export async function listLedgerSummary(
   return {
     teamId: access.teamId,
     accounts,
+    counterparties,
+    tags,
     totals: createReportTotals(transactions, currency),
     transactionCount: transactions.length,
   };
 }
 
+export async function createLedgerCounterparty(
+  repository: LedgerRepository,
+  context: TransactionReviewContext,
+  command: CreateLedgerCounterpartyCommand,
+): Promise<CreateLedgerCounterpartyResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const ledgerRepository = transactionRepository as LedgerRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Counterparty not found");
+
+    await resolveTeamAccess(
+      ledgerRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.write",
+      "You cannot manage ledger counterparties for this team",
+    );
+
+    const name = normalizeLedgerMetadataName(command.name, "Counterparty name is required");
+    const fingerprint = JSON.stringify({ teamId: command.teamId, name });
+    const replayed = await ledgerRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createLedgerCounterpartyOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different counterparty",
+        );
+      }
+
+      return { ...(replayed.result as CreateLedgerCounterpartyResult), replayed: true };
+    }
+
+    const counterparty = await ledgerRepository.upsertCounterparty({
+      teamId: command.teamId,
+      name,
+    });
+
+    await ledgerRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "ledger.counterparty.created",
+      entityType: "counterparty",
+      entityId: counterparty.id,
+      metadata: { name },
+    });
+
+    const result = { counterparty, replayed: false };
+
+    await ledgerRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createLedgerCounterpartyOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function createTransactionTag(
+  repository: LedgerRepository,
+  context: TransactionReviewContext,
+  command: CreateTransactionTagCommand,
+): Promise<CreateTransactionTagResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const ledgerRepository = transactionRepository as LedgerRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Transaction tag not found");
+
+    await resolveTeamAccess(
+      ledgerRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.write",
+      "You cannot manage transaction tags for this team",
+    );
+
+    const name = normalizeLedgerMetadataName(command.name, "Transaction tag name is required");
+    const fingerprint = JSON.stringify({ teamId: command.teamId, name });
+    const replayed = await ledgerRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createTransactionTagOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different transaction tag",
+        );
+      }
+
+      return { ...(replayed.result as CreateTransactionTagResult), replayed: true };
+    }
+
+    const tag = await ledgerRepository.upsertTransactionTag({
+      teamId: command.teamId,
+      name,
+    });
+
+    await ledgerRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "ledger.transaction_tag.created",
+      entityType: "transaction_tag",
+      entityId: tag.id,
+      metadata: { name },
+    });
+
+    const result = { tag, replayed: false };
+
+    await ledgerRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createTransactionTagOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
 export async function createLedgerTransaction(
-  repository: TransactionReviewRepository,
+  repository: LedgerRepository,
   context: TransactionReviewContext,
   command: CreateLedgerTransactionCommand,
 ): Promise<CreateLedgerTransactionResult> {
@@ -3439,16 +3636,7 @@ export async function createLedgerTransaction(
       throw new AppError("CONFLICT", "Ledger transaction currency must match the account");
     }
 
-    if (draft.categoryId) {
-      const category = await transactionRepository.getCategoryForTeam(
-        draft.teamId,
-        draft.categoryId,
-      );
-
-      if (!category) {
-        throw new AppError("NOT_FOUND", "Category not found");
-      }
-    }
+    await validateLedgerDraftReferences(transactionRepository as LedgerRepository, draft);
 
     const duplicateKey = ledgerDuplicateKey(draft);
     const duplicate = await transactionRepository.getTransactionByDuplicateKey(
@@ -3508,6 +3696,165 @@ export async function createLedgerTransaction(
   });
 }
 
+export async function createLedgerTransferPair(
+  repository: LedgerRepository,
+  context: TransactionReviewContext,
+  command: CreateLedgerTransferPairCommand,
+): Promise<CreateLedgerTransferPairResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const ledgerRepository = transactionRepository as LedgerRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Ledger transfer not found");
+
+    await resolveTeamAccess(
+      ledgerRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.write",
+      "You cannot create ledger transfers for this team",
+    );
+
+    const normalized = normalizeLedgerTransferPairCommand(command);
+    const fingerprint = createLedgerTransferPairFingerprint(command);
+    const replayed = await ledgerRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createLedgerTransferPairOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different ledger transfer",
+        );
+      }
+
+      return { ...(replayed.result as CreateLedgerTransferPairResult), replayed: true };
+    }
+
+    const [fromAccount, toAccount] = await Promise.all([
+      ledgerRepository.getLedgerAccountForTeam(command.teamId, normalized.fromAccountId),
+      ledgerRepository.getLedgerAccountForTeam(command.teamId, normalized.toAccountId),
+    ]);
+
+    if (!fromAccount || !toAccount) {
+      throw new AppError("NOT_FOUND", "Ledger account not found");
+    }
+
+    if (fromAccount.id === toAccount.id) {
+      throw new AppError("CONFLICT", "Ledger transfer requires two different accounts");
+    }
+
+    if (
+      fromAccount.currency !== toAccount.currency ||
+      fromAccount.currency !== normalized.money.currency
+    ) {
+      throw new AppError("CONFLICT", "Ledger transfer currency must match both accounts");
+    }
+
+    await validateTransactionTags(ledgerRepository, command.teamId, normalized.tagIds ?? []);
+
+    const transferGroupId = crypto.randomUUID();
+    const fromDraft = normalizeLedgerTransactionDraft({
+      teamId: command.teamId,
+      accountId: fromAccount.id,
+      description: `Transfer to ${toAccount.name}: ${normalized.description}`,
+      postedAt: normalized.postedAt,
+      money: {
+        amountMinor: -Math.abs(normalized.money.amountMinor),
+        currency: normalized.money.currency,
+      },
+      type: "transfer",
+      source: "manual",
+      transferGroupId,
+      tagIds: normalized.tagIds,
+      idempotencyKey: command.idempotencyKey,
+    });
+    const toDraft = normalizeLedgerTransactionDraft({
+      teamId: command.teamId,
+      accountId: toAccount.id,
+      description: `Transfer from ${fromAccount.name}: ${normalized.description}`,
+      postedAt: normalized.postedAt,
+      money: {
+        amountMinor: Math.abs(normalized.money.amountMinor),
+        currency: normalized.money.currency,
+      },
+      type: "transfer",
+      source: "manual",
+      transferGroupId,
+      tagIds: normalized.tagIds,
+      idempotencyKey: command.idempotencyKey,
+    });
+    const [fromDuplicateKey, toDuplicateKey] = [
+      ledgerDuplicateKey(fromDraft),
+      ledgerDuplicateKey(toDraft),
+    ];
+    const [fromDuplicate, toDuplicate] = await Promise.all([
+      ledgerRepository.getTransactionByDuplicateKey(command.teamId, fromDuplicateKey),
+      ledgerRepository.getTransactionByDuplicateKey(command.teamId, toDuplicateKey),
+    ]);
+
+    if (fromDuplicate || toDuplicate) {
+      throw new AppError("CONFLICT", "Ledger transfer duplicate key already exists");
+    }
+
+    const fromTransaction = await ledgerRepository.createLedgerTransactionForTeam({
+      draft: fromDraft,
+      duplicateKey: fromDuplicateKey,
+    });
+    const toTransaction = await ledgerRepository.createLedgerTransactionForTeam({
+      draft: toDraft,
+      duplicateKey: toDuplicateKey,
+    });
+
+    await ledgerRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "transaction.transfer_pair.created",
+      entityType: "transfer_group",
+      entityId: transferGroupId,
+      metadata: {
+        fromAccountId: fromAccount.id,
+        toAccountId: toAccount.id,
+        amount: normalized.money,
+        transactionIds: [fromTransaction.id, toTransaction.id],
+      },
+    });
+
+    await ledgerRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "transaction.transfer_pair.created",
+      version: 1,
+      payload: {
+        transferGroupId,
+        transactionIds: [fromTransaction.id, toTransaction.id],
+      },
+    });
+
+    const result = {
+      transferGroupId,
+      fromTransaction,
+      toTransaction,
+      replayed: false,
+    };
+
+    await ledgerRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createLedgerTransferPairOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
 export function createLedgerTransactionFingerprint(command: CreateLedgerTransactionCommand) {
   const draft = normalizeLedgerTransactionDraft(command);
 
@@ -3521,10 +3868,17 @@ export function createLedgerTransactionFingerprint(command: CreateLedgerTransact
     source: draft.source,
     categoryId: draft.categoryId ?? null,
     counterpartyId: draft.counterpartyId ?? null,
+    transferGroupId: draft.transferGroupId ?? null,
     providerTransactionId: draft.providerTransactionId ?? null,
     splits: draft.splits ?? [],
     tagIds: draft.tagIds ?? [],
   });
+}
+
+export function createLedgerTransferPairFingerprint(command: CreateLedgerTransferPairCommand) {
+  const normalized = normalizeLedgerTransferPairCommand(command);
+
+  return JSON.stringify(normalized);
 }
 
 export async function listBankConnections(
@@ -8809,6 +9163,7 @@ function normalizeLedgerTransactionDraft(
     source: command.source,
     categoryId: command.categoryId ?? null,
     counterpartyId: command.counterpartyId ?? null,
+    transferGroupId: command.transferGroupId?.trim() || null,
     providerTransactionId: command.providerTransactionId?.trim() || null,
     splits: command.splits ?? [],
     tagIds: command.tagIds ?? [],
@@ -8817,6 +9172,87 @@ function normalizeLedgerTransactionDraft(
   assertLedgerTransactionDraft(draft);
 
   return draft;
+}
+
+function normalizeLedgerTransferPairCommand(command: CreateLedgerTransferPairCommand) {
+  const description = command.description.trim();
+  const postedAt = new Date(command.postedAt).toISOString();
+  const money = {
+    amountMinor: Math.abs(command.money.amountMinor),
+    currency: command.money.currency,
+  };
+
+  if (!description) {
+    throw new AppError("CONFLICT", "Ledger transfer description is required");
+  }
+
+  if (Number.isNaN(new Date(command.postedAt).getTime())) {
+    throw new AppError("CONFLICT", "Ledger transfer posted date is invalid");
+  }
+
+  if (money.amountMinor <= 0) {
+    throw new AppError("CONFLICT", "Ledger transfer amount must be positive");
+  }
+
+  return {
+    teamId: command.teamId,
+    fromAccountId: command.fromAccountId,
+    toAccountId: command.toAccountId,
+    postedAt,
+    description,
+    money,
+    tagIds: [...new Set(command.tagIds ?? [])],
+  };
+}
+
+async function validateLedgerDraftReferences(
+  repository: LedgerRepository,
+  draft: LedgerTransactionDraft,
+) {
+  if (draft.categoryId) {
+    const category = await repository.getCategoryForTeam(draft.teamId, draft.categoryId);
+
+    if (!category) {
+      throw new AppError("NOT_FOUND", "Category not found");
+    }
+  }
+
+  if (draft.counterpartyId) {
+    const counterparty = await repository.getCounterpartyForTeam(
+      draft.teamId,
+      draft.counterpartyId,
+    );
+
+    if (!counterparty) {
+      throw new AppError("NOT_FOUND", "Counterparty not found");
+    }
+  }
+
+  await validateTransactionTags(repository, draft.teamId, draft.tagIds ?? []);
+}
+
+async function validateTransactionTags(
+  repository: LedgerRepository,
+  teamId: string,
+  tagIds: readonly string[],
+) {
+  for (const tagId of new Set(tagIds)) {
+    const tag = await repository.getTransactionTagForTeam(teamId, tagId);
+
+    if (!tag) {
+      throw new AppError("NOT_FOUND", "Transaction tag not found");
+    }
+  }
+}
+
+function normalizeLedgerMetadataName(name: string, errorMessage: string) {
+  const normalized = name.trim().replace(/\s+/g, " ");
+
+  if (!normalized) {
+    throw new AppError("CONFLICT", errorMessage);
+  }
+
+  return normalized;
 }
 
 export async function inviteTeamMember(

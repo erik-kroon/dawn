@@ -141,6 +141,13 @@
       "when": 1781497237349,
       "tag": "0019_yielding_talon",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1781498185975,
+      "tag": "0020_orange_the_fallen",
+      "breakpoints": true
     }
   ]
 }

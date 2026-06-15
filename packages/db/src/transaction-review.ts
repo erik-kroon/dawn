@@ -37,6 +37,7 @@ import type {
   AssistantToolCall,
   BusinessInsight,
   Category,
+  Counterparty,
   Customer,
   CustomerContact,
   IntegrationCategory,
@@ -61,6 +62,7 @@ import type {
   TeamRole,
   TimeEntry,
   Transaction,
+  TransactionTag,
   WebhookDelivery,
   WebhookSubscription,
 } from "@dawn/domain";
@@ -247,6 +249,109 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       .limit(1);
 
     return category ? mapCategory(category) : null;
+  }
+
+  async listCounterparties(teamId: string): Promise<Counterparty[]> {
+    const counterparties = await this.client
+      .select()
+      .from(schema.counterparty)
+      .where(eq(schema.counterparty.teamId, teamId))
+      .orderBy(asc(schema.counterparty.name));
+
+    return counterparties.map(mapCounterparty);
+  }
+
+  async listTransactionTags(teamId: string): Promise<TransactionTag[]> {
+    const tags = await this.client
+      .select()
+      .from(schema.transactionTag)
+      .where(eq(schema.transactionTag.teamId, teamId))
+      .orderBy(asc(schema.transactionTag.name));
+
+    return tags.map(mapTransactionTag);
+  }
+
+  async getCounterpartyForTeam(teamId: string, counterpartyId: string) {
+    const [counterparty] = await this.client
+      .select()
+      .from(schema.counterparty)
+      .where(
+        and(eq(schema.counterparty.teamId, teamId), eq(schema.counterparty.id, counterpartyId)),
+      )
+      .limit(1);
+
+    return counterparty ? mapCounterparty(counterparty) : null;
+  }
+
+  async getTransactionTagForTeam(teamId: string, tagId: string) {
+    const [tag] = await this.client
+      .select()
+      .from(schema.transactionTag)
+      .where(and(eq(schema.transactionTag.teamId, teamId), eq(schema.transactionTag.id, tagId)))
+      .limit(1);
+
+    return tag ? mapTransactionTag(tag) : null;
+  }
+
+  async upsertCounterparty(input: { teamId: string; name: string }): Promise<Counterparty> {
+    const [existing] = await this.client
+      .select()
+      .from(schema.counterparty)
+      .where(
+        and(eq(schema.counterparty.teamId, input.teamId), eq(schema.counterparty.name, input.name)),
+      )
+      .limit(1);
+
+    if (existing) {
+      return mapCounterparty(existing);
+    }
+
+    const [counterparty] = await this.client
+      .insert(schema.counterparty)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        name: input.name,
+      })
+      .returning();
+
+    if (!counterparty) {
+      throw new Error("Counterparty was not created");
+    }
+
+    return mapCounterparty(counterparty);
+  }
+
+  async upsertTransactionTag(input: { teamId: string; name: string }): Promise<TransactionTag> {
+    const [existing] = await this.client
+      .select()
+      .from(schema.transactionTag)
+      .where(
+        and(
+          eq(schema.transactionTag.teamId, input.teamId),
+          eq(schema.transactionTag.name, input.name),
+        ),
+      )
+      .limit(1);
+
+    if (existing) {
+      return mapTransactionTag(existing);
+    }
+
+    const [tag] = await this.client
+      .insert(schema.transactionTag)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        name: input.name,
+      })
+      .returning();
+
+    if (!tag) {
+      throw new Error("Transaction tag was not created");
+    }
+
+    return mapTransactionTag(tag);
   }
 
   async listLedgerAccounts(teamId: string) {
@@ -3065,6 +3170,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
         type: input.draft.type,
         source: input.draft.source,
         counterpartyId: input.draft.counterpartyId ?? null,
+        transferGroupId: input.draft.transferGroupId ?? null,
         providerTransactionId: input.draft.providerTransactionId ?? null,
         duplicateKey: input.duplicateKey,
         categoryId: input.draft.categoryId ?? null,
@@ -3590,6 +3696,22 @@ function mapCategory(category: typeof schema.transactionCategory.$inferSelect): 
     id: category.id,
     teamId: category.teamId,
     name: category.name,
+  };
+}
+
+function mapCounterparty(counterparty: typeof schema.counterparty.$inferSelect): Counterparty {
+  return {
+    id: counterparty.id,
+    teamId: counterparty.teamId,
+    name: counterparty.name,
+  };
+}
+
+function mapTransactionTag(tag: typeof schema.transactionTag.$inferSelect): TransactionTag {
+  return {
+    id: tag.id,
+    teamId: tag.teamId,
+    name: tag.name,
   };
 }
 
@@ -4191,6 +4313,7 @@ function mapTransaction(transaction: typeof schema.transaction.$inferSelect): Tr
     type: transaction.type as Transaction["type"],
     source: transaction.source as Transaction["source"],
     counterpartyId: transaction.counterpartyId,
+    transferGroupId: transaction.transferGroupId,
     providerTransactionId: transaction.providerTransactionId,
     categoryId: transaction.categoryId,
     reviewState: transaction.reviewState === "reviewed" ? "reviewed" : "needs_review",

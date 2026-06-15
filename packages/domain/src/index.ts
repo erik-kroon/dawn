@@ -90,6 +90,7 @@ export type Transaction = {
   type?: TransactionType;
   source?: TransactionSource;
   counterpartyId?: string | null;
+  transferGroupId?: string | null;
   providerTransactionId?: string | null;
   categoryId: string | null;
   reviewState: TransactionReviewState;
@@ -141,6 +142,7 @@ export type LedgerTransactionDraft = {
   source: TransactionSource;
   categoryId?: string | null;
   counterpartyId?: string | null;
+  transferGroupId?: string | null;
   providerTransactionId?: string | null;
   splits?: readonly Omit<TransactionSplit, "id" | "transactionId">[];
   tagIds?: readonly string[];

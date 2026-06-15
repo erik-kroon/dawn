@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   Actor,
   Category,
+  Counterparty,
   LedgerAccount,
   LedgerTransactionDraft,
   TeamInvite,
@@ -9,33 +10,38 @@ import type {
   TeamMembership,
   TeamRole,
   Transaction,
+  TransactionTag,
 } from "@dawn/domain";
 
 import {
   AppError,
+  createLedgerCounterparty,
   createLedgerTransaction,
+  createLedgerTransferPair,
+  createTransactionTag,
   type IdempotencyResult,
+  type LedgerRepository,
   type ReviewWorkspaceData,
   type TransactionImportSession,
-  type TransactionReviewRepository,
   commitCsvTransactionImport,
   listLedgerSummary,
   previewCsvTransactionImport,
 } from "./index";
 
-class MemoryLedgerRepository implements TransactionReviewRepository {
+class MemoryLedgerRepository implements LedgerRepository {
   accounts = new Map<string, LedgerAccount>();
   auditEvents: unknown[] = [];
   categories = new Map<string, Category>();
+  counterparties = new Map<string, Counterparty>();
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   memberships = new Map<string, TeamRole>();
   outboxEvents: unknown[] = [];
   importSessions: TransactionImportSession[] = [];
+  tagAssignments: { transactionId: string; tagId: string }[] = [];
+  tags = new Map<string, TransactionTag>();
   transactions = new Map<string, Transaction>();
 
-  async withTransaction<T>(
-    callback: (repository: TransactionReviewRepository) => Promise<T>,
-  ): Promise<T> {
+  async withTransaction<T>(callback: (repository: LedgerRepository) => Promise<T>): Promise<T> {
     return callback(this);
   }
 
@@ -71,6 +77,62 @@ class MemoryLedgerRepository implements TransactionReviewRepository {
   async getCategoryForTeam(teamId: string, categoryId: string) {
     const category = this.categories.get(categoryId);
     return category?.teamId === teamId ? category : null;
+  }
+
+  async listCounterparties(teamId: string) {
+    return [...this.counterparties.values()].filter(
+      (counterparty) => counterparty.teamId === teamId,
+    );
+  }
+
+  async listTransactionTags(teamId: string) {
+    return [...this.tags.values()].filter((tag) => tag.teamId === teamId);
+  }
+
+  async getCounterpartyForTeam(teamId: string, counterpartyId: string) {
+    const counterparty = this.counterparties.get(counterpartyId);
+    return counterparty?.teamId === teamId ? counterparty : null;
+  }
+
+  async getTransactionTagForTeam(teamId: string, tagId: string) {
+    const tag = this.tags.get(tagId);
+    return tag?.teamId === teamId ? tag : null;
+  }
+
+  async upsertCounterparty(input: { teamId: string; name: string }) {
+    const existing = [...this.counterparties.values()].find(
+      (counterparty) => counterparty.teamId === input.teamId && counterparty.name === input.name,
+    );
+
+    if (existing) {
+      return existing;
+    }
+
+    const counterparty = {
+      id: `counterparty_${this.counterparties.size + 1}`,
+      teamId: input.teamId,
+      name: input.name,
+    };
+    this.counterparties.set(counterparty.id, counterparty);
+    return counterparty;
+  }
+
+  async upsertTransactionTag(input: { teamId: string; name: string }) {
+    const existing = [...this.tags.values()].find(
+      (tag) => tag.teamId === input.teamId && tag.name === input.name,
+    );
+
+    if (existing) {
+      return existing;
+    }
+
+    const tag = {
+      id: `tag_${this.tags.size + 1}`,
+      teamId: input.teamId,
+      name: input.name,
+    };
+    this.tags.set(tag.id, tag);
+    return tag;
   }
 
   async listLedgerAccounts(teamId: string) {
@@ -132,6 +194,7 @@ class MemoryLedgerRepository implements TransactionReviewRepository {
       type: input.draft.type,
       source: input.draft.source,
       counterpartyId: input.draft.counterpartyId ?? null,
+      transferGroupId: input.draft.transferGroupId ?? null,
       providerTransactionId: input.draft.providerTransactionId ?? null,
       categoryId: input.draft.categoryId ?? null,
       reviewState: "needs_review" as const,
@@ -139,6 +202,9 @@ class MemoryLedgerRepository implements TransactionReviewRepository {
       updatedAt: new Date().toISOString(),
     };
     this.transactions.set(transaction.id, transaction);
+    this.tagAssignments.push(
+      ...(input.draft.tagIds ?? []).map((tagId) => ({ transactionId: transaction.id, tagId })),
+    );
     return transaction;
   }
 
@@ -244,6 +310,13 @@ function seededRepository(role: TeamRole) {
     currency: "USD",
     type: "bank",
   });
+  repository.accounts.set("acct_2", {
+    id: "acct_2",
+    teamId: "team_1",
+    name: "Savings",
+    currency: "USD",
+    type: "bank",
+  });
   repository.categories.set("cat_software", {
     id: "cat_software",
     teamId: "team_1",
@@ -278,6 +351,127 @@ describe("ledger use cases", () => {
     expect(repository.transactions.size).toBe(1);
     expect(repository.auditEvents).toHaveLength(1);
     expect(repository.outboxEvents).toHaveLength(1);
+  });
+
+  test("creates counterparties and tags idempotently", async () => {
+    const repository = seededRepository("member");
+
+    const counterparty = await createLedgerCounterparty(repository, context, {
+      teamId: "team_1",
+      name: "  Acme   Inc ",
+      idempotencyKey: "idem_counterparty",
+    });
+    const counterpartyReplay = await createLedgerCounterparty(repository, context, {
+      teamId: "team_1",
+      name: "Acme Inc",
+      idempotencyKey: "idem_counterparty",
+    });
+    const tag = await createTransactionTag(repository, context, {
+      teamId: "team_1",
+      name: "  SaaS ",
+      idempotencyKey: "idem_tag",
+    });
+    const tagReplay = await createTransactionTag(repository, context, {
+      teamId: "team_1",
+      name: "SaaS",
+      idempotencyKey: "idem_tag",
+    });
+
+    expect(counterparty.counterparty.name).toBe("Acme Inc");
+    expect(counterpartyReplay).toEqual({ ...counterparty, replayed: true });
+    expect(tag.tag.name).toBe("SaaS");
+    expect(tagReplay).toEqual({ ...tag, replayed: true });
+    expect(repository.counterparties.size).toBe(1);
+    expect(repository.tags.size).toBe(1);
+    expect(repository.auditEvents).toHaveLength(2);
+  });
+
+  test("creates tagged counterparty transactions with validated references", async () => {
+    const repository = seededRepository("member");
+    const counterparty = await repository.upsertCounterparty({
+      teamId: "team_1",
+      name: "Acme Inc",
+    });
+    const tag = await repository.upsertTransactionTag({ teamId: "team_1", name: "SaaS" });
+
+    const result = await createLedgerTransaction(repository, context, {
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Acme subscription",
+      postedAt: "2026-06-14",
+      money: { amountMinor: -2500, currency: "USD" },
+      type: "expense",
+      source: "manual",
+      counterpartyId: counterparty.id,
+      tagIds: [tag.id],
+      idempotencyKey: "idem_tagged_txn",
+    });
+
+    expect(result.transaction.counterpartyId).toBe(counterparty.id);
+    expect(repository.tagAssignments).toEqual([
+      { transactionId: result.transaction.id, tagId: tag.id },
+    ]);
+    await expect(
+      createLedgerTransaction(repository, context, {
+        teamId: "team_1",
+        accountId: "acct_1",
+        description: "Missing tag",
+        postedAt: "2026-06-15",
+        money: { amountMinor: -100, currency: "USD" },
+        type: "expense",
+        source: "manual",
+        tagIds: ["tag_missing"],
+        idempotencyKey: "idem_missing_tag",
+      }),
+    ).rejects.toEqual(new AppError("NOT_FOUND", "Transaction tag not found"));
+  });
+
+  test("creates transfer pairs with a durable group id and sync outbox", async () => {
+    const repository = seededRepository("member");
+    const tag = await repository.upsertTransactionTag({ teamId: "team_1", name: "Transfer" });
+
+    const result = await createLedgerTransferPair(repository, context, {
+      teamId: "team_1",
+      fromAccountId: "acct_1",
+      toAccountId: "acct_2",
+      postedAt: "2026-06-14",
+      description: "Owner reserve",
+      money: { amountMinor: 7500, currency: "USD" },
+      tagIds: [tag.id],
+      idempotencyKey: "idem_transfer_pair",
+    });
+    const replay = await createLedgerTransferPair(repository, context, {
+      teamId: "team_1",
+      fromAccountId: "acct_1",
+      toAccountId: "acct_2",
+      postedAt: "2026-06-14",
+      description: "Owner reserve",
+      money: { amountMinor: 7500, currency: "USD" },
+      tagIds: [tag.id],
+      idempotencyKey: "idem_transfer_pair",
+    });
+
+    expect(result.fromTransaction.money).toEqual({ amountMinor: -7500, currency: "USD" });
+    expect(result.toTransaction.money).toEqual({ amountMinor: 7500, currency: "USD" });
+    expect(result.fromTransaction.type).toBe("transfer");
+    expect(result.toTransaction.type).toBe("transfer");
+    expect(result.fromTransaction.transferGroupId).toBe(result.transferGroupId);
+    expect(result.toTransaction.transferGroupId).toBe(result.transferGroupId);
+    expect(repository.tagAssignments).toEqual([
+      { transactionId: result.fromTransaction.id, tagId: tag.id },
+      { transactionId: result.toTransaction.id, tagId: tag.id },
+    ]);
+    expect(repository.outboxEvents).toMatchObject([
+      {
+        type: "transaction.transfer_pair.created",
+        payload: {
+          transferGroupId: result.transferGroupId,
+          transactionIds: [result.fromTransaction.id, result.toTransaction.id],
+        },
+      },
+    ]);
+    expect(replay).toEqual({ ...result, replayed: true });
+    expect(repository.transactions.size).toBe(2);
   });
 
   test("rejects duplicate ledger transactions outside idempotent replay", async () => {

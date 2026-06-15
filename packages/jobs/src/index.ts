@@ -196,6 +196,7 @@ export function outboxDispatchIdempotencyKey(outboxEventId: string, attempt: num
 function createSyncInvalidationJob(event: OutboxEventForJob): SyncInvalidationJob | null {
   if (
     event.type !== "transaction.created" &&
+    event.type !== "transaction.transfer_pair.created" &&
     event.type !== "transaction.reviewed" &&
     event.type !== "transaction_import.committed" &&
     event.type !== "bank_connection.synced"

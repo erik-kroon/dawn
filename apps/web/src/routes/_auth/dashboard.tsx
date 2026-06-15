@@ -42,6 +42,16 @@ function RouteComponent() {
     currency: "",
     categoryId: "",
   });
+  const [counterpartyName, setCounterpartyName] = useState("");
+  const [transactionTagName, setTransactionTagName] = useState("");
+  const [transferDraft, setTransferDraft] = useState({
+    fromAccountId: "",
+    toAccountId: "",
+    amount: "",
+    currency: "USD",
+    description: "Owner transfer",
+    tagId: "",
+  });
   const [sandboxBankSession, setSandboxBankSession] = useState<{
     providerSessionId: string;
     linkToken: string;
@@ -256,6 +266,32 @@ function RouteComponent() {
     }),
   );
   const csvPreviewMutation = useMutation(orpc.csvImport.preview.mutationOptions());
+  const createCounterpartyMutation = useMutation(
+    orpc.ledger.createCounterparty.mutationOptions({
+      onSuccess: async () => {
+        setCounterpartyName("");
+        await queryClient.invalidateQueries({ queryKey: orpc.ledger.summary.queryKey() });
+      },
+    }),
+  );
+  const createTransactionTagMutation = useMutation(
+    orpc.ledger.createTag.mutationOptions({
+      onSuccess: async () => {
+        setTransactionTagName("");
+        await queryClient.invalidateQueries({ queryKey: orpc.ledger.summary.queryKey() });
+      },
+    }),
+  );
+  const createTransferPairMutation = useMutation(
+    orpc.ledger.createTransferPair.mutationOptions({
+      onSuccess: async () => {
+        setTransferDraft((draft) => ({ ...draft, amount: "" }));
+        await queryClient.invalidateQueries({ queryKey: orpc.ledger.summary.queryKey() });
+        await queryClient.invalidateQueries({ queryKey: orpc.transactionReview.list.queryKey() });
+        await transactionSync.refetch();
+      },
+    }),
+  );
   const connectMockBankMutation = useMutation(
     orpc.banking.connectMock.mutationOptions({
       onSuccess: async () => {
@@ -630,6 +666,41 @@ function RouteComponent() {
       setCsvAccountId(firstAccountId);
     }
   }, [csvAccountId, ledgerSummary.data?.accounts]);
+
+  useEffect(() => {
+    const accounts = ledgerSummary.data?.accounts ?? [];
+
+    if (accounts.length === 0) {
+      return;
+    }
+
+    setTransferDraft((draft) => {
+      const currentFromAccount = accounts.find((account) => account.id === draft.fromAccountId);
+      const nextFromAccount = currentFromAccount ?? accounts[0];
+      const currentToAccount = accounts.find((account) => account.id === draft.toAccountId);
+      const nextToAccount =
+        currentToAccount && currentToAccount.id !== nextFromAccount?.id
+          ? currentToAccount
+          : accounts.find((account) => account.id !== nextFromAccount?.id);
+
+      if (!nextFromAccount) {
+        return draft;
+      }
+
+      const nextDraft = {
+        ...draft,
+        fromAccountId: nextFromAccount.id,
+        toAccountId: nextToAccount?.id ?? "",
+        currency: nextFromAccount.currency,
+      };
+
+      return nextDraft.fromAccountId === draft.fromAccountId &&
+        nextDraft.toAccountId === draft.toAccountId &&
+        nextDraft.currency === draft.currency
+        ? draft
+        : nextDraft;
+    });
+  }, [ledgerSummary.data?.accounts]);
 
   const hasProSubscription = (customerState?.activeSubscriptions?.length ?? 0) > 0;
 
@@ -2947,6 +3018,251 @@ function RouteComponent() {
         </CardContent>
       </Card>
 
+      <Card id="ledger-controls">
+        <CardHeader>
+          <CardTitle>Ledger controls</CardTitle>
+          <CardDescription>
+            Counterparties, tags, and transfer pairs write through ledger application use cases.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {ledgerSummary.data && transactionReview.data ? (
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="grid gap-3 border p-3">
+                <p className="text-sm font-medium">Transaction metadata</p>
+                <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                  <Label className="flex flex-col gap-1 text-sm">
+                    Counterparty
+                    <Input
+                      onChange={(event) => setCounterpartyName(event.target.value)}
+                      placeholder="Acme Inc"
+                      value={counterpartyName}
+                    />
+                  </Label>
+                  <Button
+                    className="self-end"
+                    disabled={createCounterpartyMutation.isPending || !counterpartyName.trim()}
+                    onClick={() =>
+                      createCounterpartyMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        name: counterpartyName,
+                        idempotencyKey: crypto.randomUUID(),
+                      })
+                    }
+                    variant="outline"
+                  >
+                    Create
+                  </Button>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                  <Label className="flex flex-col gap-1 text-sm">
+                    Tag
+                    <Input
+                      onChange={(event) => setTransactionTagName(event.target.value)}
+                      placeholder="Transfer"
+                      value={transactionTagName}
+                    />
+                  </Label>
+                  <Button
+                    className="self-end"
+                    disabled={createTransactionTagMutation.isPending || !transactionTagName.trim()}
+                    onClick={() =>
+                      createTransactionTagMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        name: transactionTagName,
+                        idempotencyKey: crypto.randomUUID(),
+                      })
+                    }
+                    variant="outline"
+                  >
+                    Create
+                  </Button>
+                </div>
+                <div className="grid gap-2 text-sm">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Counterparties</p>
+                    <p>
+                      {ledgerSummary.data.counterparties.length
+                        ? ledgerSummary.data.counterparties
+                            .map((counterparty) => counterparty.name)
+                            .join(", ")
+                        : "None"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Tags</p>
+                    <p>
+                      {ledgerSummary.data.tags.length
+                        ? ledgerSummary.data.tags.map((tag) => tag.name).join(", ")
+                        : "None"}
+                    </p>
+                  </div>
+                </div>
+                {createCounterpartyMutation.error ? (
+                  <p className="text-sm text-destructive">
+                    {createCounterpartyMutation.error.message}
+                  </p>
+                ) : null}
+                {createTransactionTagMutation.error ? (
+                  <p className="text-sm text-destructive">
+                    {createTransactionTagMutation.error.message}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="grid gap-3 border p-3">
+                <p className="text-sm font-medium">Transfer pair</p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Label className="flex flex-col gap-1 text-sm">
+                    From
+                    <select
+                      className="h-9 rounded-none border bg-background px-2 text-sm"
+                      onChange={(event) => {
+                        const fromAccountId = event.target.value;
+                        const fromAccount = ledgerSummary.data.accounts.find(
+                          (account) => account.id === fromAccountId,
+                        );
+
+                        setTransferDraft((draft) => ({
+                          ...draft,
+                          fromAccountId,
+                          toAccountId:
+                            draft.toAccountId === fromAccountId
+                              ? (ledgerSummary.data.accounts.find(
+                                  (account) => account.id !== fromAccountId,
+                                )?.id ?? "")
+                              : draft.toAccountId,
+                          currency: fromAccount?.currency ?? draft.currency,
+                        }));
+                      }}
+                      value={transferDraft.fromAccountId}
+                    >
+                      {ledgerSummary.data.accounts.map((account) => (
+                        <option key={account.id} value={account.id}>
+                          {account.name} · {account.currency}
+                        </option>
+                      ))}
+                    </select>
+                  </Label>
+                  <Label className="flex flex-col gap-1 text-sm">
+                    To
+                    <select
+                      className="h-9 rounded-none border bg-background px-2 text-sm"
+                      onChange={(event) =>
+                        setTransferDraft((draft) => ({
+                          ...draft,
+                          toAccountId: event.target.value,
+                        }))
+                      }
+                      value={transferDraft.toAccountId}
+                    >
+                      {ledgerSummary.data.accounts.map((account) => (
+                        <option
+                          disabled={account.id === transferDraft.fromAccountId}
+                          key={account.id}
+                          value={account.id}
+                        >
+                          {account.name} · {account.currency}
+                        </option>
+                      ))}
+                    </select>
+                  </Label>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                  <Label className="flex flex-col gap-1 text-sm">
+                    Amount
+                    <Input
+                      inputMode="decimal"
+                      onChange={(event) =>
+                        setTransferDraft((draft) => ({ ...draft, amount: event.target.value }))
+                      }
+                      placeholder="50.00"
+                      value={transferDraft.amount}
+                    />
+                  </Label>
+                  <Label className="flex flex-col gap-1 text-sm">
+                    Currency
+                    <Input
+                      className="w-24"
+                      onChange={(event) =>
+                        setTransferDraft((draft) => ({
+                          ...draft,
+                          currency: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      value={transferDraft.currency}
+                    />
+                  </Label>
+                  <Label className="flex flex-col gap-1 text-sm">
+                    Tag
+                    <select
+                      className="h-9 rounded-none border bg-background px-2 text-sm"
+                      onChange={(event) =>
+                        setTransferDraft((draft) => ({ ...draft, tagId: event.target.value }))
+                      }
+                      value={transferDraft.tagId}
+                    >
+                      <option value="">None</option>
+                      {ledgerSummary.data.tags.map((tag) => (
+                        <option key={tag.id} value={tag.id}>
+                          {tag.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Label>
+                </div>
+                <Label className="flex flex-col gap-1 text-sm">
+                  Description
+                  <Input
+                    onChange={(event) =>
+                      setTransferDraft((draft) => ({
+                        ...draft,
+                        description: event.target.value,
+                      }))
+                    }
+                    value={transferDraft.description}
+                  />
+                </Label>
+                <Button
+                  disabled={
+                    createTransferPairMutation.isPending ||
+                    ledgerSummary.data.accounts.length < 2 ||
+                    !canCreateTransferPair(transferDraft)
+                  }
+                  onClick={() =>
+                    createTransferPairMutation.mutate({
+                      teamId: transactionReview.data.teamId,
+                      fromAccountId: transferDraft.fromAccountId,
+                      toAccountId: transferDraft.toAccountId,
+                      postedAt: new Date().toISOString(),
+                      description: transferDraft.description,
+                      money: {
+                        amountMinor: parseMoneyInputToMinor(transferDraft.amount),
+                        currency: transferDraft.currency.trim().toUpperCase(),
+                      },
+                      tagIds: transferDraft.tagId ? [transferDraft.tagId] : undefined,
+                      idempotencyKey: crypto.randomUUID(),
+                    })
+                  }
+                >
+                  Create transfer
+                </Button>
+                {ledgerSummary.data.accounts.length < 2 ? (
+                  <p className="text-sm text-muted-foreground">
+                    Add a second ledger account to create transfers.
+                  </p>
+                ) : null}
+                {createTransferPairMutation.error ? (
+                  <p className="text-sm text-destructive">
+                    {createTransferPairMutation.error.message}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle>CSV transaction import</CardTitle>
@@ -3220,6 +3536,24 @@ type ExtractionCorrectionState = {
 };
 
 type ExtractionCorrectionField = keyof ExtractionCorrectionState;
+
+function canCreateTransferPair(state: {
+  fromAccountId: string;
+  toAccountId: string;
+  amount: string;
+  currency: string;
+  description: string;
+}) {
+  return (
+    state.fromAccountId.length > 0 &&
+    state.toAccountId.length > 0 &&
+    state.fromAccountId !== state.toAccountId &&
+    state.description.trim().length > 0 &&
+    /^[A-Z]{3}$/.test(state.currency.trim().toUpperCase()) &&
+    /^\d+(?:\.\d{0,2})?$/.test(state.amount.trim()) &&
+    parseMoneyInputToMinor(state.amount) > 0
+  );
+}
 
 function canImportCsv(csvText: string, accountId: string, mapping: CsvImportMappingState) {
   return (

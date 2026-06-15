@@ -223,6 +223,7 @@ export const transaction = pgTable(
     counterpartyId: text("counterparty_id").references(() => counterparty.id, {
       onDelete: "set null",
     }),
+    transferGroupId: text("transfer_group_id"),
     providerTransactionId: text("provider_transaction_id"),
     duplicateKey: text("duplicate_key"),
     categoryId: text("category_id").references(() => transactionCategory.id, {
@@ -240,6 +241,7 @@ export const transaction = pgTable(
     index("transaction_team_account_posted_idx").on(table.teamId, table.accountId, table.postedAt),
     uniqueIndex("transaction_team_duplicate_idx").on(table.teamId, table.duplicateKey),
     uniqueIndex("transaction_team_provider_idx").on(table.teamId, table.providerTransactionId),
+    index("transaction_team_transfer_group_idx").on(table.teamId, table.transferGroupId),
   ],
 );
 

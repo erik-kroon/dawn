@@ -7,6 +7,7 @@ import {
   approveAssistantAction,
   commitCsvTransactionImport,
   completeBankConnection,
+  createLedgerCounterparty,
   connectIntegration,
   createDeterministicInvoicePdfRenderer,
   createBankConnectionSession,
@@ -23,6 +24,7 @@ import {
   createTimeEntry,
   createInvoiceFromTimeEntries,
   createRecurringInvoiceSchedule,
+  createTransactionTag,
   createTeam,
   createWebhookSubscription,
   disableIntegration,
@@ -60,6 +62,7 @@ import {
   sendAssistantMessage,
   syncIntegration,
   syncBankConnection,
+  createLedgerTransferPair,
   type DawnRepository,
   type DocumentExtractionFields,
   type DocumentUrlSigner,
@@ -494,6 +497,29 @@ const createLedgerTransactionInput = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+const createLedgerCounterpartyInput = z.object({
+  teamId: z.string().min(1),
+  name: z.string().trim().min(1).max(160),
+  idempotencyKey: z.string().min(1),
+});
+
+const createTransactionTagInput = z.object({
+  teamId: z.string().min(1),
+  name: z.string().trim().min(1).max(80),
+  idempotencyKey: z.string().min(1),
+});
+
+const createLedgerTransferPairInput = z.object({
+  teamId: z.string().min(1),
+  fromAccountId: z.string().min(1),
+  toAccountId: z.string().min(1),
+  postedAt: z.iso.datetime(),
+  description: z.string().trim().min(1).max(240),
+  money: moneyInput,
+  tagIds: z.array(z.string().min(1)).optional(),
+  idempotencyKey: z.string().min(1),
+});
+
 const csvTransactionImportMappingInput = z.object({
   postedAt: z.string().min(1),
   description: z.string().min(1),
@@ -802,6 +828,57 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                   note: split.note ?? null,
                 })),
               },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createCounterparty: protectedProcedure
+        .input(createLedgerCounterpartyInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createLedgerCounterparty(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createTag: protectedProcedure
+        .input(createTransactionTagInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createTransactionTag(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createTransferPair: protectedProcedure
+        .input(createLedgerTransferPairInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createLedgerTransferPair(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
             );
           } catch (error) {
             mapAppError(error);

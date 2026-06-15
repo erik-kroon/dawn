@@ -65,6 +65,43 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps transfer pair outbox events to transaction invalidation input", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "transaction.transfer_pair.created",
+        payload: { transferGroupId: "transfer_1", transactionIds: ["txn_1", "txn_2"] },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "transaction.transfer_pair.created",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "sync.invalidate",
+        teamId: "team_1",
+        collection: "transactions",
+        cursor: null,
+        changedIds: ["txn_1", "txn_2"],
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "sync:transactions:outbox_1",
+      },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "transaction.transfer_pair.created",
+        idempotencyKey: "automation:run:outbox_1",
+      },
+      webhookDeliveryJob("transaction.transfer_pair.created"),
+    ]);
+  });
+
   test("maps bank sync outbox events to transaction invalidation input", () => {
     expect(
       outboxEventToQueueMessages({
