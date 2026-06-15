@@ -73,6 +73,63 @@ export type InvoiceEmailDeliveryProvider = {
   sendInvoice(input: InvoiceEmailMessage): Promise<InvoiceEmailDeliveryResult>;
 };
 
+export type IntegrationCategory = "accounting" | "payments" | "messaging" | "email";
+
+export type IntegrationProviderName =
+  | "mock-accounting"
+  | "mock-payments"
+  | "mock-messaging"
+  | "mock-email";
+
+export type IntegrationProviderCapability =
+  | "connect"
+  | "sync"
+  | "disable"
+  | "exportTransactions"
+  | "exportInvoices"
+  | "receivePaymentEvents"
+  | "sendMessage"
+  | "sendEmail";
+
+export type IntegrationProviderToken = {
+  encryptedToken: string;
+  keyId: string;
+  lastFour: string;
+};
+
+export type IntegrationProviderConnection = {
+  provider: IntegrationProviderName;
+  category: IntegrationCategory;
+  providerConnectionId: string;
+  displayName: string;
+  status: "connected";
+  capabilities: readonly IntegrationProviderCapability[];
+  token: IntegrationProviderToken;
+  rawPayload: ProviderRawPayload;
+};
+
+export type IntegrationProviderSyncResult = {
+  status: "completed";
+  recordsSynced: number;
+  rawPayload: ProviderRawPayload;
+};
+
+export type IntegrationProvider = {
+  provider: IntegrationProviderName;
+  category: IntegrationCategory;
+  displayName: string;
+  capabilities: readonly IntegrationProviderCapability[];
+  connect(input: {
+    teamId: string;
+    actorId: string;
+    idempotencyKey: string;
+  }): Promise<IntegrationProviderConnection>;
+  sync(input: {
+    teamId: string;
+    providerConnectionId: string;
+  }): Promise<IntegrationProviderSyncResult>;
+};
+
 export function canonicalProviderTransactionId(input: {
   provider: BankingProviderName;
   providerConnectionId: string;
@@ -201,5 +258,103 @@ export function createMockInvoiceEmailDeliveryProvider(): InvoiceEmailDeliveryPr
         acceptedAt: "2026-06-15T12:00:00.000Z",
       };
     },
+  };
+}
+
+export function createMockIntegrationProviders(): IntegrationProvider[] {
+  return [
+    createMockIntegrationProvider({
+      provider: "mock-accounting",
+      category: "accounting",
+      displayName: "Mock Accounting",
+      capabilities: ["connect", "sync", "disable", "exportTransactions", "exportInvoices"],
+      recordsSynced: 3,
+    }),
+    createMockIntegrationProvider({
+      provider: "mock-payments",
+      category: "payments",
+      displayName: "Mock Payments",
+      capabilities: ["connect", "sync", "disable", "receivePaymentEvents"],
+      recordsSynced: 2,
+    }),
+    createMockIntegrationProvider({
+      provider: "mock-messaging",
+      category: "messaging",
+      displayName: "Mock Messaging",
+      capabilities: ["connect", "sync", "disable", "sendMessage"],
+      recordsSynced: 1,
+    }),
+    createMockIntegrationProvider({
+      provider: "mock-email",
+      category: "email",
+      displayName: "Mock Email",
+      capabilities: ["connect", "sync", "disable", "sendEmail"],
+      recordsSynced: 4,
+    }),
+  ];
+}
+
+export function createMockIntegrationProvider(input: {
+  provider: IntegrationProviderName;
+  category: IntegrationCategory;
+  displayName: string;
+  capabilities: readonly IntegrationProviderCapability[];
+  recordsSynced: number;
+}): IntegrationProvider {
+  return {
+    provider: input.provider,
+    category: input.category,
+    displayName: input.displayName,
+    capabilities: input.capabilities,
+    async connect(command) {
+      return {
+        provider: input.provider,
+        category: input.category,
+        providerConnectionId: `${input.provider}_${command.teamId}`,
+        displayName: input.displayName,
+        status: "connected",
+        capabilities: input.capabilities,
+        token: mockEncryptedProviderToken({
+          provider: input.provider,
+          teamId: command.teamId,
+          actorId: command.actorId,
+          idempotencyKey: command.idempotencyKey,
+        }),
+        rawPayload: {
+          mock: true,
+          category: input.category,
+          provider: input.provider,
+          teamId: command.teamId,
+        },
+      };
+    },
+    async sync(command) {
+      return {
+        status: "completed",
+        recordsSynced: input.recordsSynced,
+        rawPayload: {
+          mock: true,
+          provider: input.provider,
+          providerConnectionId: command.providerConnectionId,
+          recordsSynced: input.recordsSynced,
+        },
+      };
+    },
+  };
+}
+
+function mockEncryptedProviderToken(input: {
+  provider: IntegrationProviderName;
+  teamId: string;
+  actorId: string;
+  idempotencyKey: string;
+}): IntegrationProviderToken {
+  const token = `mock_secret_${input.provider}_${input.teamId}_${input.actorId}_${input.idempotencyKey}`;
+  const encoded = Buffer.from(token).toString("base64");
+
+  return {
+    encryptedToken: `mockkms:${encoded}`,
+    keyId: "mock-kms-local",
+    lastFour: token.slice(-4),
   };
 }

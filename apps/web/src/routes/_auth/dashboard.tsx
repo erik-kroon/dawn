@@ -140,8 +140,14 @@ function RouteComponent() {
   const canManageTeam = transactionReview.data?.permissions.includes("team.manage") ?? false;
   const canManageBankConnections =
     transactionReview.data?.permissions.includes("bank_connections.manage") ?? false;
+  const canManageIntegrations =
+    transactionReview.data?.permissions.includes("integrations.write") ?? false;
   const banking = useQuery({
     ...orpc.banking.list.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
+  const integrations = useQuery({
+    ...orpc.integrations.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
   const documents = useQuery({
@@ -228,6 +234,27 @@ function RouteComponent() {
         await queryClient.invalidateQueries({ queryKey: orpc.banking.list.queryKey() });
         await queryClient.invalidateQueries({ queryKey: orpc.ledger.summary.queryKey() });
         await transactionSync.refetch();
+      },
+    }),
+  );
+  const connectIntegrationMutation = useMutation(
+    orpc.integrations.connect.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.integrations.list.queryKey() });
+      },
+    }),
+  );
+  const syncIntegrationMutation = useMutation(
+    orpc.integrations.sync.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.integrations.list.queryKey() });
+      },
+    }),
+  );
+  const disableIntegrationMutation = useMutation(
+    orpc.integrations.disable.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.integrations.list.queryKey() });
       },
     }),
   );
@@ -1247,6 +1274,142 @@ function RouteComponent() {
               {syncBankConnectionMutation.error ? (
                 <p className="text-sm text-destructive">
                   {syncBankConnectionMutation.error.message}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Integrations</CardTitle>
+          <CardDescription>
+            Accounting, payment, messaging, and email adapters expose connection status,
+            capabilities, and sync failures behind one provider boundary.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {transactionReview.data ? (
+            <div className="grid gap-4">
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                {integrations.data?.providers.map((provider) => {
+                  const connected = integrations.data.connections.find(
+                    ({ connection }) =>
+                      connection.provider === provider.provider && connection.status !== "disabled",
+                  );
+
+                  return (
+                    <div className="grid gap-2 border p-3 text-sm" key={provider.provider}>
+                      <div>
+                        <p className="font-medium">{provider.displayName}</p>
+                        <p className="text-muted-foreground">{provider.category}</p>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {provider.capabilities.join(", ")}
+                      </p>
+                      <Button
+                        disabled={
+                          !canManageIntegrations ||
+                          connectIntegrationMutation.isPending ||
+                          !transactionReview.data.teamId ||
+                          Boolean(connected)
+                        }
+                        onClick={() =>
+                          connectIntegrationMutation.mutate({
+                            teamId: transactionReview.data.teamId,
+                            provider: provider.provider,
+                            idempotencyKey: crypto.randomUUID(),
+                          })
+                        }
+                        size="sm"
+                        variant={connected ? "outline" : "default"}
+                      >
+                        {connected ? "Connected" : "Connect"}
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="grid gap-2">
+                {integrations.data?.connections.length ? (
+                  integrations.data.connections.map(({ connection, latestSyncRun }) => (
+                    <div className="grid gap-2 border p-3 text-sm" key={connection.id}>
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <p className="font-medium">{connection.displayName}</p>
+                          <p className="text-muted-foreground">
+                            {connection.provider} · {connection.status} · token{" "}
+                            {connection.tokenKeyId}:{connection.tokenLastFour}
+                          </p>
+                          {connection.lastError ? (
+                            <p className="text-xs text-destructive">{connection.lastError}</p>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            disabled={
+                              !canManageIntegrations ||
+                              syncIntegrationMutation.isPending ||
+                              connection.status === "disabled"
+                            }
+                            onClick={() =>
+                              syncIntegrationMutation.mutate({
+                                teamId: connection.teamId,
+                                connectionId: connection.id,
+                                idempotencyKey: crypto.randomUUID(),
+                              })
+                            }
+                            size="sm"
+                            variant="outline"
+                          >
+                            Sync
+                          </Button>
+                          <Button
+                            disabled={
+                              !canManageIntegrations ||
+                              disableIntegrationMutation.isPending ||
+                              connection.status === "disabled"
+                            }
+                            onClick={() =>
+                              disableIntegrationMutation.mutate({
+                                teamId: connection.teamId,
+                                connectionId: connection.id,
+                                idempotencyKey: crypto.randomUUID(),
+                              })
+                            }
+                            size="sm"
+                            variant="outline"
+                          >
+                            Disable
+                          </Button>
+                        </div>
+                      </div>
+                      {latestSyncRun ? (
+                        <p className="text-xs text-muted-foreground">
+                          Last run: {latestSyncRun.status} · {latestSyncRun.recordsSynced} records
+                          {latestSyncRun.error ? ` · ${latestSyncRun.error}` : ""}
+                        </p>
+                      ) : null}
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground">No integrations connected yet.</p>
+                )}
+              </div>
+
+              {connectIntegrationMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {connectIntegrationMutation.error.message}
+                </p>
+              ) : null}
+              {syncIntegrationMutation.error ? (
+                <p className="text-sm text-destructive">{syncIntegrationMutation.error.message}</p>
+              ) : null}
+              {disableIntegrationMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {disableIntegrationMutation.error.message}
                 </p>
               ) : null}
             </div>

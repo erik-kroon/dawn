@@ -23,6 +23,8 @@ export type Permission =
   | "team.manage"
   | "settings.billing"
   | "api_keys.manage"
+  | "integrations.read"
+  | "integrations.write"
   | "assistant.use"
   | "assistant.mutate"
   | "automations.read"
@@ -674,6 +676,45 @@ export type WebhookDelivery = {
   updatedAt: string;
 };
 
+export type IntegrationCategory = "accounting" | "payments" | "messaging" | "email";
+
+export type IntegrationConnectionStatus = "connected" | "disabled" | "error";
+
+export type IntegrationConnection = {
+  id: string;
+  teamId: string;
+  category: IntegrationCategory;
+  provider: string;
+  providerConnectionId: string;
+  displayName: string;
+  status: IntegrationConnectionStatus;
+  capabilities: string[];
+  tokenKeyId: string;
+  tokenLastFour: string;
+  lastSyncAt?: string | null;
+  lastError?: string | null;
+  disabledAt?: string | null;
+  createdByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type IntegrationSyncRunStatus = "running" | "completed" | "failed";
+
+export type IntegrationSyncRun = {
+  id: string;
+  teamId: string;
+  integrationConnectionId: string;
+  category: IntegrationCategory;
+  provider: string;
+  status: IntegrationSyncRunStatus;
+  startedAt: string;
+  completedAt?: string | null;
+  recordsSynced: number;
+  error?: string | null;
+  rawPayload: Record<string, unknown>;
+};
+
 export function automationActionPermission(actionType: AutomationActionType): Permission {
   if (actionType === "categorize_transaction") {
     return "transactions.categorize";
@@ -797,6 +838,8 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "team.manage",
     "settings.billing",
     "api_keys.manage",
+    "integrations.read",
+    "integrations.write",
     "assistant.use",
     "assistant.mutate",
     "automations.read",
@@ -818,6 +861,8 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "bank_connections.manage",
     "team.manage",
     "api_keys.manage",
+    "integrations.read",
+    "integrations.write",
     "assistant.use",
     "assistant.mutate",
     "automations.read",
@@ -835,6 +880,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "projects.write",
     "invoices.read",
     "invoices.write",
+    "integrations.read",
     "assistant.use",
     "automations.read",
   ],
@@ -847,6 +893,8 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "projects.write",
     "invoices.read",
     "invoices.write",
+    "integrations.read",
+    "integrations.write",
     "assistant.use",
     "automations.read",
     "automations.write",
@@ -857,6 +905,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "documents.read",
     "projects.read",
     "invoices.read",
+    "integrations.read",
     "assistant.use",
     "automations.read",
   ],

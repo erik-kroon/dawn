@@ -31,6 +31,10 @@ import type {
   InvoiceDraftInput,
   InvoiceLineDraft,
   InvoicePayment,
+  IntegrationCategory,
+  IntegrationConnection,
+  IntegrationSyncRun,
+  IntegrationSyncRunStatus,
   OAuthApp,
   RecurringInvoiceFrequency,
   RecurringInvoiceSchedule,
@@ -68,6 +72,9 @@ import type {
   BankingProviderName,
   BankingProviderTransaction,
   InvoiceEmailDeliveryProvider,
+  IntegrationProvider,
+  IntegrationProviderCapability,
+  IntegrationProviderName,
 } from "@dawn/integrations";
 import type { DawnQueueMessage, OutboxEventForJob } from "@dawn/jobs";
 import type { TransactionSyncResponse } from "@dawn/sync";
@@ -300,6 +307,58 @@ export type BankConnectionSummary = {
   connection: BankConnection;
   accounts: BankAccount[];
   latestSyncRun?: ProviderSyncRun | null;
+};
+
+export type IntegrationProviderDescriptor = {
+  provider: IntegrationProviderName;
+  category: IntegrationCategory;
+  displayName: string;
+  capabilities: readonly IntegrationProviderCapability[];
+};
+
+export type IntegrationConnectionSummary = {
+  connection: IntegrationConnection;
+  latestSyncRun?: IntegrationSyncRun | null;
+};
+
+export type IntegrationWorkspace = {
+  teamId: string;
+  providers: IntegrationProviderDescriptor[];
+  connections: IntegrationConnectionSummary[];
+};
+
+export type ConnectIntegrationCommand = {
+  teamId: string;
+  provider: IntegrationProviderName;
+  idempotencyKey: string;
+};
+
+export type ConnectIntegrationResult = {
+  connection: IntegrationConnection;
+  replayed: boolean;
+};
+
+export type SyncIntegrationCommand = {
+  teamId: string;
+  connectionId: string;
+  idempotencyKey: string;
+};
+
+export type SyncIntegrationResult = {
+  connection: IntegrationConnection;
+  syncRun: IntegrationSyncRun;
+  replayed: boolean;
+};
+
+export type DisableIntegrationCommand = {
+  teamId: string;
+  connectionId: string;
+  idempotencyKey: string;
+};
+
+export type DisableIntegrationResult = {
+  connection: IntegrationConnection;
+  replayed: boolean;
 };
 
 export type BusinessDocumentStatus = "uploading" | "uploaded";
@@ -1045,6 +1104,52 @@ export type BankingRepository = {
 
 export type BankingUseCaseRepository = TransactionReviewRepository & BankingRepository;
 
+export type IntegrationRepository = {
+  listIntegrationConnectionSummaries(teamId: string): Promise<IntegrationConnectionSummary[]>;
+  getIntegrationConnectionForTeam(
+    teamId: string,
+    connectionId: string,
+  ): Promise<IntegrationConnection | null>;
+  upsertIntegrationConnection(input: {
+    connectionId: string;
+    teamId: string;
+    category: IntegrationCategory;
+    provider: string;
+    providerConnectionId: string;
+    displayName: string;
+    capabilities: string[];
+    tokenCiphertext: string;
+    tokenKeyId: string;
+    tokenLastFour: string;
+    rawPayload: Record<string, unknown>;
+    createdByActorId: string;
+  }): Promise<IntegrationConnection>;
+  createIntegrationSyncRun(input: {
+    syncRunId: string;
+    teamId: string;
+    integrationConnectionId: string;
+    category: IntegrationCategory;
+    provider: string;
+  }): Promise<IntegrationSyncRun>;
+  finishIntegrationSyncRun(input: {
+    syncRunId: string;
+    status: Exclude<IntegrationSyncRunStatus, "running">;
+    recordsSynced: number;
+    error?: string | null;
+    rawPayload: Record<string, unknown>;
+  }): Promise<IntegrationSyncRun>;
+  markIntegrationConnectionSynced(input: {
+    connectionId: string;
+    syncedAt: Date;
+    status: IntegrationConnection["status"];
+    lastError?: string | null;
+  }): Promise<IntegrationConnection>;
+  disableIntegrationConnection(input: {
+    connectionId: string;
+    disabledAt: Date;
+  }): Promise<IntegrationConnection>;
+};
+
 export type DocumentRepository = {
   listDocuments(teamId: string): Promise<BusinessDocument[]>;
   createDocumentUploadRecord(input: {
@@ -1267,7 +1372,8 @@ export type DawnRepository = BankingUseCaseRepository &
   ReportingRepository &
   AssistantRepository &
   AutomationRepository &
-  DeveloperRepository;
+  DeveloperRepository &
+  IntegrationRepository;
 
 export type ProjectRepository = {
   listProjects(teamId: string): Promise<Project[]>;
@@ -1639,6 +1745,9 @@ const updateTeamMemberRoleOperation = "team.member.role.update";
 const createAutomationRuleOperation = "automation.rule.create";
 const createApiKeyOperation = "api_key.create";
 const createWebhookSubscriptionOperation = "webhook_subscription.create";
+const connectIntegrationOperation = "integration.connect";
+const syncIntegrationOperation = "integration.sync";
+const disableIntegrationOperation = "integration.disable";
 
 export async function dispatchOutboxEvents(
   repository: OutboxDispatchRepository,
@@ -3074,6 +3183,378 @@ export async function syncBankConnection(
       teamId: command.teamId,
       actorId: context.actor.id,
       operation: syncBankConnectionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function listIntegrationWorkspace(
+  repository: DawnRepository,
+  providers: readonly IntegrationProvider[],
+  context: TransactionReviewContext,
+  input: { teamId?: string } = {},
+): Promise<IntegrationWorkspace> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: input.teamId ?? context.teamId },
+    "integrations.read",
+    "You cannot read integrations for this team",
+  );
+
+  return {
+    teamId: access.teamId,
+    providers: providers.map(integrationProviderDescriptor),
+    connections: await repository.listIntegrationConnectionSummaries(access.teamId),
+  };
+}
+
+export async function connectIntegration(
+  repository: DawnRepository,
+  providers: readonly IntegrationProvider[],
+  context: TransactionReviewContext,
+  command: ConnectIntegrationCommand,
+): Promise<ConnectIntegrationResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const integrationRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Integration not found");
+
+    await resolveTeamAccess(
+      integrationRepository,
+      { ...context, teamId: command.teamId },
+      "integrations.write",
+      "You cannot connect integrations for this team",
+    );
+
+    const provider = requireIntegrationProvider(providers, command.provider);
+    const fingerprint = JSON.stringify({ teamId: command.teamId, provider: provider.provider });
+    const replayed = await integrationRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      connectIntegrationOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different integration connection",
+        );
+      }
+
+      return { ...(replayed.result as ConnectIntegrationResult), replayed: true };
+    }
+
+    const providerConnection = await provider.connect({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      idempotencyKey: command.idempotencyKey,
+    });
+    const connection = await integrationRepository.upsertIntegrationConnection({
+      connectionId: crypto.randomUUID(),
+      teamId: command.teamId,
+      category: providerConnection.category,
+      provider: providerConnection.provider,
+      providerConnectionId: providerConnection.providerConnectionId,
+      displayName: providerConnection.displayName,
+      capabilities: [...providerConnection.capabilities],
+      tokenCiphertext: providerConnection.token.encryptedToken,
+      tokenKeyId: providerConnection.token.keyId,
+      tokenLastFour: providerConnection.token.lastFour,
+      rawPayload: providerConnection.rawPayload,
+      createdByActorId: context.actor.id,
+    });
+
+    await integrationRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "integration.connected",
+      entityType: "integration_connection",
+      entityId: connection.id,
+      metadata: {
+        provider: connection.provider,
+        category: connection.category,
+        capabilities: connection.capabilities,
+      },
+    });
+
+    await integrationRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "integration.connected",
+      version: 1,
+      payload: {
+        connectionId: connection.id,
+        provider: connection.provider,
+        category: connection.category,
+      },
+    });
+
+    const result = { connection, replayed: false };
+
+    await integrationRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: connectIntegrationOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function syncIntegration(
+  repository: DawnRepository,
+  providers: readonly IntegrationProvider[],
+  context: TransactionReviewContext,
+  command: SyncIntegrationCommand,
+): Promise<SyncIntegrationResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const integrationRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Integration not found");
+
+    await resolveTeamAccess(
+      integrationRepository,
+      { ...context, teamId: command.teamId },
+      "integrations.write",
+      "You cannot sync integrations for this team",
+    );
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      connectionId: command.connectionId,
+    });
+    const replayed = await integrationRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      syncIntegrationOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different integration sync",
+        );
+      }
+
+      return { ...(replayed.result as SyncIntegrationResult), replayed: true };
+    }
+
+    const connection = await integrationRepository.getIntegrationConnectionForTeam(
+      command.teamId,
+      command.connectionId,
+    );
+
+    if (!connection || connection.status === "disabled") {
+      throw new AppError("NOT_FOUND", "Integration not found");
+    }
+
+    const provider = requireIntegrationProvider(providers, connection.provider);
+    const syncRun = await integrationRepository.createIntegrationSyncRun({
+      syncRunId: crypto.randomUUID(),
+      teamId: command.teamId,
+      integrationConnectionId: connection.id,
+      category: connection.category,
+      provider: connection.provider,
+    });
+
+    try {
+      const synced = await provider.sync({
+        teamId: command.teamId,
+        providerConnectionId: connection.providerConnectionId,
+      });
+      const completedSyncRun = await integrationRepository.finishIntegrationSyncRun({
+        syncRunId: syncRun.id,
+        status: synced.status,
+        recordsSynced: synced.recordsSynced,
+        error: null,
+        rawPayload: synced.rawPayload,
+      });
+      const syncedConnection = await integrationRepository.markIntegrationConnectionSynced({
+        connectionId: connection.id,
+        syncedAt: new Date(completedSyncRun.completedAt ?? completedSyncRun.startedAt),
+        status: "connected",
+        lastError: null,
+      });
+
+      await integrationRepository.appendAuditEvent({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        action: "integration.synced",
+        entityType: "integration_connection",
+        entityId: connection.id,
+        metadata: {
+          provider: connection.provider,
+          category: connection.category,
+          recordsSynced: completedSyncRun.recordsSynced,
+        },
+      });
+
+      await integrationRepository.appendOutboxEvent({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        type: "integration.synced",
+        version: 1,
+        payload: {
+          connectionId: connection.id,
+          provider: connection.provider,
+          category: connection.category,
+          recordsSynced: completedSyncRun.recordsSynced,
+        },
+      });
+
+      const result = {
+        connection: syncedConnection,
+        syncRun: completedSyncRun,
+        replayed: false,
+      };
+
+      await integrationRepository.saveIdempotencyResult({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        operation: syncIntegrationOperation,
+        key: command.idempotencyKey,
+        fingerprint,
+        result,
+      });
+
+      return result;
+    } catch (error) {
+      const message = errorMessage(error);
+      const failedSyncRun = await integrationRepository.finishIntegrationSyncRun({
+        syncRunId: syncRun.id,
+        status: "failed",
+        recordsSynced: 0,
+        error: message,
+        rawPayload: { error: message },
+      });
+      const failedConnection = await integrationRepository.markIntegrationConnectionSynced({
+        connectionId: connection.id,
+        syncedAt: new Date(failedSyncRun.completedAt ?? failedSyncRun.startedAt),
+        status: "error",
+        lastError: message,
+      });
+      const result = {
+        connection: failedConnection,
+        syncRun: failedSyncRun,
+        replayed: false,
+      };
+
+      await integrationRepository.saveIdempotencyResult({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        operation: syncIntegrationOperation,
+        key: command.idempotencyKey,
+        fingerprint,
+        result,
+      });
+
+      return result;
+    }
+  });
+}
+
+export async function disableIntegration(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: DisableIntegrationCommand,
+): Promise<DisableIntegrationResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const integrationRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Integration not found");
+
+    await resolveTeamAccess(
+      integrationRepository,
+      { ...context, teamId: command.teamId },
+      "integrations.write",
+      "You cannot disable integrations for this team",
+    );
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      connectionId: command.connectionId,
+    });
+    const replayed = await integrationRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      disableIntegrationOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different integration disable",
+        );
+      }
+
+      return { ...(replayed.result as DisableIntegrationResult), replayed: true };
+    }
+
+    const connection = await integrationRepository.getIntegrationConnectionForTeam(
+      command.teamId,
+      command.connectionId,
+    );
+
+    if (!connection) {
+      throw new AppError("NOT_FOUND", "Integration not found");
+    }
+
+    const disabled = await integrationRepository.disableIntegrationConnection({
+      connectionId: connection.id,
+      disabledAt: new Date(),
+    });
+
+    await integrationRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "integration.disabled",
+      entityType: "integration_connection",
+      entityId: connection.id,
+      metadata: {
+        provider: connection.provider,
+        category: connection.category,
+        preservesHistoricalData: true,
+      },
+    });
+
+    await integrationRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "integration.disabled",
+      version: 1,
+      payload: {
+        connectionId: connection.id,
+        provider: connection.provider,
+        category: connection.category,
+        preservesHistoricalData: true,
+      },
+    });
+
+    const result = { connection: disabled, replayed: false };
+
+    await integrationRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: disableIntegrationOperation,
       key: command.idempotencyKey,
       fingerprint,
       result,
@@ -6778,6 +7259,30 @@ function persistedProviderConnection(connection: BankConnection): BankingProvide
     status: "connected",
     rawPayload: {},
   };
+}
+
+function integrationProviderDescriptor(
+  provider: IntegrationProvider,
+): IntegrationProviderDescriptor {
+  return {
+    provider: provider.provider,
+    category: provider.category,
+    displayName: provider.displayName,
+    capabilities: provider.capabilities,
+  };
+}
+
+function requireIntegrationProvider(
+  providers: readonly IntegrationProvider[],
+  providerName: string,
+): IntegrationProvider {
+  const provider = providers.find((candidate) => candidate.provider === providerName);
+
+  if (!provider) {
+    throw new AppError("NOT_FOUND", "Integration provider not found");
+  }
+
+  return provider;
 }
 
 export function connectMockBankConnectionFingerprint(

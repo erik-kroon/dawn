@@ -14,6 +14,10 @@ import type {
   Category,
   Customer,
   CustomerContact,
+  IntegrationCategory,
+  IntegrationConnection,
+  IntegrationSyncRun,
+  IntegrationSyncRunStatus,
   InvoiceEvent,
   InvoiceDraft,
   InvoiceLineDraft,
@@ -60,6 +64,7 @@ import type {
 } from "@dawn/app";
 import {
   createMockBankingProvider,
+  createMockIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
 } from "@dawn/integrations";
 
@@ -96,6 +101,8 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   assistantApprovals = new Map<string, AssistantActionApproval>();
   automationRules = new Map<string, AutomationRule>();
   automationRuns = new Map<string, AutomationRun>();
+  integrationConnections = new Map<string, IntegrationConnection & { tokenCiphertext: string }>();
+  integrationSyncRuns = new Map<string, IntegrationSyncRun>();
   apiKeys = new Map<string, ApiKey & { keyHash: string }>();
   oauthApps = new Map<string, OAuthApp>();
   webhookSubscriptions = new Map<string, WebhookSubscription & { signingSecretHash: string }>();
@@ -1739,6 +1746,153 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return delivery;
   }
 
+  async listIntegrationConnectionSummaries(teamId: string) {
+    return [...this.integrationConnections.values()]
+      .filter((connection) => connection.teamId === teamId)
+      .map((connection) => ({
+        connection,
+        latestSyncRun:
+          [...this.integrationSyncRuns.values()]
+            .filter((run) => run.integrationConnectionId === connection.id)
+            .at(-1) ?? null,
+      }));
+  }
+
+  async getIntegrationConnectionForTeam(teamId: string, connectionId: string) {
+    const connection = this.integrationConnections.get(connectionId);
+    return connection?.teamId === teamId ? connection : null;
+  }
+
+  async upsertIntegrationConnection(input: {
+    connectionId: string;
+    teamId: string;
+    category: IntegrationCategory;
+    provider: string;
+    providerConnectionId: string;
+    displayName: string;
+    capabilities: string[];
+    tokenCiphertext: string;
+    tokenKeyId: string;
+    tokenLastFour: string;
+    createdByActorId: string;
+  }) {
+    const existing = [...this.integrationConnections.values()].find(
+      (connection) =>
+        connection.teamId === input.teamId &&
+        connection.provider === input.provider &&
+        connection.providerConnectionId === input.providerConnectionId,
+    );
+    const now = "2026-06-15T10:00:00.000Z";
+    const connection = {
+      id: existing?.id ?? input.connectionId,
+      teamId: input.teamId,
+      category: input.category,
+      provider: input.provider,
+      providerConnectionId: input.providerConnectionId,
+      displayName: input.displayName,
+      status: "connected" as const,
+      capabilities: input.capabilities,
+      tokenCiphertext: input.tokenCiphertext,
+      tokenKeyId: input.tokenKeyId,
+      tokenLastFour: input.tokenLastFour,
+      lastSyncAt: null,
+      lastError: null,
+      disabledAt: null,
+      createdByActorId: input.createdByActorId,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.integrationConnections.set(connection.id, connection);
+    return connection;
+  }
+
+  async createIntegrationSyncRun(input: {
+    syncRunId: string;
+    teamId: string;
+    integrationConnectionId: string;
+    category: IntegrationCategory;
+    provider: string;
+  }) {
+    const syncRun = {
+      id: input.syncRunId,
+      teamId: input.teamId,
+      integrationConnectionId: input.integrationConnectionId,
+      category: input.category,
+      provider: input.provider,
+      status: "running" as const,
+      startedAt: "2026-06-15T10:00:00.000Z",
+      completedAt: null,
+      recordsSynced: 0,
+      error: null,
+      rawPayload: {},
+    };
+    this.integrationSyncRuns.set(syncRun.id, syncRun);
+    return syncRun;
+  }
+
+  async finishIntegrationSyncRun(input: {
+    syncRunId: string;
+    status: Exclude<IntegrationSyncRunStatus, "running">;
+    recordsSynced: number;
+    error?: string | null;
+    rawPayload: Record<string, unknown>;
+  }) {
+    const existing = this.integrationSyncRuns.get(input.syncRunId);
+
+    if (!existing) {
+      throw new Error("missing sync run");
+    }
+
+    const syncRun = {
+      ...existing,
+      status: input.status,
+      completedAt: "2026-06-15T10:01:00.000Z",
+      recordsSynced: input.recordsSynced,
+      error: input.error ?? null,
+      rawPayload: input.rawPayload,
+    };
+    this.integrationSyncRuns.set(syncRun.id, syncRun);
+    return syncRun;
+  }
+
+  async markIntegrationConnectionSynced(input: {
+    connectionId: string;
+    syncedAt: Date;
+    status: IntegrationConnection["status"];
+    lastError?: string | null;
+  }) {
+    const connection = this.integrationConnections.get(input.connectionId);
+
+    if (!connection) {
+      throw new Error("missing connection");
+    }
+
+    const updated = {
+      ...connection,
+      status: input.status,
+      lastSyncAt: input.syncedAt.toISOString(),
+      lastError: input.lastError ?? null,
+    };
+    this.integrationConnections.set(updated.id, updated);
+    return updated;
+  }
+
+  async disableIntegrationConnection(input: { connectionId: string; disabledAt: Date }) {
+    const connection = this.integrationConnections.get(input.connectionId);
+
+    if (!connection) {
+      throw new Error("missing connection");
+    }
+
+    const disabled = {
+      ...connection,
+      status: "disabled" as const,
+      disabledAt: input.disabledAt.toISOString(),
+    };
+    this.integrationConnections.set(disabled.id, disabled);
+    return disabled;
+  }
+
   private invoiceFromInput(
     invoiceId: string,
     input: {
@@ -1968,6 +2122,7 @@ async function createTestRouter(repository: DawnRepository) {
   return createAppRouter({
     transactionReviewRepository: repository,
     bankingProvider: createMockBankingProvider(),
+    integrationProviders: createMockIntegrationProviders(),
     documentUrlSigner: testDocumentUrlSigner,
     invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
     invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
@@ -3118,5 +3273,62 @@ describe("appRouter", () => {
     expect(repository.providerObjects.get("mock-bank:connection:mock_conn_team_1")).toMatchObject({
       mock: true,
     });
+  });
+
+  test("manages integration adapters through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+
+    const catalog = await call(router.integrations.list, { teamId: "team_1" }, context);
+    const connected = await call(
+      router.integrations.connect,
+      {
+        teamId: "team_1",
+        provider: "mock-accounting",
+        idempotencyKey: "integration_connect_1",
+      },
+      context,
+    );
+    const synced = await call(
+      router.integrations.sync,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "integration_sync_1",
+      },
+      context,
+    );
+    const disabled = await call(
+      router.integrations.disable,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "integration_disable_1",
+      },
+      context,
+    );
+
+    expect(catalog.providers.map((provider) => provider.category)).toEqual([
+      "accounting",
+      "payments",
+      "messaging",
+      "email",
+    ]);
+    expect(connected.connection).toMatchObject({
+      provider: "mock-accounting",
+      status: "connected",
+      tokenKeyId: "mock-kms-local",
+    });
+    expect(
+      repository.integrationConnections
+        .get(connected.connection.id)
+        ?.tokenCiphertext.includes("mock_secret"),
+    ).toBe(false);
+    expect(synced.syncRun).toMatchObject({ status: "completed", recordsSynced: 3 });
+    expect(disabled.connection.status).toBe("disabled");
+    expect(repository.integrationSyncRuns).toHaveLength(1);
   });
 });

@@ -6,6 +6,7 @@ import {
   acceptTeamInvite,
   approveAssistantAction,
   commitCsvTransactionImport,
+  connectIntegration,
   createDeterministicInvoicePdfRenderer,
   connectMockBankConnection,
   createApiKey,
@@ -22,6 +23,7 @@ import {
   createRecurringInvoiceSchedule,
   createTeam,
   createWebhookSubscription,
+  disableIntegration,
   generateInboxMatchSuggestions,
   getAssistantConversation,
   inviteTeamMember,
@@ -33,6 +35,7 @@ import {
   listDeveloperWorkspace,
   listDocuments,
   listInboxItems,
+  listIntegrationWorkspace,
   listLedgerSummary,
   listBusinessReport,
   listProjectWorkspace,
@@ -49,6 +52,7 @@ import {
   runAutomationsForOutboxEvent,
   sendInvoice,
   sendAssistantMessage,
+  syncIntegration,
   syncBankConnection,
   type DawnRepository,
   type DocumentExtractionFields,
@@ -61,8 +65,10 @@ import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review"
 import { env } from "@dawn/env/server";
 import {
   createMockBankingProvider,
+  createMockIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
   type BankingProvider,
+  type IntegrationProvider,
   type InvoiceEmailDeliveryProvider,
 } from "@dawn/integrations";
 import { z } from "zod";
@@ -73,6 +79,7 @@ import { createDocumentUrlSigner } from "../document-url";
 export type AppRouterDependencies = {
   transactionReviewRepository: DawnRepository;
   bankingProvider: BankingProvider;
+  integrationProviders: readonly IntegrationProvider[];
   documentUrlSigner: DocumentUrlSigner;
   invoicePdfRenderer: InvoicePdfRenderer;
   invoiceEmailDeliveryProvider: InvoiceEmailDeliveryProvider;
@@ -202,6 +209,37 @@ const bankConnectionInput = z.object({
 });
 
 const syncBankConnectionInput = z.object({
+  teamId: z.string().min(1),
+  connectionId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const integrationProviderInput = z.enum([
+  "mock-accounting",
+  "mock-payments",
+  "mock-messaging",
+  "mock-email",
+]);
+
+const integrationWorkspaceInput = z
+  .object({
+    teamId: z.string().min(1).optional(),
+  })
+  .optional();
+
+const connectIntegrationInput = z.object({
+  teamId: z.string().min(1),
+  provider: integrationProviderInput,
+  idempotencyKey: z.string().min(1),
+});
+
+const syncIntegrationInput = z.object({
+  teamId: z.string().min(1),
+  connectionId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const disableIntegrationInput = z.object({
   teamId: z.string().min(1),
   connectionId: z.string().min(1),
   idempotencyKey: z.string().min(1),
@@ -470,6 +508,7 @@ function createDefaultDependencies(): AppRouterDependencies {
   return {
     transactionReviewRepository: new DrizzleTransactionReviewRepository(),
     bankingProvider: createMockBankingProvider(),
+    integrationProviders: createMockIntegrationProviders(),
     documentUrlSigner: createDocumentUrlSigner({
       baseUrl: env.BETTER_AUTH_URL,
       secret: env.BETTER_AUTH_SECRET,
@@ -483,6 +522,7 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
   const {
     bankingProvider,
     documentUrlSigner,
+    integrationProviders,
     invoiceEmailDeliveryProvider,
     invoicePdfRenderer,
     transactionReviewRepository,
@@ -940,6 +980,76 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             return await syncBankConnection(
               transactionReviewRepository,
               bankingProvider,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    integrations: {
+      list: protectedProcedure
+        .input(integrationWorkspaceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listIntegrationWorkspace(
+              transactionReviewRepository,
+              integrationProviders,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input?.teamId,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      connect: protectedProcedure
+        .input(connectIntegrationInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await connectIntegration(
+              transactionReviewRepository,
+              integrationProviders,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      sync: protectedProcedure.input(syncIntegrationInput).handler(async ({ context, input }) => {
+        try {
+          return await syncIntegration(
+            transactionReviewRepository,
+            integrationProviders,
+            {
+              actor: { id: context.session.user.id, type: "user" },
+              requestId: context.requestId,
+              teamId: input.teamId,
+            },
+            input,
+          );
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+      disable: protectedProcedure
+        .input(disableIntegrationInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await disableIntegration(
+              transactionReviewRepository,
               {
                 actor: { id: context.session.user.id, type: "user" },
                 requestId: context.requestId,

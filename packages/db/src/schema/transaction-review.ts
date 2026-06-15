@@ -436,6 +436,69 @@ export const providerObject = pgTable(
   ],
 );
 
+export const integrationConnection = pgTable(
+  "integration_connection",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    category: text("category").notNull(),
+    provider: text("provider").notNull(),
+    providerConnectionId: text("provider_connection_id").notNull(),
+    displayName: text("display_name").notNull(),
+    status: text("status").default("connected").notNull(),
+    capabilities: jsonb("capabilities").$type<string[]>().notNull(),
+    tokenCiphertext: text("token_ciphertext").notNull(),
+    tokenKeyId: text("token_key_id").notNull(),
+    tokenLastFour: text("token_last_four").notNull(),
+    rawPayload: jsonb("raw_payload").$type<Record<string, unknown>>().notNull(),
+    lastSyncAt: timestamp("last_sync_at"),
+    lastError: text("last_error"),
+    disabledAt: timestamp("disabled_at"),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("integration_connection_provider_idx").on(
+      table.teamId,
+      table.provider,
+      table.providerConnectionId,
+    ),
+    index("integration_connection_team_status_idx").on(table.teamId, table.status),
+    index("integration_connection_team_category_idx").on(table.teamId, table.category),
+  ],
+);
+
+export const integrationSyncRun = pgTable(
+  "integration_sync_run",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    integrationConnectionId: text("integration_connection_id")
+      .notNull()
+      .references(() => integrationConnection.id, { onDelete: "cascade" }),
+    category: text("category").notNull(),
+    provider: text("provider").notNull(),
+    status: text("status").default("running").notNull(),
+    startedAt: timestamp("started_at").defaultNow().notNull(),
+    completedAt: timestamp("completed_at"),
+    recordsSynced: integer("records_synced").default(0).notNull(),
+    error: text("error"),
+    rawPayload: jsonb("raw_payload").$type<Record<string, unknown>>().notNull(),
+  },
+  (table) => [
+    index("integration_sync_run_connection_idx").on(table.integrationConnectionId, table.startedAt),
+    index("integration_sync_run_status_idx").on(table.status, table.startedAt),
+  ],
+);
+
 export const businessDocument = pgTable(
   "document",
   {
@@ -1313,6 +1376,8 @@ export const teamRelations = relations(team, ({ many }) => ({
   jobRuns: many(jobRun),
   providerSyncRuns: many(providerSyncRun),
   providerObjects: many(providerObject),
+  integrationConnections: many(integrationConnection),
+  integrationSyncRuns: many(integrationSyncRun),
   documents: many(businessDocument),
   documentVersions: many(documentVersion),
   inboxSources: many(inboxSource),

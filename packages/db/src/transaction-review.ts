@@ -38,6 +38,10 @@ import type {
   Category,
   Customer,
   CustomerContact,
+  IntegrationCategory,
+  IntegrationConnection,
+  IntegrationSyncRun,
+  IntegrationSyncRunStatus,
   InvoiceEvent,
   InvoiceDraft,
   InvoiceLineDraft,
@@ -592,6 +596,223 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       internalEntityId: input.internalEntityId ?? null,
       rawPayload: input.rawPayload,
     });
+  }
+
+  async listIntegrationConnectionSummaries(teamId: string) {
+    const [connections, syncRuns] = await Promise.all([
+      this.client
+        .select()
+        .from(schema.integrationConnection)
+        .where(eq(schema.integrationConnection.teamId, teamId))
+        .orderBy(desc(schema.integrationConnection.createdAt)),
+      this.client
+        .select()
+        .from(schema.integrationSyncRun)
+        .where(eq(schema.integrationSyncRun.teamId, teamId))
+        .orderBy(desc(schema.integrationSyncRun.startedAt)),
+    ]);
+
+    return connections.map((connection) => ({
+      connection: mapIntegrationConnection(connection),
+      latestSyncRun:
+        syncRuns
+          .map(mapIntegrationSyncRun)
+          .find((syncRun) => syncRun.integrationConnectionId === connection.id) ?? null,
+    }));
+  }
+
+  async getIntegrationConnectionForTeam(
+    teamId: string,
+    connectionId: string,
+  ): Promise<IntegrationConnection | null> {
+    const [connection] = await this.client
+      .select()
+      .from(schema.integrationConnection)
+      .where(
+        and(
+          eq(schema.integrationConnection.teamId, teamId),
+          eq(schema.integrationConnection.id, connectionId),
+        ),
+      )
+      .limit(1);
+
+    return connection ? mapIntegrationConnection(connection) : null;
+  }
+
+  async upsertIntegrationConnection(input: {
+    connectionId: string;
+    teamId: string;
+    category: IntegrationCategory;
+    provider: string;
+    providerConnectionId: string;
+    displayName: string;
+    capabilities: string[];
+    tokenCiphertext: string;
+    tokenKeyId: string;
+    tokenLastFour: string;
+    rawPayload: Record<string, unknown>;
+    createdByActorId: string;
+  }): Promise<IntegrationConnection> {
+    const [existing] = await this.client
+      .select()
+      .from(schema.integrationConnection)
+      .where(
+        and(
+          eq(schema.integrationConnection.teamId, input.teamId),
+          eq(schema.integrationConnection.provider, input.provider),
+          eq(schema.integrationConnection.providerConnectionId, input.providerConnectionId),
+        ),
+      )
+      .limit(1);
+
+    if (existing) {
+      const [updated] = await this.client
+        .update(schema.integrationConnection)
+        .set({
+          category: input.category,
+          displayName: input.displayName,
+          status: "connected",
+          capabilities: input.capabilities,
+          tokenCiphertext: input.tokenCiphertext,
+          tokenKeyId: input.tokenKeyId,
+          tokenLastFour: input.tokenLastFour,
+          rawPayload: input.rawPayload,
+          lastError: null,
+          disabledAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.integrationConnection.id, existing.id))
+        .returning();
+
+      if (!updated) {
+        throw new Error("Integration connection was not updated");
+      }
+
+      return mapIntegrationConnection(updated);
+    }
+
+    const [connection] = await this.client
+      .insert(schema.integrationConnection)
+      .values({
+        id: input.connectionId,
+        teamId: input.teamId,
+        category: input.category,
+        provider: input.provider,
+        providerConnectionId: input.providerConnectionId,
+        displayName: input.displayName,
+        status: "connected",
+        capabilities: input.capabilities,
+        tokenCiphertext: input.tokenCiphertext,
+        tokenKeyId: input.tokenKeyId,
+        tokenLastFour: input.tokenLastFour,
+        rawPayload: input.rawPayload,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!connection) {
+      throw new Error("Failed to create integration connection");
+    }
+
+    return mapIntegrationConnection(connection);
+  }
+
+  async createIntegrationSyncRun(input: {
+    syncRunId: string;
+    teamId: string;
+    integrationConnectionId: string;
+    category: IntegrationCategory;
+    provider: string;
+  }): Promise<IntegrationSyncRun> {
+    const [syncRun] = await this.client
+      .insert(schema.integrationSyncRun)
+      .values({
+        id: input.syncRunId,
+        teamId: input.teamId,
+        integrationConnectionId: input.integrationConnectionId,
+        category: input.category,
+        provider: input.provider,
+        status: "running",
+        rawPayload: {},
+      })
+      .returning();
+
+    if (!syncRun) {
+      throw new Error("Failed to create integration sync run");
+    }
+
+    return mapIntegrationSyncRun(syncRun);
+  }
+
+  async finishIntegrationSyncRun(input: {
+    syncRunId: string;
+    status: Exclude<IntegrationSyncRunStatus, "running">;
+    recordsSynced: number;
+    error?: string | null;
+    rawPayload: Record<string, unknown>;
+  }): Promise<IntegrationSyncRun> {
+    const [syncRun] = await this.client
+      .update(schema.integrationSyncRun)
+      .set({
+        status: input.status,
+        completedAt: new Date(),
+        recordsSynced: input.recordsSynced,
+        error: input.error ?? null,
+        rawPayload: input.rawPayload,
+      })
+      .where(eq(schema.integrationSyncRun.id, input.syncRunId))
+      .returning();
+
+    if (!syncRun) {
+      throw new Error("Integration sync run was not updated");
+    }
+
+    return mapIntegrationSyncRun(syncRun);
+  }
+
+  async markIntegrationConnectionSynced(input: {
+    connectionId: string;
+    syncedAt: Date;
+    status: IntegrationConnection["status"];
+    lastError?: string | null;
+  }): Promise<IntegrationConnection> {
+    const [connection] = await this.client
+      .update(schema.integrationConnection)
+      .set({
+        lastSyncAt: input.syncedAt,
+        status: input.status,
+        lastError: input.lastError ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.integrationConnection.id, input.connectionId))
+      .returning();
+
+    if (!connection) {
+      throw new Error("Integration connection was not updated");
+    }
+
+    return mapIntegrationConnection(connection);
+  }
+
+  async disableIntegrationConnection(input: {
+    connectionId: string;
+    disabledAt: Date;
+  }): Promise<IntegrationConnection> {
+    const [connection] = await this.client
+      .update(schema.integrationConnection)
+      .set({
+        status: "disabled",
+        disabledAt: input.disabledAt,
+        updatedAt: input.disabledAt,
+      })
+      .where(eq(schema.integrationConnection.id, input.connectionId))
+      .returning();
+
+    if (!connection) {
+      throw new Error("Integration connection was not updated");
+    }
+
+    return mapIntegrationConnection(connection);
   }
 
   async listDocuments(teamId: string): Promise<BusinessDocument[]> {
@@ -3892,6 +4113,47 @@ function mapProviderSyncRun(syncRun: typeof schema.providerSyncRun.$inferSelect)
     transactionsImported: syncRun.transactionsImported,
     duplicateCount: syncRun.duplicateCount,
     error: syncRun.error,
+  };
+}
+
+function mapIntegrationConnection(
+  connection: typeof schema.integrationConnection.$inferSelect,
+): IntegrationConnection {
+  return {
+    id: connection.id,
+    teamId: connection.teamId,
+    category: connection.category as IntegrationConnection["category"],
+    provider: connection.provider,
+    providerConnectionId: connection.providerConnectionId,
+    displayName: connection.displayName,
+    status: connection.status as IntegrationConnection["status"],
+    capabilities: connection.capabilities,
+    tokenKeyId: connection.tokenKeyId,
+    tokenLastFour: connection.tokenLastFour,
+    lastSyncAt: connection.lastSyncAt?.toISOString() ?? null,
+    lastError: connection.lastError,
+    disabledAt: connection.disabledAt?.toISOString() ?? null,
+    createdByActorId: connection.createdByActorId,
+    createdAt: connection.createdAt.toISOString(),
+    updatedAt: connection.updatedAt.toISOString(),
+  };
+}
+
+function mapIntegrationSyncRun(
+  syncRun: typeof schema.integrationSyncRun.$inferSelect,
+): IntegrationSyncRun {
+  return {
+    id: syncRun.id,
+    teamId: syncRun.teamId,
+    integrationConnectionId: syncRun.integrationConnectionId,
+    category: syncRun.category as IntegrationSyncRun["category"],
+    provider: syncRun.provider,
+    status: syncRun.status as IntegrationSyncRun["status"],
+    startedAt: syncRun.startedAt.toISOString(),
+    completedAt: syncRun.completedAt?.toISOString() ?? null,
+    recordsSynced: syncRun.recordsSynced,
+    error: syncRun.error,
+    rawPayload: syncRun.rawPayload,
   };
 }
 
