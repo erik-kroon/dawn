@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { AppError, exportAccountantPacket } from "./index";
+import {
+  AppError,
+  completeStoredAccountantPacketExport,
+  exportAccountantPacket,
+  requestAccountantPacketExport,
+} from "./index";
 import {
   createReviewRepository,
   createTestCategory,
@@ -261,5 +266,199 @@ describe("exportAccountantPacket", () => {
     expect(second.packetId).toBe(first.packetId);
     expect(repository.auditEvents).toHaveLength(1);
     expect(repository.outboxEvents).toHaveLength(1);
+  });
+
+  test("queues stored accountant packet exports idempotently", async () => {
+    const repository = createReviewRepository("member");
+    repository.transactions.set(
+      "txn_1",
+      createTestTransaction({
+        id: "txn_1",
+        categoryId: "cat_1",
+        reviewState: "reviewed",
+      }),
+    );
+    repository.packetAttachments.push({
+      transactionId: "txn_1",
+      documentId: "doc_1",
+      inboxItemId: "inbox_1",
+      versionId: "ver_1",
+      objectKey: "receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 12,
+      title: "Receipt",
+    });
+
+    const first = await requestAccountantPacketExport(
+      repository,
+      { actor: testActor, requestId: "request_1" },
+      {
+        teamId: "team_1",
+        from: "2026-06-01T00:00:00.000Z",
+        to: "2026-06-30T23:59:59.999Z",
+        transactionIds: ["txn_1"],
+        formats: ["csv", "xlsx"],
+        csvDelimiter: ";",
+        idempotencyKey: "stored_packet_1",
+      },
+    );
+    const replay = await requestAccountantPacketExport(
+      repository,
+      { actor: testActor, requestId: "request_2" },
+      {
+        teamId: "team_1",
+        from: "2026-06-01T00:00:00.000Z",
+        to: "2026-06-30T23:59:59.999Z",
+        transactionIds: ["txn_1"],
+        formats: ["csv", "xlsx"],
+        csvDelimiter: ";",
+        idempotencyKey: "stored_packet_1",
+      },
+    );
+
+    expect(first.workflow).toMatchObject({
+      type: "accountant_packet_export",
+      status: "queued",
+    });
+    expect(replay.replayed).toBe(true);
+    expect(repository.auditEvents).toMatchObject([
+      { action: "accountant_packet.export_requested" },
+    ]);
+    expect(repository.outboxEvents).toMatchObject([
+      {
+        type: "accountant_packet.export_requested",
+        payload: {
+          actorId: "user_1",
+          from: "2026-06-01T00:00:00.000Z",
+          to: "2026-06-30T23:59:59.999Z",
+          transactionIds: ["txn_1"],
+          formats: ["csv", "xlsx"],
+          csvDelimiter: ";",
+        },
+      },
+    ]);
+  });
+
+  test("stores queued accountant packet archives before marking transactions exported", async () => {
+    const repository = createReviewRepository("member");
+    repository.transactions.set(
+      "txn_1",
+      createTestTransaction({
+        id: "txn_1",
+        categoryId: "cat_1",
+        reviewState: "reviewed",
+      }),
+    );
+    repository.packetAttachments.push({
+      transactionId: "txn_1",
+      documentId: "doc_1",
+      inboxItemId: "inbox_1",
+      versionId: "ver_1",
+      objectKey: "receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 12,
+      title: "Receipt",
+    });
+    const storedObjects = new Map<
+      string,
+      { body: ArrayBuffer; contentType: string; byteSize: number }
+    >();
+    let writeCount = 0;
+    const storage = {
+      async put(input: { objectKey: string; body: ArrayBuffer; contentType: string }) {
+        writeCount += 1;
+        storedObjects.set(input.objectKey, {
+          body: input.body,
+          contentType: input.contentType,
+          byteSize: input.body.byteLength,
+        });
+      },
+    };
+    const command = {
+      teamId: "team_1",
+      actorId: "user_1",
+      from: "2026-06-01T00:00:00.000Z",
+      to: "2026-06-30T23:59:59.999Z",
+      transactionIds: ["txn_1"],
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "accountant-packet:export:outbox_1",
+      generatedAt: "2026-06-15T12:00:00.000Z",
+    };
+
+    const first = await completeStoredAccountantPacketExport(repository, storage, command, {
+      async readAttachment(attachment) {
+        return {
+          body: new TextEncoder().encode(`stored ${attachment.fileName}`),
+          contentType: attachment.contentType,
+        };
+      },
+    });
+    const replay = await completeStoredAccountantPacketExport(repository, storage, command);
+
+    expect(first.objectKey).toBe(`teams/team_1/accountant-packets/${first.packetId}.zip`);
+    expect(storedObjects.get(first.objectKey)?.contentType).toBe("application/zip");
+    expect(
+      Buffer.from(storedObjects.get(first.objectKey)?.body ?? new ArrayBuffer(0)).toString(),
+    ).toContain("stored receipt.pdf");
+    expect(replay.replayed).toBe(true);
+    expect(writeCount).toBe(1);
+    expect(repository.transactions.get("txn_1")?.accountantStatus).toBe("exported");
+    expect(repository.auditEvents).toMatchObject([{ action: "accountant_packet.exported" }]);
+    expect(repository.outboxEvents).toMatchObject([
+      {
+        type: "accountant_packet.exported",
+        payload: {
+          packetId: first.packetId,
+          objectKey: first.objectKey,
+          byteSize: first.byteSize,
+        },
+      },
+    ]);
+  });
+
+  test("does not mark transactions exported when stored packet upload fails", async () => {
+    const repository = createReviewRepository("member");
+    repository.transactions.set(
+      "txn_1",
+      createTestTransaction({
+        id: "txn_1",
+        categoryId: "cat_1",
+        reviewState: "reviewed",
+      }),
+    );
+    repository.packetAttachments.push({
+      transactionId: "txn_1",
+      documentId: "doc_1",
+      inboxItemId: "inbox_1",
+      versionId: "ver_1",
+      objectKey: "receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 12,
+      title: "Receipt",
+    });
+    const storage = {
+      async put() {
+        throw new Error("R2 unavailable");
+      },
+    };
+
+    await expect(
+      completeStoredAccountantPacketExport(repository, storage, {
+        teamId: "team_1",
+        actorId: "user_1",
+        from: "2026-06-01T00:00:00.000Z",
+        to: "2026-06-30T23:59:59.999Z",
+        transactionIds: ["txn_1"],
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "accountant-packet:export:outbox_1",
+      }),
+    ).rejects.toThrow("R2 unavailable");
+
+    expect(repository.transactions.get("txn_1")?.accountantStatus).not.toBe("exported");
+    expect(repository.auditEvents).toHaveLength(0);
+    expect(repository.outboxEvents).toHaveLength(0);
   });
 });

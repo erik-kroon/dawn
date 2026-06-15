@@ -92,6 +92,68 @@ describe("transactionReview.exportPacket router", () => {
     expect(zipText).toContain("manifest.json");
   });
 
+  test("queues stored accountant packet exports through the router", async () => {
+    process.env.DATABASE_URL ??= "postgres://test";
+    process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";
+    process.env.BETTER_AUTH_URL ??= "http://localhost:3000";
+    process.env.POLAR_ACCESS_TOKEN ??= "test";
+    process.env.POLAR_SUCCESS_URL ??= "http://localhost:3001/success";
+    process.env.CORS_ORIGIN ??= "http://localhost:3001";
+
+    const repository = createReviewRepository("member");
+    repository.transactions.set(
+      "txn_1",
+      createTestTransaction({
+        id: "txn_1",
+        postedAt: "2026-06-14T00:00:00.000Z",
+        categoryId: "cat_1",
+        reviewState: "reviewed",
+      }),
+    );
+    repository.packetAttachments.push({
+      transactionId: "txn_1",
+      documentId: "doc_1",
+      inboxItemId: "inbox_1",
+      versionId: "ver_1",
+      objectKey: "receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 12,
+      title: "Receipt",
+    });
+    const { createAppRouter } = await import("./routers/index");
+    const router = createAppRouter({
+      dawnRepository: repository as unknown as DawnRepository,
+      bankingProviders: [],
+      integrationProviders: [],
+      emailInboxConnectors: [],
+      documentUrlSigner,
+      invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
+      invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
+    });
+
+    const result = await call(
+      router.transactionReview.requestPacketExport,
+      {
+        teamId: "team_1",
+        from: "2026-06-01T00:00:00.000Z",
+        to: "2026-06-30T23:59:59.999Z",
+        transactionIds: ["txn_1"],
+        formats: ["csv"],
+        idempotencyKey: "packet_request_1",
+      },
+      {
+        context: createApiTestContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(result.workflow).toMatchObject({
+      type: "accountant_packet_export",
+      status: "queued",
+    });
+    expect(repository.outboxEvents).toMatchObject([{ type: "accountant_packet.export_requested" }]);
+  });
+
   test("updates accountant lifecycle status through the router", async () => {
     process.env.DATABASE_URL ??= "postgres://test";
     process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";

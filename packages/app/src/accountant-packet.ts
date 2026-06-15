@@ -100,6 +100,40 @@ export type ExportAccountantPacketResult = {
   replayed: boolean;
 };
 
+export type RequestAccountantPacketExportResult = {
+  teamId: string;
+  workflow: {
+    type: "accountant_packet_export";
+    status: "queued";
+    description: string;
+    nextStep: string;
+  };
+  requestedAt: string;
+  replayed?: boolean;
+};
+
+export type CompleteStoredAccountantPacketExportCommand = ExportAccountantPacketCommand & {
+  actorId: string;
+  sourceOutboxEventId: string;
+  generatedAt?: string;
+};
+
+export type StoredAccountantPacketExportResult = Omit<
+  ExportAccountantPacketResult,
+  "bodyBase64" | "replayed"
+> & {
+  objectKey: string;
+  replayed?: boolean;
+};
+
+export type AccountantPacketArchiveStorage = {
+  put(input: {
+    objectKey: string;
+    body: ArrayBuffer;
+    contentType: "application/zip";
+  }): Promise<void>;
+};
+
 export interface AccountantPacketRepository extends TransactionReviewRepository {
   listAccountantPacketTransactionRows(input: {
     teamId: string;
@@ -126,6 +160,9 @@ type PacketFile = {
 };
 
 const exportAccountantPacketOperation = "accountant_packet.export";
+const requestAccountantPacketExportOperation = "accountant_packet.export.request";
+const completeStoredAccountantPacketExportOperation = "accountant_packet.export.complete";
+const accountantPacketExportSystemActorId = "system:accountant-packet-export";
 
 export async function exportAccountantPacket(
   repository: AccountantPacketRepository,
@@ -164,72 +201,16 @@ export async function exportAccountantPacket(
       return { ...(replayed.result as ExportAccountantPacketResult), replayed: true };
     }
 
-    const rows = await packetRepository.listAccountantPacketTransactionRows({
-      teamId: command.teamId,
-      from: command.from,
-      to: command.to,
-      transactionIds: normalizedTransactionIds(command.transactionIds),
-    });
-    const exportableRows = rows.filter((row) =>
-      isTransactionReadyForAccountantExport(row.transaction),
-    );
-
-    if (exportableRows.length === 0) {
-      throw new AppError("CONFLICT", "No ready-to-export transactions are available for export");
-    }
-
-    const result = await buildAccountantPacket({
-      teamId: command.teamId,
+    const result = await buildExportableAccountantPacket({
+      repository: packetRepository,
       actorId: context.actor.id,
-      from: command.from,
-      to: command.to,
-      transactionIds: exportableRows.map((row) => row.transaction.id).sort(),
-      settings: normalizeExportSettings(command),
-      rows: exportableRows,
+      command,
       attachmentResolver,
     });
-    await Promise.all(
-      exportableRows.map((row) =>
-        packetRepository.updateTransactionAccountantStatusForTeam({
-          teamId: command.teamId,
-          transactionId: row.transaction.id,
-          accountantStatus: "exported",
-          reason: `Accountant packet ${result.packetId}`,
-        }),
-      ),
-    );
-
-    await packetRepository.appendAuditEvent({
-      teamId: command.teamId,
+    await recordSuccessfulAccountantPacketExport(packetRepository, {
       actorId: context.actor.id,
       requestId: context.requestId,
-      action: "accountant_packet.exported",
-      entityType: "accountant_packet",
-      entityId: result.packetId,
-      metadata: {
-        from: command.from,
-        to: command.to,
-        transactionCount: result.manifest.transactionCount,
-        attachmentCount: result.manifest.attachmentCount,
-        skippedAttachmentCount: result.manifest.skippedAttachmentCount,
-        transactionIds: result.manifest.filters.transactionIds,
-      },
-    });
-
-    await packetRepository.appendOutboxEvent({
-      teamId: command.teamId,
-      actorId: context.actor.id,
-      requestId: context.requestId,
-      type: "accountant_packet.exported",
-      version: 1,
-      payload: {
-        packetId: result.packetId,
-        from: command.from,
-        to: command.to,
-        transactionIds: result.manifest.filters.transactionIds,
-        transactionCount: result.manifest.transactionCount,
-        attachmentCount: result.manifest.attachmentCount,
-      },
+      result,
     });
 
     await packetRepository.saveIdempotencyResult({
@@ -245,6 +226,194 @@ export async function exportAccountantPacket(
   });
 }
 
+export async function requestAccountantPacketExport(
+  repository: AccountantPacketRepository,
+  context: TransactionReviewContext,
+  command: ExportAccountantPacketCommand,
+): Promise<RequestAccountantPacketExportResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const packetRepository = transactionRepository as AccountantPacketRepository;
+
+    assertExportCommand(command);
+
+    await resolveTeamAccess(
+      packetRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.export",
+      "You cannot export accountant packets for this team",
+    );
+
+    const fingerprint = exportAccountantPacketFingerprint(command);
+    const replayed = await packetRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      requestAccountantPacketExportOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different accountant packet export request",
+        );
+      }
+
+      return { ...(replayed.result as RequestAccountantPacketExportResult), replayed: true };
+    }
+
+    const exportableRows = await listExportableAccountantPacketRows(packetRepository, command);
+
+    if (exportableRows.length === 0) {
+      throw new AppError("CONFLICT", "No ready-to-export transactions are available for export");
+    }
+
+    const settings = normalizeExportSettings(command);
+    const transactionIds = exportableRows.map((row) => row.transaction.id).sort();
+    const requestedAt = new Date().toISOString();
+    const result: RequestAccountantPacketExportResult = {
+      teamId: command.teamId,
+      workflow: {
+        type: "accountant_packet_export",
+        status: "queued",
+        description:
+          "Accountant packet export will generate a ZIP archive, store it, and mark included transactions exported only after storage succeeds.",
+        nextStep: `Export request queued ${requestedAt}. Worker delivery will write the packet archive to object storage.`,
+      },
+      requestedAt,
+      replayed: false,
+    };
+
+    await packetRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "accountant_packet.export_requested",
+      entityType: "accountant_packet",
+      entityId: command.idempotencyKey,
+      metadata: {
+        from: normalizeDate(command.from, "from").toISOString(),
+        to: normalizeDate(command.to, "to").toISOString(),
+        transactionIds,
+        formats: settings.formats,
+        csvDelimiter: settings.csvDelimiter,
+        transactionCount: transactionIds.length,
+        requestedAt,
+      },
+    });
+    await packetRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "accountant_packet.export_requested",
+      version: 1,
+      payload: {
+        actorId: context.actor.id,
+        from: normalizeDate(command.from, "from").toISOString(),
+        to: normalizeDate(command.to, "to").toISOString(),
+        transactionIds,
+        formats: settings.formats,
+        csvDelimiter: settings.csvDelimiter,
+        transactionCount: transactionIds.length,
+        requestedAt,
+      },
+    });
+    await packetRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: requestAccountantPacketExportOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function completeStoredAccountantPacketExport(
+  repository: AccountantPacketRepository,
+  storage: AccountantPacketArchiveStorage,
+  command: CompleteStoredAccountantPacketExportCommand,
+  attachmentResolver?: AccountantPacketAttachmentResolver,
+): Promise<StoredAccountantPacketExportResult> {
+  assertExportCommand(command);
+
+  if (!command.actorId.trim()) {
+    throw new AppError("CONFLICT", "Accountant packet export actor is required");
+  }
+
+  if (!command.sourceOutboxEventId.trim()) {
+    throw new AppError("CONFLICT", "Accountant packet export source event is required");
+  }
+
+  const fingerprint = storedAccountantPacketExportFingerprint(command);
+  const replayed = await repository.getIdempotencyResult(
+    command.teamId,
+    accountantPacketExportSystemActorId,
+    completeStoredAccountantPacketExportOperation,
+    command.idempotencyKey,
+  );
+
+  if (replayed) {
+    if (replayed.fingerprint !== fingerprint) {
+      throw new AppError(
+        "CONFLICT",
+        "Idempotency key was already used for a different stored accountant packet export",
+      );
+    }
+
+    return { ...(replayed.result as StoredAccountantPacketExportResult), replayed: true };
+  }
+
+  const packet = await buildExportableAccountantPacket({
+    repository,
+    actorId: command.actorId,
+    command,
+    attachmentResolver,
+    generatedAt: command.generatedAt,
+  });
+  const objectKey = accountantPacketObjectKey(command.teamId, packet.packetId);
+  const body = arrayBufferFromBase64(packet.bodyBase64);
+
+  await storage.put({
+    objectKey,
+    body,
+    contentType: packet.contentType,
+  });
+
+  const result: StoredAccountantPacketExportResult = {
+    packetId: packet.packetId,
+    fileName: packet.fileName,
+    objectKey,
+    contentType: packet.contentType,
+    byteSize: packet.byteSize,
+    manifest: packet.manifest,
+    replayed: false,
+  };
+
+  await repository.withTransaction(async (transactionRepository) => {
+    const packetRepository = transactionRepository as AccountantPacketRepository;
+
+    await recordSuccessfulAccountantPacketExport(packetRepository, {
+      actorId: command.actorId,
+      requestId: command.idempotencyKey,
+      result: packet,
+      objectKey,
+    });
+    await packetRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: accountantPacketExportSystemActorId,
+      operation: completeStoredAccountantPacketExportOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+  });
+
+  return result;
+}
+
 export function exportAccountantPacketFingerprint(command: ExportAccountantPacketCommand) {
   return JSON.stringify({
     teamId: command.teamId,
@@ -252,6 +421,117 @@ export function exportAccountantPacketFingerprint(command: ExportAccountantPacke
     to: normalizeDate(command.to, "to").toISOString(),
     transactionIds: normalizedTransactionIds(command.transactionIds),
     settings: normalizeExportSettings(command),
+  });
+}
+
+function storedAccountantPacketExportFingerprint(
+  command: CompleteStoredAccountantPacketExportCommand,
+) {
+  return JSON.stringify({
+    actorId: command.actorId,
+    sourceOutboxEventId: command.sourceOutboxEventId,
+    export: JSON.parse(exportAccountantPacketFingerprint(command)) as unknown,
+  });
+}
+
+async function listExportableAccountantPacketRows(
+  repository: AccountantPacketRepository,
+  command: ExportAccountantPacketCommand,
+) {
+  const rows = await repository.listAccountantPacketTransactionRows({
+    teamId: command.teamId,
+    from: command.from,
+    to: command.to,
+    transactionIds: normalizedTransactionIds(command.transactionIds),
+  });
+
+  return rows.filter((row) => isTransactionReadyForAccountantExport(row.transaction));
+}
+
+async function buildExportableAccountantPacket(input: {
+  repository: AccountantPacketRepository;
+  actorId: string;
+  command: ExportAccountantPacketCommand;
+  attachmentResolver?: AccountantPacketAttachmentResolver;
+  generatedAt?: string;
+}): Promise<ExportAccountantPacketResult> {
+  const exportableRows = await listExportableAccountantPacketRows(input.repository, input.command);
+
+  if (exportableRows.length === 0) {
+    throw new AppError("CONFLICT", "No ready-to-export transactions are available for export");
+  }
+
+  return buildAccountantPacket({
+    teamId: input.command.teamId,
+    actorId: input.actorId,
+    from: input.command.from,
+    to: input.command.to,
+    transactionIds: exportableRows.map((row) => row.transaction.id).sort(),
+    settings: normalizeExportSettings(input.command),
+    rows: exportableRows,
+    attachmentResolver: input.attachmentResolver,
+    generatedAt: input.generatedAt,
+  });
+}
+
+async function recordSuccessfulAccountantPacketExport(
+  repository: AccountantPacketRepository,
+  input: {
+    actorId: string;
+    requestId: string;
+    result: ExportAccountantPacketResult;
+    objectKey?: string;
+  },
+) {
+  await Promise.all(
+    input.result.manifest.filters.transactionIds.map((transactionId) =>
+      repository.updateTransactionAccountantStatusForTeam({
+        teamId: input.result.manifest.teamId,
+        transactionId,
+        accountantStatus: "exported",
+        reason: `Accountant packet ${input.result.packetId}`,
+      }),
+    ),
+  );
+
+  const storageMetadata = input.objectKey
+    ? { objectKey: input.objectKey, byteSize: input.result.byteSize }
+    : {};
+  const metadata = {
+    from: input.result.manifest.filters.from,
+    to: input.result.manifest.filters.to,
+    transactionCount: input.result.manifest.transactionCount,
+    attachmentCount: input.result.manifest.attachmentCount,
+    skippedAttachmentCount: input.result.manifest.skippedAttachmentCount,
+    transactionIds: input.result.manifest.filters.transactionIds,
+    ...storageMetadata,
+  };
+
+  await repository.appendAuditEvent({
+    teamId: input.result.manifest.teamId,
+    actorId: input.actorId,
+    requestId: input.requestId,
+    action: "accountant_packet.exported",
+    entityType: "accountant_packet",
+    entityId: input.result.packetId,
+    metadata,
+  });
+
+  await repository.appendOutboxEvent({
+    teamId: input.result.manifest.teamId,
+    actorId: input.actorId,
+    requestId: input.requestId,
+    type: "accountant_packet.exported",
+    version: 1,
+    payload: {
+      packetId: input.result.packetId,
+      from: input.result.manifest.filters.from,
+      to: input.result.manifest.filters.to,
+      transactionIds: input.result.manifest.filters.transactionIds,
+      transactionCount: input.result.manifest.transactionCount,
+      attachmentCount: input.result.manifest.attachmentCount,
+      ...storageMetadata,
+    },
   });
 }
 
@@ -264,8 +544,9 @@ async function buildAccountantPacket(input: {
   settings: AccountantPacketManifest["settings"];
   rows: AccountantPacketTransactionRow[];
   attachmentResolver?: AccountantPacketAttachmentResolver;
+  generatedAt?: string;
 }) {
-  const generatedAt = new Date().toISOString();
+  const generatedAt = input.generatedAt ?? new Date().toISOString();
   const packetId = packetIdForExport({
     teamId: input.teamId,
     actorId: input.actorId,
@@ -595,6 +876,16 @@ function manifestFiles(files: PacketFile[]): AccountantPacketManifestFile[] {
 
 function attachmentPath(transaction: Transaction, attachment: AccountantPacketAttachment) {
   return `attachments/${transaction.postedAt.slice(0, 10)}-${safePathSegment(transaction.id)}-${safePathSegment(attachment.fileName)}`;
+}
+
+function accountantPacketObjectKey(teamId: string, packetId: string) {
+  return `teams/${safePathSegment(teamId)}/accountant-packets/${safePathSegment(packetId)}.zip`;
+}
+
+function arrayBufferFromBase64(value: string) {
+  const bytes = Buffer.from(value, "base64");
+
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
 function safePathSegment(value: string) {

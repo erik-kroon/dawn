@@ -31,6 +31,7 @@ import {
   InboxConnector,
 } from "@dawn/integrations";
 
+import { processAccountantPacketExportJob } from "./accountant-packet-export";
 import { processQueuedCsvTransactionImportJob } from "./csv-transaction-import";
 import { processTeamDataExportJob } from "./data-export";
 import { processDocumentExtractionJob } from "./document-extraction";
@@ -246,6 +247,13 @@ export function createDawnWorkerJobHandlers(env: DawnCloudflareBindings): DawnQu
     },
     "team_data.export": async (message) => {
       await processTeamDataExportJob({
+        repository: new DrizzleDawnRepository(),
+        storage: createR2DocumentObjectStorage(env.DAWN_DOCUMENTS),
+        message,
+      });
+    },
+    "accountant_packet.export": async (message) => {
+      await processAccountantPacketExportJob({
         repository: new DrizzleDawnRepository(),
         storage: createR2DocumentObjectStorage(env.DAWN_DOCUMENTS),
         message,

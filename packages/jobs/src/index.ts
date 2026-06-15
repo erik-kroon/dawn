@@ -141,6 +141,19 @@ export const teamDataExportJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const accountantPacketExportJobSchema = z.object({
+  type: z.literal("accountant_packet.export"),
+  teamId: z.string().min(1),
+  actorId: z.string().min(1),
+  from: z.string().min(1),
+  to: z.string().min(1),
+  transactionIds: z.array(z.string().min(1)),
+  formats: z.array(z.enum(["csv", "xlsx"])).optional(),
+  csvDelimiter: z.enum([",", ";", "\t"]).optional(),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const teamDataDeletionJobSchema = z.object({
   type: z.literal("team_data.delete"),
   teamId: z.string().min(1),
@@ -162,6 +175,7 @@ export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   bankSyncJobSchema,
   webhookDeliveryJobSchema,
   teamDataExportJobSchema,
+  accountantPacketExportJobSchema,
   teamDataDeletionJobSchema,
 ]);
 
@@ -178,6 +192,7 @@ export type AutomationRunJob = z.infer<typeof automationRunJobSchema>;
 export type BankSyncJob = z.infer<typeof bankSyncJobSchema>;
 export type WebhookDeliveryJob = z.infer<typeof webhookDeliveryJobSchema>;
 export type TeamDataExportJob = z.infer<typeof teamDataExportJobSchema>;
+export type AccountantPacketExportJob = z.infer<typeof accountantPacketExportJobSchema>;
 export type TeamDataDeletionJob = z.infer<typeof teamDataDeletionJobSchema>;
 export type DawnQueueMessage = z.infer<typeof dawnQueueMessageSchema>;
 export type DawnQueueMessageType = DawnQueueMessage["type"];
@@ -232,6 +247,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const bankSyncJob = createBankSyncJob(event);
   const webhookJob = createWebhookDeliveryJob(event);
   const exportJob = createTeamDataExportJob(event);
+  const accountantPacketExportJob = createAccountantPacketExportJob(event);
   const deletionJob = createTeamDataDeletionJob(event);
 
   return [
@@ -246,6 +262,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
     weeklyInsightJob,
     bankSyncJob,
     exportJob,
+    accountantPacketExportJob,
     deletionJob,
     automationJob,
     webhookJob,
@@ -537,6 +554,52 @@ function createTeamDataExportJob(event: OutboxEventForJob): TeamDataExportJob | 
     format: "json",
     sourceOutboxEventId: event.id,
     idempotencyKey: `team-data:export:${event.id}`,
+  };
+}
+
+function createAccountantPacketExportJob(
+  event: OutboxEventForJob,
+): AccountantPacketExportJob | null {
+  if (event.type !== "accountant_packet.export_requested") {
+    return null;
+  }
+
+  if (
+    typeof event.payload.actorId !== "string" ||
+    typeof event.payload.from !== "string" ||
+    typeof event.payload.to !== "string"
+  ) {
+    return null;
+  }
+
+  const transactionIds = Array.isArray(event.payload.transactionIds)
+    ? event.payload.transactionIds.filter(
+        (transactionId): transactionId is string => typeof transactionId === "string",
+      )
+    : [];
+  const formats = Array.isArray(event.payload.formats)
+    ? event.payload.formats.filter(
+        (format): format is "csv" | "xlsx" => format === "csv" || format === "xlsx",
+      )
+    : undefined;
+  const csvDelimiter =
+    event.payload.csvDelimiter === "," ||
+    event.payload.csvDelimiter === ";" ||
+    event.payload.csvDelimiter === "\t"
+      ? event.payload.csvDelimiter
+      : undefined;
+
+  return {
+    type: "accountant_packet.export",
+    teamId: event.teamId,
+    actorId: event.payload.actorId,
+    from: event.payload.from,
+    to: event.payload.to,
+    transactionIds,
+    formats,
+    csvDelimiter,
+    sourceOutboxEventId: event.id,
+    idempotencyKey: `accountant-packet:export:${event.id}`,
   };
 }
 

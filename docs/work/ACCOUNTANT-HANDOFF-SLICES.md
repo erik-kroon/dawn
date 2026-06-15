@@ -51,7 +51,7 @@ Live Gmail OAuth and email delivery should not block completion of local product
 | 3. CSV Import Wizard Parity Plus                        | Completed   | Added header auto-detection, mapped column selectors, sign inversion, richer preview metadata, duplicate visibility, synchronous commit, queued large-import sessions, R2-backed payload handoff, worker execution, payload cleanup, and operations-page queued feedback.                                    |
 | 4. Gmail Connector Production Readiness                 | Local backend/runtime hardening completed | Gmail config health, scheduled/manual sync locking, skipped-count reporting, and deterministic provider-boundary tests landed. Live OAuth smoke remains blocked on Google credentials and a test mailbox.                                                                                                    |
 | 5. Receipt Matching Parity Plus                         | Completed   | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Browser smoke remains deferred while inbox/transactions UI files are under concurrent coss work.                                                                   |
-| 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, skipped attachment counts, and exported status landed. Signed storage links, email delivery, and queued retry remain open.                                                                                                               |
+| 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, skipped attachment counts, and exported-after-storage status landed. Signed download links, email delivery, and export history remain open.                                                    |
 | 7. Accountant Access And Handoff Audit                  | Partial     | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Export history, revocation, and package access audit remain blocked on signed export storage.                                                                                            |
 | 8. Operational Hardening And Accountant Close Loop      | Partial     | Operations API now returns selected-period accountant close readiness from lifecycle states. Operations UI, representative monthly fixture, and retry affordances remain open.                                                                                                                                |
 
@@ -409,8 +409,9 @@ Match or exceed Midday's file export: ZIP with CSV, optional XLSX, attachments, 
 
 Status: Partially completed on 2026-06-15 for synchronous package format depth:
 CSV/XLSX selection, CSV delimiter, manifest hashes, attachments, skipped
-attachment counts, and exported transaction state. Signed storage links,
-accountant email delivery, and queued export retry remain open.
+attachment counts, exported transaction state, and queued object-storage export
+processing. Signed download links, accountant email delivery, and export
+history remain open.
 
 ## Scope
 
@@ -449,15 +450,22 @@ accountant email delivery, and queued export retry remain open.
 
 ## Verification
 
-- `bun test packages/app/src/accountant-packet.test.ts` passed: 5 tests.
-- `bun test packages/api/src/accountant-packet-router.test.ts` passed: 2 tests.
+- `bun test packages/app/src/accountant-packet.test.ts` passed: 9 tests.
+- `bun test packages/api/src/accountant-packet-router.test.ts` passed: 3 tests.
 - App tests cover package content, idempotency, format settings, manifest hashes,
   skipped attachments, and successful export state transition.
-- Job tests for queued export success/failure/retry remain open.
+- `DATABASE_URL=postgres://test BETTER_AUTH_SECRET=0123456789abcdef0123456789abcdef BETTER_AUTH_URL=http://localhost:3000 CORS_ORIGIN=http://localhost:3001 POLAR_ACCESS_TOKEN=test POLAR_SUCCESS_URL=http://localhost:3001/success bun test packages/app/src/accountant-packet.test.ts packages/api/src/accountant-packet-router.test.ts packages/jobs/src/index.test.ts apps/server/src/worker-runtime.test.ts apps/server/src/accountant-packet-export.test.ts`
+  passed: 37 tests.
+- Queued export tests cover request idempotency, outbox-to-job mapping, worker
+  registration, storage-backed attachment inclusion, archive write, replay, and
+  not marking transactions exported when object storage fails.
 - API/server tests for signed download and email request validation remain open.
 - Browser smoke for export settings modal and download.
 - Open the produced ZIP and verify file names, CSV rows, manifest counts, and attachment presence.
-- `bun run check-types`
+- `bun run check-types` passed.
+- `bunx oxlint` passed.
+- `bunx oxfmt --check packages/app/src/accountant-packet.ts packages/app/src/accountant-packet.test.ts packages/api/src/routers/index.ts packages/api/src/accountant-packet-router.test.ts packages/jobs/src/index.ts packages/jobs/src/index.test.ts apps/server/src/accountant-packet-export.ts apps/server/src/accountant-packet-export.test.ts apps/server/src/worker-runtime.ts apps/server/src/worker-runtime.test.ts`
+  passed.
 
 ## Dependencies
 

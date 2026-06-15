@@ -41,6 +41,7 @@ describe("Dawn worker runtime", () => {
       },
     });
     expect(runtime.health().handlers).toEqual([
+      "accountant_packet.export",
       "automation.run",
       "bank.sync",
       "document.extract",

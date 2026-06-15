@@ -65,6 +65,7 @@ import {
   rejectAssistantAction,
   recordInvoicePayment,
   requestEmailInboxSync,
+  requestAccountantPacketExport,
   reviewTransaction,
   requestTeamDataDeletion,
   requestTeamDataExport,
@@ -893,6 +894,22 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 transactionIds: input.transactionIds ?? [],
               },
               accountantPacketAttachmentResolver,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      requestPacketExport: protectedProcedure
+        .input(exportAccountantPacketInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await requestAccountantPacketExport(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              {
+                ...input,
+                transactionIds: input.transactionIds ?? [],
+              },
             );
           } catch (error) {
             mapAppError(error);

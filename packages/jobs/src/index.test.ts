@@ -593,6 +593,34 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps accountant packet export requests to queued jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "accountant_packet.export_requested",
+        payload: {
+          actorId: "user_1",
+          from: "2026-06-01T00:00:00.000Z",
+          to: "2026-06-30T23:59:59.999Z",
+          transactionIds: ["txn_1"],
+          formats: ["csv", "xlsx"],
+          csvDelimiter: ";",
+        },
+      }),
+    ).toContainEqual({
+      type: "accountant_packet.export",
+      teamId: "team_1",
+      actorId: "user_1",
+      from: "2026-06-01T00:00:00.000Z",
+      to: "2026-06-30T23:59:59.999Z",
+      transactionIds: ["txn_1"],
+      formats: ["csv", "xlsx"],
+      csvDelimiter: ";",
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "accountant-packet:export:outbox_1",
+    });
+  });
+
   test("calculates capped exponential retry delays", () => {
     const now = new Date("2026-06-15T10:00:00.000Z");
 
@@ -619,6 +647,7 @@ describe("job contracts", () => {
       "bank.sync": record("bank.sync"),
       "webhook.deliver": record("webhook.deliver"),
       "team_data.export": record("team_data.export"),
+      "accountant_packet.export": record("accountant_packet.export"),
       "team_data.delete": record("team_data.delete"),
     };
     const registry = createDawnQueueMessageHandlerRegistry(handlers);
