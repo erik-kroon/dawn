@@ -8,6 +8,7 @@ import {
   listAccountantPacketExportHistory,
   requestAccountantPacketExport,
   revokeAccountantPacketExport,
+  sendAccountantPacketEmail,
 } from "./index";
 import {
   createReviewRepository,
@@ -584,6 +585,135 @@ describe("exportAccountantPacket", () => {
     );
 
     expect(history.packets.map((packet) => packet.packetId)).toEqual(["packet_new"]);
+  });
+
+  test("emails stored packet links with optional requester copy", async () => {
+    const repository = createReviewRepository("admin");
+    repository.accountantPacketExports.set("packet_1", {
+      packetId: "packet_1",
+      teamId: "team_1",
+      actorId: "user_1",
+      objectKey: "teams/team_1/accountant-packets/packet_1.zip",
+      fileName: "accountant-packet.zip",
+      contentType: "application/zip",
+      byteSize: 100,
+      status: "available",
+      revokedAt: null,
+      revokedByActorId: null,
+      revokeReason: null,
+      manifest: {
+        packetId: "packet_1",
+        teamId: "team_1",
+        actorId: "user_1",
+        generatedAt: "2026-06-15T12:00:00.000Z",
+        filters: {
+          from: "2026-06-01T00:00:00.000Z",
+          to: "2026-06-30T23:59:59.999Z",
+          transactionIds: ["txn_1"],
+        },
+        settings: { formats: ["csv"], csvDelimiter: "," },
+        transactionCount: 1,
+        attachmentCount: 0,
+        skippedAttachmentCount: 0,
+        currencyTotals: { USD: { amountMinor: -1200, currency: "USD" } },
+        files: [],
+      },
+      createdAt: "2026-06-15T12:00:00.000Z",
+    });
+    const signer = {
+      async createUploadUrl() {
+        throw new Error("upload signing should not be used");
+      },
+      async createDownloadUrl() {
+        return {
+          url: "http://localhost:3000/documents/download/packet_1",
+          expiresAt: "2026-06-15T12:05:00.000Z",
+        };
+      },
+    };
+    const sentMessages: unknown[] = [];
+    const emailProvider = {
+      provider: "mock-email" as const,
+      async sendAccountantPacket(input: unknown) {
+        sentMessages.push(input);
+
+        return {
+          providerMessageId: "email_1",
+          acceptedAt: "2026-06-15T12:01:00.000Z",
+        };
+      },
+    };
+    const actor = { id: "user_1", type: "user", email: "Owner@Example.com" } as const;
+
+    const result = await sendAccountantPacketEmail(
+      repository,
+      signer,
+      emailProvider,
+      { actor, requestId: "request_1", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        packetId: "packet_1",
+        toEmail: "Accountant@Example.com",
+        subject: "June packet",
+        copyRequester: true,
+        idempotencyKey: "email_packet_1",
+      },
+    );
+    const auditCount = repository.auditEvents.length;
+    const replay = await sendAccountantPacketEmail(
+      repository,
+      signer,
+      emailProvider,
+      { actor, requestId: "request_2", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        packetId: "packet_1",
+        toEmail: "Accountant@Example.com",
+        subject: "June packet",
+        copyRequester: true,
+        idempotencyKey: "email_packet_1",
+      },
+    );
+
+    expect(sentMessages).toEqual([
+      expect.objectContaining({
+        to: "accountant@example.com",
+        cc: ["owner@example.com"],
+        subject: "June packet",
+        downloadUrl: "http://localhost:3000/documents/download/packet_1",
+      }),
+    ]);
+    expect(result).toMatchObject({
+      providerMessageId: "email_1",
+      toEmail: "accountant@example.com",
+      copiedRequesterEmail: "owner@example.com",
+      downloadExpiresAt: "2026-06-15T12:05:00.000Z",
+    });
+    expect(replay.replayed).toBe(true);
+    expect(sentMessages).toHaveLength(1);
+    expect(repository.auditEvents).toHaveLength(auditCount);
+    expect(repository.auditEvents).toMatchObject([
+      { action: "accountant_packet.download_link_created" },
+      {
+        action: "accountant_packet.email_sent",
+        metadata: {
+          toEmail: "accountant@example.com",
+          copiedRequesterEmail: "owner@example.com",
+          providerMessageId: "email_1",
+        },
+      },
+    ]);
+    expect(repository.outboxEvents).toMatchObject([
+      {
+        type: "accountant_packet.email_sent",
+        payload: {
+          packetId: "packet_1",
+          toEmail: "accountant@example.com",
+          copiedRequesterEmail: "owner@example.com",
+          providerMessageId: "email_1",
+        },
+      },
+    ]);
   });
 
   test("revokes stored packet links and blocks new download links", async () => {

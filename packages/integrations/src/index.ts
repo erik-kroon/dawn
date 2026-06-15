@@ -107,14 +107,33 @@ export type InvoiceEmailMessage = {
   attachment: InvoiceEmailAttachment;
 };
 
-export type InvoiceEmailDeliveryResult = {
+export type EmailDeliveryResult = {
   providerMessageId: string;
   acceptedAt: string;
 };
 
+export type InvoiceEmailDeliveryResult = EmailDeliveryResult;
+
 export type InvoiceEmailDeliveryProvider = {
   provider: "mock-email";
   sendInvoice(input: InvoiceEmailMessage): Promise<InvoiceEmailDeliveryResult>;
+};
+
+export type AccountantPacketEmailMessage = {
+  teamId: string;
+  packetId: string;
+  to: string;
+  cc?: readonly string[];
+  subject: string;
+  text: string;
+  downloadUrl: string;
+  downloadExpiresAt: string;
+  fileName: string;
+};
+
+export type AccountantPacketEmailDeliveryProvider = {
+  provider: "mock-email";
+  sendAccountantPacket(input: AccountantPacketEmailMessage): Promise<EmailDeliveryResult>;
 };
 
 export type IntegrationCategory = "accounting" | "payments" | "messaging" | "email";
@@ -529,12 +548,19 @@ export function sandboxBankingWebhookSignature(input: { body: string; secret: st
   return createHmac("sha256", input.secret).update(input.body).digest("hex");
 }
 
-export function createMockInvoiceEmailDeliveryProvider(): InvoiceEmailDeliveryProvider {
+export function createMockInvoiceEmailDeliveryProvider(): InvoiceEmailDeliveryProvider &
+  AccountantPacketEmailDeliveryProvider {
   return {
     provider: "mock-email",
     async sendInvoice(input) {
       return {
         providerMessageId: `mock_email_${input.teamId}_${input.invoiceId}`,
+        acceptedAt: "2026-06-15T12:00:00.000Z",
+      };
+    },
+    async sendAccountantPacket(input) {
+      return {
+        providerMessageId: `mock_email_${input.teamId}_${input.packetId}`,
         acceptedAt: "2026-06-15T12:00:00.000Z",
       };
     },

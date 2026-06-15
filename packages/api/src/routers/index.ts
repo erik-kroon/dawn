@@ -70,6 +70,7 @@ import {
   requestAccountantPacketExport,
   reviewTransaction,
   revokeAccountantPacketExport,
+  sendAccountantPacketEmail,
   requestTeamDataDeletion,
   requestTeamDataExport,
   grantOAuthConsent,
@@ -106,6 +107,7 @@ import {
   createGmailEmailInboxProvider,
   createMockEmailInboxProvider,
   InboxConnector,
+  type AccountantPacketEmailDeliveryProvider,
   type BankingProvider,
   type EmailInboxProviderName,
   type IntegrationProvider,
@@ -125,6 +127,7 @@ export type AppRouterDependencies = {
   emailInboxConnectors: readonly InboxConnector[];
   documentUrlSigner: DocumentUrlSigner;
   accountantPacketAttachmentResolver?: AccountantPacketAttachmentResolver;
+  accountantPacketEmailDeliveryProvider?: AccountantPacketEmailDeliveryProvider;
   transactionImportPayloadStorage?: TransactionImportPayloadStorage;
   invoicePdfRenderer: InvoicePdfRenderer;
   invoiceEmailDeliveryProvider: InvoiceEmailDeliveryProvider;
@@ -161,6 +164,16 @@ const revokeAccountantPacketExportInput = z.object({
   teamId: z.string().min(1),
   packetId: z.string().min(1),
   reason: z.string().trim().max(500).nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const sendAccountantPacketEmailInput = z.object({
+  teamId: z.string().min(1),
+  packetId: z.string().min(1),
+  toEmail: z.email(),
+  subject: z.string().trim().max(200).nullable().optional(),
+  message: z.string().trim().max(2_000).nullable().optional(),
+  copyRequester: z.boolean().optional(),
   idempotencyKey: z.string().min(1),
 });
 
@@ -806,6 +819,7 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     invoicePdfRenderer,
     dawnRepository,
     accountantPacketAttachmentResolver,
+    accountantPacketEmailDeliveryProvider = createMockInvoiceEmailDeliveryProvider(),
     transactionImportPayloadStorage,
   } = dependencies;
   const bankingProviderRegistry = createBankingProviderRegistry(bankingProviders);
@@ -968,6 +982,21 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
           try {
             return await revokeAccountantPacketExport(
               dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      sendPacketEmail: protectedProcedure
+        .input(sendAccountantPacketEmailInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await sendAccountantPacketEmail(
+              dawnRepository,
+              documentUrlSigner,
+              accountantPacketEmailDeliveryProvider,
               appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );

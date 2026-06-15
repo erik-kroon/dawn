@@ -10,6 +10,7 @@ import type {
   Category,
 } from "@dawn/domain";
 import { isTransactionReadyForAccountantExport } from "@dawn/domain";
+import type { AccountantPacketEmailDeliveryProvider } from "@dawn/integrations";
 
 import {
   AppError,
@@ -154,10 +155,31 @@ export type RevokeAccountantPacketExportCommand = {
   idempotencyKey: string;
 };
 
+export type SendAccountantPacketEmailCommand = {
+  teamId: string;
+  packetId: string;
+  toEmail: string;
+  subject?: string | null;
+  message?: string | null;
+  copyRequester?: boolean;
+  idempotencyKey: string;
+};
+
 export type CreateAccountantPacketDownloadResult = {
   packet: AccountantPacketExportRecord;
   downloadUrl: string;
   downloadExpiresAt: string;
+};
+
+export type SendAccountantPacketEmailResult = {
+  packet: AccountantPacketExportRecord;
+  providerMessageId: string;
+  acceptedAt: string;
+  downloadUrl: string;
+  downloadExpiresAt: string;
+  toEmail: string;
+  copiedRequesterEmail: string | null;
+  replayed?: boolean;
 };
 
 export type RevokeAccountantPacketExportResult = {
@@ -225,6 +247,7 @@ const exportAccountantPacketOperation = "accountant_packet.export";
 const requestAccountantPacketExportOperation = "accountant_packet.export.request";
 const completeStoredAccountantPacketExportOperation = "accountant_packet.export.complete";
 const revokeAccountantPacketExportOperation = "accountant_packet.export.revoke";
+const sendAccountantPacketEmailOperation = "accountant_packet.email.send";
 const accountantPacketExportSystemActorId = "system:accountant-packet-export";
 
 export async function exportAccountantPacket(
@@ -537,6 +560,139 @@ export async function createAccountantPacketDownload(
     downloadUrl: download.url,
     downloadExpiresAt: download.expiresAt,
   };
+}
+
+export async function sendAccountantPacketEmail(
+  repository: AccountantPacketRepository,
+  signer: DocumentUrlSigner,
+  emailProvider: AccountantPacketEmailDeliveryProvider,
+  context: TransactionReviewContext,
+  command: SendAccountantPacketEmailCommand,
+): Promise<SendAccountantPacketEmailResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const packetRepository = transactionRepository as AccountantPacketRepository;
+
+    await resolveTeamAccess(
+      packetRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.export",
+      "You cannot email accountant packets for this team",
+    );
+
+    if (!command.idempotencyKey.trim()) {
+      throw new AppError("CONFLICT", "Packet email idempotency key is required");
+    }
+
+    const toEmail = normalizeRequiredEmail(
+      command.toEmail,
+      "Accountant packet email requires a recipient email",
+    );
+    const copiedRequesterEmail = command.copyRequester
+      ? normalizeOptionalEmail(context.actor.email)
+      : null;
+
+    if (command.copyRequester && !copiedRequesterEmail) {
+      throw new AppError("CONFLICT", "Copying the requester requires an actor email");
+    }
+
+    const subject = command.subject?.trim() || "Accountant packet is ready";
+    const message = command.message?.trim() || null;
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      packetId: command.packetId,
+      toEmail,
+      subject,
+      message,
+      copiedRequesterEmail,
+    });
+    const replayed = await packetRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      sendAccountantPacketEmailOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different packet email",
+        );
+      }
+
+      return { ...(replayed.result as SendAccountantPacketEmailResult), replayed: true };
+    }
+
+    const download = await createAccountantPacketDownload(
+      packetRepository,
+      signer,
+      context,
+      command,
+    );
+    const emailText =
+      message ??
+      `Download ${download.packet.fileName} before ${download.downloadExpiresAt}: ${download.downloadUrl}`;
+    const delivery = await emailProvider.sendAccountantPacket({
+      teamId: command.teamId,
+      packetId: command.packetId,
+      to: toEmail,
+      cc: copiedRequesterEmail ? [copiedRequesterEmail] : [],
+      subject,
+      text: emailText,
+      downloadUrl: download.downloadUrl,
+      downloadExpiresAt: download.downloadExpiresAt,
+      fileName: download.packet.fileName,
+    });
+    const result: SendAccountantPacketEmailResult = {
+      packet: download.packet,
+      providerMessageId: delivery.providerMessageId,
+      acceptedAt: delivery.acceptedAt,
+      downloadUrl: download.downloadUrl,
+      downloadExpiresAt: download.downloadExpiresAt,
+      toEmail,
+      copiedRequesterEmail,
+      replayed: false,
+    };
+
+    await packetRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "accountant_packet.email_sent",
+      entityType: "accountant_packet",
+      entityId: command.packetId,
+      metadata: {
+        toEmail,
+        copiedRequesterEmail,
+        provider: emailProvider.provider,
+        providerMessageId: delivery.providerMessageId,
+        downloadExpiresAt: download.downloadExpiresAt,
+      },
+    });
+    await packetRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "accountant_packet.email_sent",
+      version: 1,
+      payload: {
+        packetId: command.packetId,
+        toEmail,
+        copiedRequesterEmail,
+        providerMessageId: delivery.providerMessageId,
+      },
+    });
+    await packetRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: sendAccountantPacketEmailOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
 }
 
 export async function assertAccountantPacketDownloadAvailable(
@@ -926,6 +1082,30 @@ function normalizePacketHistoryLimit(limit?: number) {
 
 function normalizeOptionalReason(reason: string | null | undefined) {
   return reason?.trim() || null;
+}
+
+function normalizeRequiredEmail(email: string | null | undefined, message: string) {
+  const normalized = normalizeOptionalEmail(email);
+
+  if (!normalized) {
+    throw new AppError("CONFLICT", message);
+  }
+
+  return normalized;
+}
+
+function normalizeOptionalEmail(email: string | null | undefined) {
+  const normalized = email?.trim().toLowerCase() || null;
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    throw new AppError("CONFLICT", "Email is invalid");
+  }
+
+  return normalized;
 }
 
 function normalizeExportSettings(command: ExportAccountantPacketCommand) {

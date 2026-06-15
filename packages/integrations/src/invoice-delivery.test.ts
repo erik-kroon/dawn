@@ -24,4 +24,25 @@ describe("invoice email delivery provider", () => {
       acceptedAt: "2026-06-15T12:00:00.000Z",
     });
   });
+
+  test("accepts accountant packet link messages", async () => {
+    const provider = createMockInvoiceEmailDeliveryProvider();
+
+    const result = await provider.sendAccountantPacket({
+      teamId: "team_1",
+      packetId: "packet_1",
+      to: "accountant@acme.test",
+      cc: ["owner@acme.test"],
+      subject: "Accountant packet",
+      text: "Download the packet.",
+      downloadUrl: "https://app.example.com/documents/download/token",
+      downloadExpiresAt: "2026-06-15T12:05:00.000Z",
+      fileName: "accountant-packet.zip",
+    });
+
+    expect(result).toEqual({
+      providerMessageId: "mock_email_team_1_packet_1",
+      acceptedAt: "2026-06-15T12:00:00.000Z",
+    });
+  });
 });
