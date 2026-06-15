@@ -19,6 +19,7 @@ import {
   createCustomer,
   createDocumentDownload,
   createDocumentUpload,
+  createAccountantPacketDownload,
   createAutomationRule,
   createDraftInvoice,
   createLedgerTransaction,
@@ -142,6 +143,11 @@ const exportAccountantPacketInput = z.object({
   formats: z.array(z.enum(["csv", "xlsx"])).optional(),
   csvDelimiter: z.enum([",", ";", "\t"]).optional(),
   idempotencyKey: z.string().min(1),
+});
+
+const createAccountantPacketDownloadInput = z.object({
+  teamId: z.string().min(1),
+  packetId: z.string().min(1),
 });
 
 const updateTransactionAccountantStatusInput = z.object({
@@ -910,6 +916,20 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 ...input,
                 transactionIds: input.transactionIds ?? [],
               },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createPacketDownload: protectedProcedure
+        .input(createAccountantPacketDownloadInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createAccountantPacketDownload(
+              dawnRepository,
+              documentUrlSigner,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
             );
           } catch (error) {
             mapAppError(error);

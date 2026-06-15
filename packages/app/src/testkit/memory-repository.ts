@@ -16,6 +16,7 @@ import { deriveTransactionAccountantStatus } from "@dawn/domain";
 
 import type {
   AccountantPacketAttachment,
+  AccountantPacketExportRecord,
   AccountantPacketTransactionRow,
   IdempotencyResult,
   LedgerRepository,
@@ -32,6 +33,7 @@ export class MemoryAppRepository implements LedgerRepository {
   memberships = new Map<string, TeamRole>();
   outboxEvents: unknown[] = [];
   importSessions: TransactionImportSession[] = [];
+  accountantPacketExports = new Map<string, AccountantPacketExportRecord>();
   packetAttachments: AccountantPacketAttachment[] = [];
   tagAssignments: { transactionId: string; tagId: string }[] = [];
   tags = new Map<string, TransactionTag>();
@@ -46,6 +48,7 @@ export class MemoryAppRepository implements LedgerRepository {
     this.memberships.clear();
     this.outboxEvents.length = 0;
     this.importSessions.length = 0;
+    this.accountantPacketExports.clear();
     this.packetAttachments.length = 0;
     this.tagAssignments.length = 0;
     this.tags.clear();
@@ -112,6 +115,25 @@ export class MemoryAppRepository implements LedgerRepository {
 
   async listTransactionTags(teamId: string) {
     return [...this.tags.values()].filter((tag) => tag.teamId === teamId);
+  }
+
+  async createAccountantPacketExportRecord(input: AccountantPacketExportRecord) {
+    this.accountantPacketExports.set(input.packetId, input);
+
+    return input;
+  }
+
+  async getAccountantPacketExportForTeam(teamId: string, packetId: string) {
+    const packet = this.accountantPacketExports.get(packetId);
+
+    return packet?.teamId === teamId ? packet : null;
+  }
+
+  async listAccountantPacketExports(teamId: string, limit: number) {
+    return [...this.accountantPacketExports.values()]
+      .filter((packet) => packet.teamId === teamId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, limit);
   }
 
   async getCounterpartyForTeam(teamId: string, counterpartyId: string) {

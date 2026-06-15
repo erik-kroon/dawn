@@ -1,4 +1,6 @@
 import type {
+  AccountantPacketExportRecord,
+  AccountantPacketManifest,
   ActorTeam,
   AccountantPacketTransactionRow,
   AuditLogEntry,
@@ -3513,6 +3515,68 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     );
   }
 
+  async createAccountantPacketExportRecord(
+    input: AccountantPacketExportRecord,
+  ): Promise<AccountantPacketExportRecord> {
+    const [record] = await this.client
+      .insert(schema.accountantPacketExport)
+      .values({
+        id: input.packetId,
+        teamId: input.teamId,
+        actorId: input.actorId,
+        objectKey: input.objectKey,
+        fileName: input.fileName,
+        contentType: input.contentType,
+        byteSize: input.byteSize,
+        manifest: input.manifest,
+        createdAt: new Date(input.createdAt),
+      })
+      .onConflictDoUpdate({
+        target: schema.accountantPacketExport.id,
+        set: {
+          actorId: input.actorId,
+          objectKey: input.objectKey,
+          fileName: input.fileName,
+          contentType: input.contentType,
+          byteSize: input.byteSize,
+          manifest: input.manifest,
+        },
+      })
+      .returning();
+
+    if (!record) {
+      throw new Error("Accountant packet export record was not created");
+    }
+
+    return mapAccountantPacketExportRecord(record);
+  }
+
+  async getAccountantPacketExportForTeam(teamId: string, packetId: string) {
+    const [record] = await this.client
+      .select()
+      .from(schema.accountantPacketExport)
+      .where(
+        and(
+          eq(schema.accountantPacketExport.teamId, teamId),
+          eq(schema.accountantPacketExport.id, packetId),
+        ),
+      )
+      .limit(1);
+
+    return record ? mapAccountantPacketExportRecord(record) : null;
+  }
+
+  async listAccountantPacketExports(teamId: string, limit: number) {
+    const records = await this.client
+      .select()
+      .from(schema.accountantPacketExport)
+      .where(eq(schema.accountantPacketExport.teamId, teamId))
+      .orderBy(desc(schema.accountantPacketExport.createdAt))
+      .limit(limit);
+
+    return records.map(mapAccountantPacketExportRecord);
+  }
+
   async listAccountantPacketTransactionRows(input: {
     teamId: string;
     from: string;
@@ -4959,6 +5023,24 @@ function mapTransaction(
       transaction: base,
       acceptedAttachmentCount,
     }),
+  };
+}
+
+function mapAccountantPacketExportRecord(
+  record: typeof schema.accountantPacketExport.$inferSelect,
+): AccountantPacketExportRecord {
+  const manifest = record.manifest as AccountantPacketManifest;
+
+  return {
+    packetId: record.id,
+    teamId: record.teamId,
+    actorId: record.actorId,
+    objectKey: record.objectKey,
+    fileName: record.fileName,
+    contentType: record.contentType as "application/zip",
+    byteSize: record.byteSize,
+    manifest,
+    createdAt: record.createdAt.toISOString(),
   };
 }
 

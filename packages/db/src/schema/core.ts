@@ -563,6 +563,27 @@ export const documentVersion = pgTable(
   ],
 );
 
+export const accountantPacketExport = pgTable(
+  "accountant_packet_export",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    actorId: text("actor_id").notNull(),
+    objectKey: text("object_key").notNull(),
+    fileName: text("file_name").notNull(),
+    contentType: text("content_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    manifest: jsonb("manifest").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("accountant_packet_export_object_key_idx").on(table.objectKey),
+    index("accountant_packet_export_team_created_idx").on(table.teamId, table.createdAt),
+  ],
+);
+
 export const inboxSource = pgTable(
   "inbox_source",
   {

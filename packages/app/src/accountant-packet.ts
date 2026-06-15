@@ -17,6 +17,7 @@ import {
   type TransactionReviewContext,
   type TransactionReviewRepository,
 } from "./index";
+import type { DocumentUrlSigner } from "./documents-inbox";
 
 export type AccountantPacketAttachment = {
   transactionId: string;
@@ -126,6 +127,23 @@ export type StoredAccountantPacketExportResult = Omit<
   replayed?: boolean;
 };
 
+export type AccountantPacketExportRecord = Omit<StoredAccountantPacketExportResult, "replayed"> & {
+  teamId: string;
+  actorId: string;
+  createdAt: string;
+};
+
+export type CreateAccountantPacketDownloadCommand = {
+  teamId: string;
+  packetId: string;
+};
+
+export type CreateAccountantPacketDownloadResult = {
+  packet: AccountantPacketExportRecord;
+  downloadUrl: string;
+  downloadExpiresAt: string;
+};
+
 export type AccountantPacketArchiveStorage = {
   put(input: {
     objectKey: string;
@@ -147,6 +165,17 @@ export interface AccountantPacketRepository extends TransactionReviewRepository 
     accountantStatus: TransactionAccountantStatus;
     reason?: string | null;
   }): Promise<Transaction>;
+  createAccountantPacketExportRecord(
+    input: AccountantPacketExportRecord,
+  ): Promise<AccountantPacketExportRecord>;
+  getAccountantPacketExportForTeam(
+    teamId: string,
+    packetId: string,
+  ): Promise<AccountantPacketExportRecord | null>;
+  listAccountantPacketExports(
+    teamId: string,
+    limit: number,
+  ): Promise<AccountantPacketExportRecord[]>;
 }
 
 type PacketFile = {
@@ -395,6 +424,17 @@ export async function completeStoredAccountantPacketExport(
   await repository.withTransaction(async (transactionRepository) => {
     const packetRepository = transactionRepository as AccountantPacketRepository;
 
+    await packetRepository.createAccountantPacketExportRecord({
+      packetId: result.packetId,
+      teamId: command.teamId,
+      actorId: command.actorId,
+      objectKey: result.objectKey,
+      fileName: result.fileName,
+      contentType: result.contentType,
+      byteSize: result.byteSize,
+      manifest: result.manifest,
+      createdAt: result.manifest.generatedAt,
+    });
     await recordSuccessfulAccountantPacketExport(packetRepository, {
       actorId: command.actorId,
       requestId: command.idempotencyKey,
@@ -412,6 +452,57 @@ export async function completeStoredAccountantPacketExport(
   });
 
   return result;
+}
+
+export async function createAccountantPacketDownload(
+  repository: AccountantPacketRepository,
+  signer: DocumentUrlSigner,
+  context: TransactionReviewContext,
+  command: CreateAccountantPacketDownloadCommand,
+): Promise<CreateAccountantPacketDownloadResult> {
+  await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId },
+    "transactions.export",
+    "You cannot download accountant packets for this team",
+  );
+
+  const packet = await repository.getAccountantPacketExportForTeam(
+    command.teamId,
+    command.packetId,
+  );
+
+  if (!packet) {
+    throw new AppError("NOT_FOUND", "Accountant packet export not found");
+  }
+
+  const download = await signer.createDownloadUrl({
+    teamId: command.teamId,
+    documentId: packet.packetId,
+    versionId: packet.packetId,
+    objectKey: packet.objectKey,
+    fileName: packet.fileName,
+    contentType: packet.contentType,
+  });
+
+  await repository.appendAuditEvent({
+    teamId: command.teamId,
+    actorId: context.actor.id,
+    requestId: context.requestId,
+    action: "accountant_packet.download_link_created",
+    entityType: "accountant_packet",
+    entityId: packet.packetId,
+    metadata: {
+      objectKey: packet.objectKey,
+      expiresAt: download.expiresAt,
+    },
+  });
+
+  return {
+    packet,
+    downloadUrl: download.url,
+    downloadExpiresAt: download.expiresAt,
+  };
 }
 
 export function exportAccountantPacketFingerprint(command: ExportAccountantPacketCommand) {

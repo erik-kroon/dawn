@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   AppError,
   completeStoredAccountantPacketExport,
+  createAccountantPacketDownload,
   exportAccountantPacket,
   requestAccountantPacketExport,
 } from "./index";
@@ -460,5 +461,76 @@ describe("exportAccountantPacket", () => {
     expect(repository.transactions.get("txn_1")?.accountantStatus).not.toBe("exported");
     expect(repository.auditEvents).toHaveLength(0);
     expect(repository.outboxEvents).toHaveLength(0);
+  });
+
+  test("creates signed download links for stored packet exports", async () => {
+    const repository = createReviewRepository("member");
+    repository.transactions.set(
+      "txn_1",
+      createTestTransaction({
+        id: "txn_1",
+        categoryId: "cat_1",
+        reviewState: "reviewed",
+      }),
+    );
+    repository.packetAttachments.push({
+      transactionId: "txn_1",
+      documentId: "doc_1",
+      inboxItemId: "inbox_1",
+      versionId: "ver_1",
+      objectKey: "receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 12,
+      title: "Receipt",
+    });
+    const storage = {
+      async put() {},
+    };
+    const stored = await completeStoredAccountantPacketExport(repository, storage, {
+      teamId: "team_1",
+      actorId: "user_1",
+      from: "2026-06-01T00:00:00.000Z",
+      to: "2026-06-30T23:59:59.999Z",
+      transactionIds: ["txn_1"],
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "accountant-packet:export:outbox_1",
+      generatedAt: "2026-06-15T12:00:00.000Z",
+    });
+    const signer = {
+      async createUploadUrl() {
+        throw new Error("upload signing should not be used");
+      },
+      async createDownloadUrl(input: {
+        objectKey: string;
+        fileName: string;
+        documentId: string;
+        versionId: string;
+      }) {
+        return {
+          url: `http://localhost:3000/documents/download/${input.documentId}/${input.versionId}/${input.objectKey}`,
+          expiresAt: "2026-06-15T12:05:00.000Z",
+        };
+      },
+    };
+
+    const download = await createAccountantPacketDownload(
+      repository,
+      signer,
+      { actor: testActor, requestId: "request_1", teamId: "team_1" },
+      { teamId: "team_1", packetId: stored.packetId },
+    );
+
+    expect(download.downloadUrl).toContain(stored.objectKey);
+    expect(download.downloadExpiresAt).toBe("2026-06-15T12:05:00.000Z");
+    expect(download.packet).toMatchObject({
+      packetId: stored.packetId,
+      objectKey: stored.objectKey,
+      fileName: stored.fileName,
+    });
+    expect(repository.auditEvents.at(-1)).toMatchObject({
+      action: "accountant_packet.download_link_created",
+      entityId: stored.packetId,
+    });
   });
 });

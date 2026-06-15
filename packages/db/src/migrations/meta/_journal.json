@@ -176,6 +176,13 @@
       "when": 1781543644000,
       "tag": "0024_email_inbox_sync_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1781547000000,
+      "tag": "0025_accountant_packet_exports",
+      "breakpoints": true
     }
   ]
 }
