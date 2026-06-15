@@ -1320,6 +1320,88 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return matches.map(mapHardNegativeMatch);
   }
 
+  async listPendingInboxMatchCandidatesForTransaction(input: {
+    teamId: string;
+    transaction: Transaction;
+    limit: number;
+  }): Promise<InboxItem[]> {
+    const rows = await this.client
+      .select({
+        item: schema.inboxItem,
+        source: schema.inboxSource,
+        document: schema.businessDocument,
+        version: schema.documentVersion,
+        extraction: schema.documentExtraction,
+      })
+      .from(schema.inboxItem)
+      .innerJoin(schema.inboxSource, eq(schema.inboxSource.id, schema.inboxItem.sourceId))
+      .innerJoin(
+        schema.businessDocument,
+        eq(schema.businessDocument.id, schema.inboxItem.documentId),
+      )
+      .innerJoin(
+        schema.documentVersion,
+        eq(schema.documentVersion.id, schema.inboxItem.documentVersionId),
+      )
+      .innerJoin(
+        schema.documentExtraction,
+        and(
+          eq(schema.documentExtraction.inboxItemId, schema.inboxItem.id),
+          eq(schema.documentExtraction.status, "completed"),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.inboxItem.teamId, input.teamId),
+          eq(schema.inboxItem.status, "needs_review"),
+          eq(schema.inboxItem.extractionStatus, "completed"),
+          sql`not exists (
+            select 1
+            from ${schema.transactionAttachment}
+            where ${schema.transactionAttachment.teamId} = ${input.teamId}
+              and (
+                ${schema.transactionAttachment.inboxItemId} = ${schema.inboxItem.id}
+                or ${schema.transactionAttachment.documentId} = ${schema.inboxItem.documentId}
+              )
+          )`,
+          sql`not exists (
+            select 1
+            from ${schema.inboxMatchSuggestion}
+            where ${schema.inboxMatchSuggestion.teamId} = ${input.teamId}
+              and ${schema.inboxMatchSuggestion.inboxItemId} = ${schema.inboxItem.id}
+              and ${schema.inboxMatchSuggestion.transactionId} = ${input.transaction.id}
+              and ${schema.inboxMatchSuggestion.status} in ('suggested', 'accepted')
+          )`,
+        ),
+      )
+      .orderBy(desc(schema.inboxItem.updatedAt), desc(schema.documentExtraction.extractionVersion))
+      .limit(input.limit * 3);
+
+    const candidates = new Map<string, InboxItem>();
+
+    for (const row of rows) {
+      if (candidates.has(row.item.id)) {
+        continue;
+      }
+
+      candidates.set(
+        row.item.id,
+        mapInboxItem(row.item, {
+          source: row.source,
+          document: row.document,
+          version: row.version,
+          latestExtraction: row.extraction,
+        }),
+      );
+
+      if (candidates.size >= input.limit) {
+        break;
+      }
+    }
+
+    return [...candidates.values()];
+  }
+
   async upsertInboxMatchSuggestions(input: {
     teamId: string;
     inboxItemId: string;

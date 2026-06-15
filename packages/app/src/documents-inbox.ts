@@ -200,6 +200,21 @@ export type GenerateInboxMatchSuggestionsResult = {
   suggestions: InboxTransactionMatchSuggestion[];
 };
 
+export type MatchPendingInboxForTransactionCommand = {
+  teamId: string;
+  transactionId: string;
+  sourceOutboxEventId: string;
+  idempotencyKey: string;
+  limit?: number;
+  enforceCallerPermission?: boolean;
+};
+
+export type MatchPendingInboxForTransactionResult = {
+  transactionId: string;
+  suggestions: InboxTransactionMatchSuggestion[];
+  replayed: boolean;
+};
+
 export type AcceptInboxMatchCommand = {
   teamId: string;
   suggestionId: string;
@@ -375,6 +390,11 @@ export type InboxRepository = {
     teamId: string,
     inboxItemId: string,
   ): Promise<HardNegativeTransactionMatch[]>;
+  listPendingInboxMatchCandidatesForTransaction(input: {
+    teamId: string;
+    transaction: Transaction;
+    limit: number;
+  }): Promise<InboxItem[]>;
   upsertInboxMatchSuggestions(input: {
     teamId: string;
     inboxItemId: string;
@@ -403,8 +423,11 @@ export type DocumentsInboxUseCaseRepository = TransactionReviewRepository &
 const createDocumentUploadOperation = "document.upload.create";
 const runDocumentExtractionOperation = "document.extraction.run";
 const correctDocumentExtractionOperation = "document.extraction.correct";
+const matchPendingInboxForTransactionOperation = "inbox.match.pending_for_transaction";
 const acceptInboxMatchOperation = "inbox.match.accept";
 const rejectInboxMatchOperation = "inbox.match.reject";
+const defaultReverseMatchCandidateLimit = 25;
+const maxReverseMatchCandidateLimit = 100;
 
 export async function listDocuments(
   repository: DocumentsInboxUseCaseRepository,
@@ -980,6 +1003,131 @@ export async function generateInboxMatchSuggestions(
   };
 }
 
+export async function matchPendingInboxForTransaction(
+  repository: DocumentsInboxUseCaseRepository,
+  context: TransactionReviewContext,
+  command: MatchPendingInboxForTransactionCommand,
+): Promise<MatchPendingInboxForTransactionResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const inboxRepository = transactionRepository as DocumentsInboxUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Transaction not found");
+
+    if (command.enforceCallerPermission !== false) {
+      await resolveTeamAccess(
+        inboxRepository,
+        { ...context, teamId: command.teamId },
+        "documents.read",
+        "You cannot read inbox items for this team",
+      );
+      await resolveTeamAccess(
+        inboxRepository,
+        { ...context, teamId: command.teamId },
+        "transactions.read",
+        "You cannot read transactions for this team",
+      );
+    }
+
+    const fingerprint = matchPendingInboxForTransactionFingerprint(command);
+    const replayed = await inboxRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      matchPendingInboxForTransactionOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different transaction matching job",
+        );
+      }
+
+      return { ...(replayed.result as MatchPendingInboxForTransactionResult), replayed: true };
+    }
+
+    const transaction = await inboxRepository.getTransactionForTeam(
+      command.teamId,
+      command.transactionId,
+    );
+
+    if (!transaction) {
+      throw new AppError("NOT_FOUND", "Transaction not found");
+    }
+
+    const limit = normalizeReverseMatchCandidateLimit(command.limit);
+    const [candidateInboxItems, aliases] = await Promise.all([
+      inboxRepository.listPendingInboxMatchCandidatesForTransaction({
+        teamId: command.teamId,
+        transaction,
+        limit,
+      }),
+      inboxRepository.listTeamAliases(command.teamId),
+    ]);
+    const persistedSuggestions: InboxTransactionMatchSuggestion[] = [];
+
+    for (const inboxItem of candidateInboxItems) {
+      if (!inboxItem.latestExtraction) {
+        continue;
+      }
+
+      const hardNegatives = await inboxRepository.listHardNegativeMatches(
+        command.teamId,
+        inboxItem.id,
+      );
+      const [suggestion] = suggestInboxTransactionMatches(
+        inboxMatchInputForItem(inboxItem),
+        [
+          {
+            transaction,
+            providerReference: transaction.providerTransactionId,
+          },
+        ],
+        {
+          aliases,
+          hardNegatives,
+        },
+      ).filter((candidate) => candidate.score >= 0.35);
+
+      if (!suggestion) {
+        continue;
+      }
+
+      const upserted = await inboxRepository.upsertInboxMatchSuggestions({
+        teamId: command.teamId,
+        inboxItemId: inboxItem.id,
+        suggestions: [suggestion],
+      });
+      const persisted = upserted.find(
+        (candidate) =>
+          candidate.inboxItemId === inboxItem.id && candidate.transactionId === transaction.id,
+      );
+
+      if (persisted) {
+        persistedSuggestions.push(persisted);
+      }
+    }
+
+    const result = {
+      transactionId: transaction.id,
+      suggestions: persistedSuggestions,
+      replayed: false,
+    };
+
+    await inboxRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: matchPendingInboxForTransactionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
 export async function acceptInboxMatch(
   repository: DocumentsInboxUseCaseRepository,
   context: TransactionReviewContext,
@@ -1316,6 +1464,38 @@ function correctionConfidence(fields: DocumentExtractionFields): DocumentExtract
       .filter(([, value]) => value !== null && value !== undefined && value !== "")
       .map(([key]) => [key, 1]),
   ) as DocumentExtractionConfidence;
+}
+
+function inboxMatchInputForItem(inboxItem: InboxItem) {
+  if (!inboxItem.latestExtraction) {
+    throw new AppError("NOT_FOUND", "Inbox item not found");
+  }
+
+  return {
+    inboxItemId: inboxItem.id,
+    documentId: inboxItem.documentId,
+    sender: inboxItem.source?.name,
+    documentText: inboxItem.latestExtraction.rawText,
+    fields: inboxItem.latestExtraction.fields,
+  };
+}
+
+export function matchPendingInboxForTransactionFingerprint(
+  command: MatchPendingInboxForTransactionCommand,
+) {
+  return JSON.stringify({
+    teamId: command.teamId,
+    transactionId: command.transactionId,
+    sourceOutboxEventId: command.sourceOutboxEventId,
+  });
+}
+
+function normalizeReverseMatchCandidateLimit(limit: number | null | undefined) {
+  if (!Number.isSafeInteger(limit) || !limit || limit <= 0) {
+    return defaultReverseMatchCandidateLimit;
+  }
+
+  return Math.min(limit, maxReverseMatchCandidateLimit);
 }
 
 function normalizedOptionalText(value: string | null | undefined) {

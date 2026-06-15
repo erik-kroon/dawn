@@ -2,7 +2,7 @@
 
 Triage: ready-for-agent
 Publication: Local repo artifact. No project issue tracker or remote is assumed.
-Status: Draft for implementation planning
+Status: Slice 1 implemented; Slice 2 next
 Date: 2026-06-15
 Source material: `docs/PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, Dawn matching code, and Midday reference matching docs/code under `ref/midday`.
 
@@ -102,17 +102,25 @@ When a new transaction is created, imported, or synced after a receipt already e
 
 ## Acceptance Criteria
 
-- [ ] A pending extracted inbox item with matching amount, currency, date, and merchant gets a suggestion after a new transaction arrives.
-- [ ] The generated reverse suggestion is visible through the existing inbox list path.
-- [ ] Existing accept and reject use cases work for reverse-generated suggestions.
-- [ ] The job is idempotent by team, transaction ID, and source outbox event.
-- [ ] Queue handlers contain no matching scoring or business policy.
-- [ ] Re-running the same job does not create duplicate pending suggestions.
+- [x] A pending extracted inbox item with matching amount, currency, date, and merchant gets a suggestion after a new transaction arrives.
+- [x] The generated reverse suggestion is visible through the existing inbox list path.
+- [x] Existing accept and reject use cases work for reverse-generated suggestions.
+- [x] The job is idempotent by team, transaction ID, and source outbox event.
+- [x] Queue handlers contain no matching scoring or business policy.
+- [x] Re-running the same job does not create duplicate pending suggestions.
+
+## Implementation Notes
+
+- Added `matchPendingInboxForTransaction` in `packages/app`, using the existing deterministic scorer and suggestion persistence.
+- Added a bounded reverse candidate repository method and Drizzle implementation for unresolved extracted inbox items.
+- Added `transaction.match_pending_inbox` queue fanout for `transaction.created`, `transaction_import.committed`, and `bank_connection.synced` outbox events.
+- Added a worker handler that resolves a system actor and delegates to the app use case.
+- Verified with `bun test packages/app/src/inbox-matching.test.ts packages/jobs/src/index.test.ts` and `bun run check-types`.
 
 ## Verification
 
-- `bun test packages/app/src/inbox-matching.test.ts packages/jobs/src/index.test.ts`
-- `bun run check-types`
+- [x] `bun test packages/app/src/inbox-matching.test.ts packages/jobs/src/index.test.ts`
+- [x] `bun run check-types`
 
 ## Dependencies
 

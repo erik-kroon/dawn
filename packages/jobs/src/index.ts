@@ -54,6 +54,14 @@ export const documentExtractionJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const transactionPendingInboxMatchJobSchema = z.object({
+  type: z.literal("transaction.match_pending_inbox"),
+  teamId: z.string().min(1),
+  transactionId: z.string().min(1),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const recurringInvoiceGenerationJobSchema = z.object({
   type: z.literal("invoice.recurring.generate"),
   teamId: z.string().min(1),
@@ -117,6 +125,7 @@ export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   outboxDispatchJobSchema,
   syncInvalidationJobSchema,
   documentExtractionJobSchema,
+  transactionPendingInboxMatchJobSchema,
   recurringInvoiceGenerationJobSchema,
   weeklyInsightGenerationJobSchema,
   automationRunJobSchema,
@@ -129,6 +138,9 @@ export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
 export type OutboxDispatchJob = z.infer<typeof outboxDispatchJobSchema>;
 export type SyncInvalidationJob = z.infer<typeof syncInvalidationJobSchema>;
 export type DocumentExtractionJob = z.infer<typeof documentExtractionJobSchema>;
+export type TransactionPendingInboxMatchJob = z.infer<
+  typeof transactionPendingInboxMatchJobSchema
+>;
 export type RecurringInvoiceGenerationJob = z.infer<typeof recurringInvoiceGenerationJobSchema>;
 export type WeeklyInsightGenerationJob = z.infer<typeof weeklyInsightGenerationJobSchema>;
 export type AutomationRunJob = z.infer<typeof automationRunJobSchema>;
@@ -179,6 +191,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const dispatchJob = createOutboxDispatchJob(event);
   const syncJob = createSyncInvalidationJob(event);
   const extractionJob = createDocumentExtractionJob(event);
+  const transactionMatchJobs = createTransactionPendingInboxMatchJobs(event);
   const recurringInvoiceJob = createRecurringInvoiceGenerationJob(event);
   const weeklyInsightJob = createWeeklyInsightGenerationJob(event);
   const automationJob = createAutomationRunJob(event);
@@ -191,6 +204,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
     dispatchJob,
     syncJob,
     extractionJob,
+    ...transactionMatchJobs,
     recurringInvoiceJob,
     weeklyInsightJob,
     bankSyncJob,
@@ -286,6 +300,26 @@ function createDocumentExtractionJob(event: OutboxEventForJob): DocumentExtracti
     sourceOutboxEventId: event.id,
     idempotencyKey: `document:extract:${event.id}`,
   };
+}
+
+function createTransactionPendingInboxMatchJobs(
+  event: OutboxEventForJob,
+): TransactionPendingInboxMatchJob[] {
+  if (
+    event.type !== "transaction.created" &&
+    event.type !== "transaction_import.committed" &&
+    event.type !== "bank_connection.synced"
+  ) {
+    return [];
+  }
+
+  return transactionIdsForEvent(event).map((transactionId) => ({
+    type: "transaction.match_pending_inbox",
+    teamId: event.teamId,
+    transactionId,
+    sourceOutboxEventId: event.id,
+    idempotencyKey: `inbox:match-pending:${event.id}:${transactionId}`,
+  }));
 }
 
 function createRecurringInvoiceGenerationJob(

@@ -27,6 +27,16 @@ function webhookDeliveryJob(eventType: string) {
   };
 }
 
+function transactionMatchJob(transactionId: string) {
+  return {
+    type: "transaction.match_pending_inbox" as const,
+    teamId: "team_1",
+    transactionId,
+    sourceOutboxEventId: "outbox_1",
+    idempotencyKey: `inbox:match-pending:outbox_1:${transactionId}`,
+  };
+}
+
 describe("job contracts", () => {
   test("creates idempotent outbox dispatch jobs", () => {
     expect(createOutboxDispatchJob(event)).toEqual({
@@ -60,6 +70,7 @@ describe("job contracts", () => {
         sourceOutboxEventId: "outbox_1",
         idempotencyKey: "sync:transactions:outbox_1",
       },
+      transactionMatchJob("txn_1"),
       {
         type: "automation.run",
         teamId: "team_1",
@@ -171,6 +182,8 @@ describe("job contracts", () => {
         sourceOutboxEventId: "outbox_1",
         idempotencyKey: "sync:transactions:outbox_1",
       },
+      transactionMatchJob("txn_1"),
+      transactionMatchJob("txn_2"),
       {
         type: "automation.run",
         teamId: "team_1",
@@ -179,6 +192,45 @@ describe("job contracts", () => {
         idempotencyKey: "automation:run:outbox_1",
       },
       webhookDeliveryJob("bank_connection.synced"),
+    ]);
+  });
+
+  test("maps transaction import outbox events to pending inbox matching jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "transaction_import.committed",
+        payload: { importSessionId: "import_1", transactionIds: ["txn_1", "txn_2"] },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "transaction_import.committed",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "sync.invalidate",
+        teamId: "team_1",
+        collection: "transactions",
+        cursor: null,
+        changedIds: ["txn_1", "txn_2"],
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "sync:transactions:outbox_1",
+      },
+      transactionMatchJob("txn_1"),
+      transactionMatchJob("txn_2"),
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "transaction_import.committed",
+        idempotencyKey: "automation:run:outbox_1",
+      },
+      webhookDeliveryJob("transaction_import.committed"),
     ]);
   });
 
@@ -427,6 +479,7 @@ describe("job contracts", () => {
       "outbox.dispatch": record("outbox.dispatch"),
       "sync.invalidate": record("sync.invalidate"),
       "document.extract": record("document.extract"),
+      "transaction.match_pending_inbox": record("transaction.match_pending_inbox"),
       "invoice.recurring.generate": record("invoice.recurring.generate"),
       "insights.weekly.generate": record("insights.weekly.generate"),
       "automation.run": record("automation.run"),

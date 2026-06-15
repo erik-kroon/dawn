@@ -5,6 +5,7 @@ import {
   gateTeamDataDeletion,
   generateRecurringInvoice,
   generateWeeklyInsights,
+  matchPendingInboxForTransaction,
   resolveSystemAppRequest,
   runAutomationsForOutboxEvent,
   syncBankConnection,
@@ -102,6 +103,23 @@ export function createDawnWorkerJobHandlers(env: DawnCloudflareBindings): DawnQu
         storage: createR2DocumentObjectStorage(env.DAWN_DOCUMENTS),
         message,
       });
+    },
+    "transaction.match_pending_inbox": async (message) => {
+      await matchPendingInboxForTransaction(
+        new DrizzleDawnRepository(),
+        resolveSystemAppRequest({
+          actorId: "system:matching",
+          requestId: message.idempotencyKey,
+          teamId: message.teamId,
+        }),
+        {
+          teamId: message.teamId,
+          transactionId: message.transactionId,
+          sourceOutboxEventId: message.sourceOutboxEventId,
+          idempotencyKey: message.idempotencyKey,
+          enforceCallerPermission: false,
+        },
+      );
     },
     "invoice.recurring.generate": async (message) => {
       await generateRecurringInvoice(new DrizzleDawnRepository(), {

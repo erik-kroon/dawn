@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   acceptInboxMatch,
   generateInboxMatchSuggestions,
+  matchPendingInboxForTransaction,
   rejectInboxMatch,
   type DawnRepository,
   type HardNegativeTransactionMatch,
@@ -87,6 +88,18 @@ class MemoryMatchingRepository {
       : null;
   }
 
+  async listInboxItems(teamId: string) {
+    return teamId === this.inboxItem.teamId ? [this.inboxItem] : [];
+  }
+
+  async getTransactionForTeam(teamId: string, transactionId: string) {
+    return (
+      this.transactions.find(
+        (transaction) => transaction.teamId === teamId && transaction.id === transactionId,
+      ) ?? null
+    );
+  }
+
   async listTransactionsForReport(input: { teamId: string }) {
     return this.transactions.filter((transaction) => transaction.teamId === input.teamId);
   }
@@ -99,6 +112,36 @@ class MemoryMatchingRepository {
     return this.hardNegatives.filter(
       (match) => match.teamId === teamId && match.inboxItemId === inboxItemId,
     );
+  }
+
+  async listPendingInboxMatchCandidatesForTransaction(input: {
+    teamId: string;
+    transaction: Transaction;
+    limit: number;
+  }) {
+    if (
+      input.teamId !== this.inboxItem.teamId ||
+      this.inboxItem.status !== "needs_review" ||
+      this.inboxItem.extractionStatus !== "completed" ||
+      !this.inboxItem.latestExtraction
+    ) {
+      return [];
+    }
+
+    const alreadyAttached = this.attachments.some(
+      (attachment) =>
+        attachment.documentId === this.inboxItem.documentId ||
+        attachment.transactionId === input.transaction.id,
+    );
+    const alreadySuggested = [...this.suggestions.values()].some(
+      (suggestion) =>
+        suggestion.teamId === input.teamId &&
+        suggestion.inboxItemId === this.inboxItem.id &&
+        suggestion.transactionId === input.transaction.id &&
+        (suggestion.status === "suggested" || suggestion.status === "accepted"),
+    );
+
+    return alreadyAttached || alreadySuggested ? [] : [this.inboxItem].slice(0, input.limit);
   }
 
   async upsertInboxMatchSuggestions(input: {
@@ -226,6 +269,12 @@ const context = {
   teamId: "team_1",
 };
 
+const systemMatchingContext = {
+  actor: { id: "system:matching", type: "system" as const },
+  requestId: "job_1",
+  teamId: "team_1",
+};
+
 describe("inbox matching use cases", () => {
   test("generates persisted match suggestions with score and explanation", async () => {
     const repository = new MemoryMatchingRepository();
@@ -240,6 +289,107 @@ describe("inbox matching use cases", () => {
     expect(result.suggestions[0]?.transactionId).toBe("txn_1");
     expect(result.suggestions[0]?.score).toBeGreaterThanOrEqual(0.75);
     expect(result.suggestions[0]?.explanation).toContain("Amount matches exactly");
+  });
+
+  test("matches a pending inbox item when a transaction arrives later", async () => {
+    const repository = new MemoryMatchingRepository();
+
+    const result = await matchPendingInboxForTransaction(
+      repository as unknown as DawnRepository,
+      systemMatchingContext,
+      {
+        teamId: "team_1",
+        transactionId: "txn_1",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "inbox:match-pending:outbox_1:txn_1",
+        enforceCallerPermission: false,
+      },
+    );
+
+    expect(result.suggestions).toHaveLength(1);
+    expect(result.suggestions[0]?.inboxItemId).toBe("inbox_1");
+    expect(result.suggestions[0]?.transactionId).toBe("txn_1");
+    expect(result.suggestions[0]?.score).toBeGreaterThanOrEqual(0.75);
+
+    const listed = await repository.listInboxItems("team_1");
+    expect(listed[0]?.matchSuggestions?.[0]?.transactionId).toBe("txn_1");
+
+    const replayed = await matchPendingInboxForTransaction(
+      repository as unknown as DawnRepository,
+      systemMatchingContext,
+      {
+        teamId: "team_1",
+        transactionId: "txn_1",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "inbox:match-pending:outbox_1:txn_1",
+        enforceCallerPermission: false,
+      },
+    );
+
+    expect(replayed.replayed).toBe(true);
+    expect(
+      [...repository.suggestions.values()].filter(
+        (suggestion) =>
+          suggestion.inboxItemId === "inbox_1" && suggestion.transactionId === "txn_1",
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("accepts and rejects reverse-generated suggestions through existing flows", async () => {
+    const acceptedRepository = new MemoryMatchingRepository();
+    const generated = await matchPendingInboxForTransaction(
+      acceptedRepository as unknown as DawnRepository,
+      systemMatchingContext,
+      {
+        teamId: "team_1",
+        transactionId: "txn_1",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "inbox:match-pending:outbox_1:txn_1",
+        enforceCallerPermission: false,
+      },
+    );
+
+    const accepted = await acceptInboxMatch(
+      acceptedRepository as unknown as DawnRepository,
+      context,
+      {
+        teamId: "team_1",
+        suggestionId: generated.suggestions[0]?.id ?? "",
+        idempotencyKey: "accept_reverse_1",
+      },
+    );
+
+    expect(accepted.suggestion.status).toBe("accepted");
+    expect(accepted.inboxItem.status).toBe("resolved");
+
+    const rejectedRepository = new MemoryMatchingRepository();
+    const generatedForReject = await matchPendingInboxForTransaction(
+      rejectedRepository as unknown as DawnRepository,
+      systemMatchingContext,
+      {
+        teamId: "team_1",
+        transactionId: "txn_1",
+        sourceOutboxEventId: "outbox_2",
+        idempotencyKey: "inbox:match-pending:outbox_2:txn_1",
+        enforceCallerPermission: false,
+      },
+    );
+
+    const rejected = await rejectInboxMatch(
+      rejectedRepository as unknown as DawnRepository,
+      context,
+      {
+        teamId: "team_1",
+        suggestionId: generatedForReject.suggestions[0]?.id ?? "",
+        reason: "wrong transaction",
+        idempotencyKey: "reject_reverse_1",
+      },
+    );
+
+    expect(rejected.suggestion.status).toBe("rejected");
+    expect(rejectedRepository.hardNegatives).toMatchObject([
+      { inboxItemId: "inbox_1", transactionId: "txn_1", reason: "wrong transaction" },
+    ]);
   });
 
   test("accepts a suggestion, attaches the document, learns an alias, and resolves the item", async () => {
