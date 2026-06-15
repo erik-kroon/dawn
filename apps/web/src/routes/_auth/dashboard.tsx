@@ -12,7 +12,7 @@ import { Input } from "@dawn/ui/components/input";
 import { Label } from "@dawn/ui/components/label";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { DownloadIcon, Trash2Icon } from "lucide-react";
+import { DownloadIcon, SendIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 
 import { authClient } from "@/lib/auth-client";
@@ -127,6 +127,16 @@ function RouteComponent() {
     productId: "",
     message: "",
     exportType: "transactions",
+  });
+  const [integrationActionDraft, setIntegrationActionDraft] = useState({
+    exportType: "transactions" as "transactions" | "invoices",
+    paymentInvoiceId: "",
+    paymentAmount: "",
+    messageChannel: "#finance",
+    messageText: "Invoice paid",
+    emailTo: "",
+    emailSubject: "Invoice paid",
+    emailText: "A payment was recorded in Dawn.",
   });
   const [desktopCaptureMessage, setDesktopCaptureMessage] = useState<string | null>(null);
   const [syncReviewError, setSyncReviewError] = useState<string | null>(null);
@@ -345,6 +355,36 @@ function RouteComponent() {
   );
   const syncIntegrationMutation = useMutation(
     orpc.integrations.sync.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.integrations.list.queryKey() });
+      },
+    }),
+  );
+  const exportAccountingIntegrationMutation = useMutation(
+    orpc.integrations.exportAccounting.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.integrations.list.queryKey() });
+      },
+    }),
+  );
+  const recordPaymentProviderEventMutation = useMutation(
+    orpc.integrations.recordPaymentEvent.mutationOptions({
+      onSuccess: async () => {
+        setIntegrationActionDraft((draft) => ({ ...draft, paymentAmount: "" }));
+        await queryClient.invalidateQueries({ queryKey: orpc.integrations.list.queryKey() });
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
+      },
+    }),
+  );
+  const sendIntegrationMessageMutation = useMutation(
+    orpc.integrations.sendMessage.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.integrations.list.queryKey() });
+      },
+    }),
+  );
+  const sendIntegrationEmailMutation = useMutation(
+    orpc.integrations.sendEmail.mutationOptions({
       onSuccess: async () => {
         await queryClient.invalidateQueries({ queryKey: orpc.integrations.list.queryKey() });
       },
@@ -1887,6 +1927,240 @@ function RouteComponent() {
                           {latestSyncRun.error ? ` · ${latestSyncRun.error}` : ""}
                         </p>
                       ) : null}
+                      {connection.status !== "disabled" ? (
+                        <div className="grid gap-2 border-t pt-2">
+                          {connection.capabilities.includes("exportTransactions") ||
+                          connection.capabilities.includes("exportInvoices") ? (
+                            <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+                              <select
+                                aria-label="Accounting export type"
+                                className="h-9 border bg-background px-3 text-sm"
+                                onChange={(event) =>
+                                  setIntegrationActionDraft((draft) => ({
+                                    ...draft,
+                                    exportType: event.target
+                                      .value as typeof integrationActionDraft.exportType,
+                                  }))
+                                }
+                                value={integrationActionDraft.exportType}
+                              >
+                                <option value="transactions">Transactions</option>
+                                <option value="invoices">Invoices</option>
+                              </select>
+                              <Button
+                                disabled={
+                                  !canManageIntegrations ||
+                                  exportAccountingIntegrationMutation.isPending
+                                }
+                                onClick={() =>
+                                  exportAccountingIntegrationMutation.mutate({
+                                    teamId: connection.teamId,
+                                    connectionId: connection.id,
+                                    exportType: integrationActionDraft.exportType,
+                                    idempotencyKey: crypto.randomUUID(),
+                                  })
+                                }
+                                size="sm"
+                                variant="outline"
+                              >
+                                <SendIcon className="size-4" />
+                                Export
+                              </Button>
+                            </div>
+                          ) : null}
+                          {connection.capabilities.includes("receivePaymentEvents") ? (
+                            <div className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+                              <select
+                                aria-label="Provider payment invoice"
+                                className="h-9 border bg-background px-3 text-sm"
+                                onChange={(event) =>
+                                  setIntegrationActionDraft((draft) => ({
+                                    ...draft,
+                                    paymentInvoiceId: event.target.value,
+                                  }))
+                                }
+                                value={integrationActionDraft.paymentInvoiceId}
+                              >
+                                <option value="">Select invoice</option>
+                                {billing.data?.invoices
+                                  .filter(
+                                    (invoice) =>
+                                      invoice.status !== "draft" &&
+                                      invoice.status !== "scheduled" &&
+                                      invoice.status !== "paid" &&
+                                      invoice.status !== "void",
+                                  )
+                                  .map((invoice) => (
+                                    <option key={invoice.id} value={invoice.id}>
+                                      {invoice.invoiceNumber} · {formatMoney(invoice.totals.total)}
+                                    </option>
+                                  ))}
+                              </select>
+                              <Input
+                                aria-label="Provider payment amount"
+                                onChange={(event) =>
+                                  setIntegrationActionDraft((draft) => ({
+                                    ...draft,
+                                    paymentAmount: event.target.value,
+                                  }))
+                                }
+                                placeholder="Payment amount"
+                                value={integrationActionDraft.paymentAmount}
+                              />
+                              <Button
+                                disabled={
+                                  !canManageIntegrations ||
+                                  recordPaymentProviderEventMutation.isPending ||
+                                  !integrationActionDraft.paymentInvoiceId ||
+                                  !integrationActionDraft.paymentAmount.trim()
+                                }
+                                onClick={() => {
+                                  const invoice = billing.data?.invoices.find(
+                                    (candidate) =>
+                                      candidate.id === integrationActionDraft.paymentInvoiceId,
+                                  );
+
+                                  if (!invoice) {
+                                    return;
+                                  }
+
+                                  recordPaymentProviderEventMutation.mutate({
+                                    teamId: connection.teamId,
+                                    connectionId: connection.id,
+                                    rawPayload: {
+                                      providerEventId: crypto.randomUUID(),
+                                      invoiceId: invoice.id,
+                                      amountMinor: parseMoneyInputToMinor(
+                                        integrationActionDraft.paymentAmount,
+                                      ),
+                                      currency: invoice.currency,
+                                      paidAt: new Date().toISOString(),
+                                      method: "provider",
+                                    },
+                                    idempotencyKey: crypto.randomUUID(),
+                                  });
+                                }}
+                                size="sm"
+                                variant="outline"
+                              >
+                                <SendIcon className="size-4" />
+                                Record
+                              </Button>
+                            </div>
+                          ) : null}
+                          {connection.capabilities.includes("sendMessage") ? (
+                            <div className="grid gap-2 md:grid-cols-[0.5fr_1fr_auto]">
+                              <Input
+                                aria-label="Message channel"
+                                onChange={(event) =>
+                                  setIntegrationActionDraft((draft) => ({
+                                    ...draft,
+                                    messageChannel: event.target.value,
+                                  }))
+                                }
+                                placeholder="#finance"
+                                value={integrationActionDraft.messageChannel}
+                              />
+                              <Input
+                                aria-label="Message text"
+                                onChange={(event) =>
+                                  setIntegrationActionDraft((draft) => ({
+                                    ...draft,
+                                    messageText: event.target.value,
+                                  }))
+                                }
+                                placeholder="Message"
+                                value={integrationActionDraft.messageText}
+                              />
+                              <Button
+                                disabled={
+                                  !canManageIntegrations ||
+                                  sendIntegrationMessageMutation.isPending ||
+                                  !integrationActionDraft.messageChannel.trim() ||
+                                  !integrationActionDraft.messageText.trim()
+                                }
+                                onClick={() =>
+                                  sendIntegrationMessageMutation.mutate({
+                                    teamId: connection.teamId,
+                                    connectionId: connection.id,
+                                    channel: integrationActionDraft.messageChannel,
+                                    text: integrationActionDraft.messageText,
+                                    confirm: true,
+                                    idempotencyKey: crypto.randomUUID(),
+                                  })
+                                }
+                                size="sm"
+                                variant="outline"
+                              >
+                                <SendIcon className="size-4" />
+                                Send
+                              </Button>
+                            </div>
+                          ) : null}
+                          {connection.capabilities.includes("sendEmail") ? (
+                            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-[0.8fr_0.8fr_1fr_auto]">
+                              <Input
+                                aria-label="Integration email recipient"
+                                onChange={(event) =>
+                                  setIntegrationActionDraft((draft) => ({
+                                    ...draft,
+                                    emailTo: event.target.value,
+                                  }))
+                                }
+                                placeholder="owner@example.com"
+                                value={integrationActionDraft.emailTo}
+                              />
+                              <Input
+                                aria-label="Integration email subject"
+                                onChange={(event) =>
+                                  setIntegrationActionDraft((draft) => ({
+                                    ...draft,
+                                    emailSubject: event.target.value,
+                                  }))
+                                }
+                                placeholder="Subject"
+                                value={integrationActionDraft.emailSubject}
+                              />
+                              <Input
+                                aria-label="Integration email text"
+                                onChange={(event) =>
+                                  setIntegrationActionDraft((draft) => ({
+                                    ...draft,
+                                    emailText: event.target.value,
+                                  }))
+                                }
+                                placeholder="Email body"
+                                value={integrationActionDraft.emailText}
+                              />
+                              <Button
+                                disabled={
+                                  !canManageIntegrations ||
+                                  sendIntegrationEmailMutation.isPending ||
+                                  !integrationActionDraft.emailTo.trim() ||
+                                  !integrationActionDraft.emailSubject.trim() ||
+                                  !integrationActionDraft.emailText.trim()
+                                }
+                                onClick={() =>
+                                  sendIntegrationEmailMutation.mutate({
+                                    teamId: connection.teamId,
+                                    connectionId: connection.id,
+                                    to: integrationActionDraft.emailTo,
+                                    subject: integrationActionDraft.emailSubject,
+                                    text: integrationActionDraft.emailText,
+                                    confirm: true,
+                                    idempotencyKey: crypto.randomUUID(),
+                                  })
+                                }
+                                size="sm"
+                                variant="outline"
+                              >
+                                <SendIcon className="size-4" />
+                                Send
+                              </Button>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
                   ))
                 ) : (
@@ -1901,6 +2175,26 @@ function RouteComponent() {
               ) : null}
               {syncIntegrationMutation.error ? (
                 <p className="text-sm text-destructive">{syncIntegrationMutation.error.message}</p>
+              ) : null}
+              {exportAccountingIntegrationMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {exportAccountingIntegrationMutation.error.message}
+                </p>
+              ) : null}
+              {recordPaymentProviderEventMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {recordPaymentProviderEventMutation.error.message}
+                </p>
+              ) : null}
+              {sendIntegrationMessageMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {sendIntegrationMessageMutation.error.message}
+                </p>
+              ) : null}
+              {sendIntegrationEmailMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {sendIntegrationEmailMutation.error.message}
+                </p>
               ) : null}
               {disableIntegrationMutation.error ? (
                 <p className="text-sm text-destructive">
