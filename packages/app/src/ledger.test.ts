@@ -622,6 +622,36 @@ describe("CSV transaction import", () => {
     expect(repository.outboxEvents).toHaveLength(1);
   });
 
+  test("imports semicolon CSV exports with debit and credit columns", async () => {
+    const repository = seededRepository("owner");
+    const command = {
+      teamId: "team_1",
+      accountId: "acct_1",
+      fileName: "bank-export.csv",
+      csvText:
+        "Date;Description;Debit;Credit;Currency\n2026-06-14;Figma subscription;12,34;;USD\n2026-06-15;Invoice;;50,00;USD\n",
+      mapping: {
+        postedAt: "Date",
+        description: "Description",
+        debit: "Debit",
+        credit: "Credit",
+        currency: "Currency",
+        categoryId: "cat_software",
+      },
+      idempotencyKey: "idem_debit_credit",
+    };
+
+    const preview = await previewCsvTransactionImport(repository, context, command);
+    const result = await commitCsvTransactionImport(repository, context, command);
+
+    expect(preview.readyCount).toBe(2);
+    expect(result.transactions.map((transaction) => transaction.money)).toEqual([
+      { amountMinor: -1234, currency: "USD" },
+      { amountMinor: 5000, currency: "USD" },
+    ]);
+    expect(result.preview.rows.map((row) => row.status)).toEqual(["ready", "ready"]);
+  });
+
   test("blocks viewers from CSV import", async () => {
     const repository = seededRepository("viewer");
 

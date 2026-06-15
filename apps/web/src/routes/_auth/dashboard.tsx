@@ -39,6 +39,8 @@ function RouteComponent() {
     postedAt: "Date",
     description: "Description",
     amount: "Amount",
+    debit: "",
+    credit: "",
     currency: "",
     categoryId: "",
   });
@@ -3309,7 +3311,7 @@ function RouteComponent() {
                   </select>
                 </Label>
               </div>
-              <div className="grid gap-2 md:grid-cols-5">
+              <div className="grid gap-2 md:grid-cols-7">
                 <Label className="flex flex-col gap-1 text-sm">
                   Date column
                   <Input
@@ -3332,12 +3334,33 @@ function RouteComponent() {
                   />
                 </Label>
                 <Label className="flex flex-col gap-1 text-sm">
-                  Amount column
+                  Signed amount
                   <Input
                     onChange={(event) =>
                       setCsvMapping((mapping) => ({ ...mapping, amount: event.target.value }))
                     }
+                    placeholder="Optional"
                     value={csvMapping.amount}
+                  />
+                </Label>
+                <Label className="flex flex-col gap-1 text-sm">
+                  Debit column
+                  <Input
+                    onChange={(event) =>
+                      setCsvMapping((mapping) => ({ ...mapping, debit: event.target.value }))
+                    }
+                    placeholder="Optional"
+                    value={csvMapping.debit}
+                  />
+                </Label>
+                <Label className="flex flex-col gap-1 text-sm">
+                  Credit column
+                  <Input
+                    onChange={(event) =>
+                      setCsvMapping((mapping) => ({ ...mapping, credit: event.target.value }))
+                    }
+                    placeholder="Optional"
+                    value={csvMapping.credit}
                   />
                 </Label>
                 <Label className="flex flex-col gap-1 text-sm">
@@ -3511,6 +3534,8 @@ type CsvImportMappingState = {
   postedAt: string;
   description: string;
   amount: string;
+  debit: string;
+  credit: string;
   currency: string;
   categoryId: string;
 };
@@ -3561,7 +3586,9 @@ function canImportCsv(csvText: string, accountId: string, mapping: CsvImportMapp
     accountId.length > 0 &&
     mapping.postedAt.trim().length > 0 &&
     mapping.description.trim().length > 0 &&
-    mapping.amount.trim().length > 0
+    (mapping.amount.trim().length > 0 ||
+      mapping.debit.trim().length > 0 ||
+      mapping.credit.trim().length > 0)
   );
 }
 
@@ -3569,7 +3596,9 @@ function normalizedCsvMapping(mapping: CsvImportMappingState) {
   return {
     postedAt: mapping.postedAt.trim(),
     description: mapping.description.trim(),
-    amount: mapping.amount.trim(),
+    amount: mapping.amount.trim() || null,
+    debit: mapping.debit.trim() || null,
+    credit: mapping.credit.trim() || null,
     currency: mapping.currency.trim() || null,
     categoryId: mapping.categoryId || null,
   };

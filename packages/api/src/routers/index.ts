@@ -520,13 +520,19 @@ const createLedgerTransferPairInput = z.object({
   idempotencyKey: z.string().min(1),
 });
 
-const csvTransactionImportMappingInput = z.object({
-  postedAt: z.string().min(1),
-  description: z.string().min(1),
-  amount: z.string().min(1),
-  currency: z.string().min(1).nullable().optional(),
-  categoryId: z.string().min(1).nullable().optional(),
-});
+const csvTransactionImportMappingInput = z
+  .object({
+    postedAt: z.string().min(1),
+    description: z.string().min(1),
+    amount: z.string().min(1).nullable().optional(),
+    debit: z.string().min(1).nullable().optional(),
+    credit: z.string().min(1).nullable().optional(),
+    currency: z.string().min(1).nullable().optional(),
+    categoryId: z.string().min(1).nullable().optional(),
+  })
+  .refine((mapping) => mapping.amount || mapping.debit || mapping.credit, {
+    message: "CSV import mapping requires an amount, debit, or credit column",
+  });
 
 const previewCsvTransactionImportInput = z.object({
   teamId: z.string().min(1),

@@ -2727,6 +2727,54 @@ describe("appRouter", () => {
     expect(repository.outboxEvents).toHaveLength(1);
   });
 
+  test("imports debit and credit CSV exports through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    repository.accounts.set("acct_1", {
+      id: "acct_1",
+      teamId: "team_1",
+      name: "Operating",
+      currency: "USD",
+      type: "bank",
+    });
+    const router = await createTestRouter(repository);
+    const input = {
+      teamId: "team_1",
+      accountId: "acct_1",
+      csvText:
+        "Date;Description;Debit;Credit;Currency\n2026-06-14;Figma subscription;12,34;;USD\n2026-06-15;Invoice;;50,00;USD\n",
+      mapping: {
+        postedAt: "Date",
+        description: "Description",
+        debit: "Debit",
+        credit: "Credit",
+        currency: "Currency",
+      },
+    };
+
+    const preview = await call(router.csvImport.preview, input, {
+      context: testContext({ id: "user_1", email: "member@example.com" }),
+    });
+    const result = await call(
+      router.csvImport.commit,
+      {
+        ...input,
+        fileName: "bank-export.csv",
+        idempotencyKey: "idem_debit_credit",
+      },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(preview.readyCount).toBe(2);
+    expect(result.transactions.map((transaction) => transaction.money)).toEqual([
+      { amountMinor: -1234, currency: "USD" },
+      { amountMinor: 5000, currency: "USD" },
+    ]);
+  });
+
   test("creates customers, products, and draft invoices through protected billing routes", async () => {
     const repository = new MemoryTransactionReviewRepository();
     repository.teams.set("team_1", "Test Team");

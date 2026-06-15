@@ -151,7 +151,9 @@ export type LedgerTransactionDraft = {
 export type CsvTransactionColumnMapping = {
   postedAt: string;
   description: string;
-  amount: string;
+  amount?: string | null;
+  debit?: string | null;
+  credit?: string | null;
   currency?: string | null;
 };
 
@@ -1653,16 +1655,12 @@ export function parseMoneyAmountMinor(amount: string, currency: string) {
   const normalizedAmount = trimmedAmount
     .replace(/^\((.*)\)$/, "-$1")
     .replace(/[$€£¥\s_]/g, "")
-    .replace(/,/g, "");
+    .replace(/[’']/g, "");
   const sign = normalizedAmount.startsWith("-") ? -1 : 1;
   const unsignedAmount = normalizedAmount.replace(/^[+-]/, "");
 
-  if (!/^\d+(\.\d+)?$/.test(unsignedAmount)) {
-    throw new Error("Money amount must be a decimal number");
-  }
-
   const minorUnitDigits = currencyMinorUnitDigits(currency);
-  const [majorUnits = "0", minorUnits = ""] = unsignedAmount.split(".");
+  const { majorUnits, minorUnits } = parseMoneyMajorAndMinorUnits(unsignedAmount, minorUnitDigits);
 
   if (minorUnits.length > minorUnitDigits) {
     throw new Error("Money amount has too many decimal places for currency");
@@ -1681,6 +1679,64 @@ export function parseMoneyAmountMinor(amount: string, currency: string) {
   assertValidMoney(money);
 
   return money.amountMinor;
+}
+
+function parseMoneyMajorAndMinorUnits(unsignedAmount: string, minorUnitDigits: number) {
+  const lastDot = unsignedAmount.lastIndexOf(".");
+  const lastComma = unsignedAmount.lastIndexOf(",");
+  const decimalSeparator =
+    lastDot >= 0 && lastComma >= 0
+      ? lastDot > lastComma
+        ? "."
+        : ","
+      : lastComma >= 0
+        ? decimalCommaSeparator(unsignedAmount, minorUnitDigits)
+        : lastDot >= 0
+          ? "."
+          : null;
+
+  if (!decimalSeparator) {
+    const majorUnits = unsignedAmount.replace(/,/g, "");
+
+    if (!/^\d+$/.test(majorUnits)) {
+      throw new Error("Money amount must be a decimal number");
+    }
+
+    return { majorUnits, minorUnits: "" };
+  }
+
+  const decimalIndex = unsignedAmount.lastIndexOf(decimalSeparator);
+  const groupingSeparator = decimalSeparator === "." ? "," : ".";
+  const majorUnits = unsignedAmount
+    .slice(0, decimalIndex)
+    .replaceAll(groupingSeparator, "")
+    .replace(/,/g, "");
+  const minorUnits = unsignedAmount.slice(decimalIndex + 1);
+
+  if (!/^\d+$/.test(majorUnits || "0") || !/^\d*$/.test(minorUnits)) {
+    throw new Error("Money amount must be a decimal number");
+  }
+
+  return { majorUnits: majorUnits || "0", minorUnits };
+}
+
+function decimalCommaSeparator(unsignedAmount: string, minorUnitDigits: number) {
+  if (minorUnitDigits === 0) {
+    return null;
+  }
+
+  const commaParts = unsignedAmount.split(",");
+  const decimalDigits = commaParts.at(-1) ?? "";
+
+  if (
+    commaParts.length === 2 &&
+    decimalDigits.length > 0 &&
+    decimalDigits.length <= minorUnitDigits
+  ) {
+    return ",";
+  }
+
+  return null;
 }
 
 export function assertSameCurrency(left: Money, right: Money) {
@@ -1833,10 +1889,7 @@ export function csvRowToLedgerDraft(input: {
   const currency = input.mapping.currency
     ? requiredCsvValue(input.row, input.mapping.currency, "currency").toUpperCase()
     : input.accountCurrency;
-  const amountMinor = parseMoneyAmountMinor(
-    requiredCsvValue(input.row, input.mapping.amount, "amount"),
-    currency,
-  );
+  const amountMinor = csvRowAmountMinor(input.row, input.mapping, currency);
   const postedAt = new Date(postedAtValue);
 
   if (Number.isNaN(postedAt.getTime())) {
@@ -1863,6 +1916,39 @@ export function csvRowToLedgerDraft(input: {
   return draft;
 }
 
+function csvRowAmountMinor(
+  row: CsvTransactionImportRow,
+  mapping: CsvTransactionColumnMapping,
+  currency: string,
+) {
+  if (mapping.amount) {
+    return parseMoneyAmountMinor(requiredCsvValue(row, mapping.amount, "amount"), currency);
+  }
+
+  const debitAmount = mapping.debit ? optionalCsvValue(row, mapping.debit) : null;
+  const creditAmount = mapping.credit ? optionalCsvValue(row, mapping.credit) : null;
+
+  if (debitAmount && creditAmount) {
+    throw new Error("CSV row cannot have both debit and credit amounts");
+  }
+
+  if (debitAmount) {
+    return parseMoneyAmountMinor(negativeCsvAmount(debitAmount), currency);
+  }
+
+  if (creditAmount) {
+    const amountMinor = parseMoneyAmountMinor(creditAmount, currency);
+
+    if (amountMinor < 0) {
+      throw new Error("CSV row credit amount cannot be negative");
+    }
+
+    return amountMinor;
+  }
+
+  throw new Error("CSV row amount is required");
+}
+
 function requiredCsvValue(row: CsvTransactionImportRow, column: string, label: string) {
   const value = row.values[column]?.trim();
 
@@ -1873,11 +1959,26 @@ function requiredCsvValue(row: CsvTransactionImportRow, column: string, label: s
   return value;
 }
 
+function optionalCsvValue(row: CsvTransactionImportRow, column: string) {
+  return row.values[column]?.trim() || null;
+}
+
+function negativeCsvAmount(amount: string) {
+  const trimmed = amount.trim();
+
+  if (trimmed.startsWith("-") || /^\(.*\)$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  return `-${trimmed.replace(/^\+/, "")}`;
+}
+
 function parseCsvRecords(csv: string) {
   const normalizedCsv = csv
     .replace(/^\uFEFF/, "")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n");
+  const delimiter = detectCsvDelimiter(normalizedCsv);
   const records: string[][] = [];
   let record: string[] = [];
   let field = "";
@@ -1897,7 +1998,7 @@ function parseCsvRecords(csv: string) {
       continue;
     }
 
-    if (char === "," && !inQuotes) {
+    if (char === delimiter && !inQuotes) {
       record.push(field);
       field = "";
       continue;
@@ -1925,6 +2026,41 @@ function parseCsvRecords(csv: string) {
   }
 
   return records;
+}
+
+function detectCsvDelimiter(csv: string) {
+  const candidates = [",", ";", "\t"] as const;
+  const counts = Object.fromEntries(candidates.map((candidate) => [candidate, 0])) as Record<
+    (typeof candidates)[number],
+    number
+  >;
+  let inQuotes = false;
+
+  for (let index = 0; index < csv.length; index += 1) {
+    const char = csv[index];
+    const nextChar = csv[index + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "\n" && !inQuotes) {
+      break;
+    }
+
+    if (!inQuotes && candidates.includes(char as (typeof candidates)[number])) {
+      counts[char as (typeof candidates)[number]] += 1;
+    }
+  }
+
+  return candidates.reduce((selected, candidate) =>
+    counts[candidate] > counts[selected] ? candidate : selected,
+  );
 }
 
 export function createReportTotals(
