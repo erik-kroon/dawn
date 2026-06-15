@@ -215,6 +215,7 @@ pass, and the implementing agent has inspected the diff.
 | `26ea3b7` | Inbox document extraction            | Added inbox sources/items, extraction jobs, deterministic worker processing, correction UI/API, and migration.                |
 | `7171264` | Inbox transaction matching           | Added deterministic match scoring, suggestion persistence, accept/reject flows, hard-negative memory, and dashboard controls. |
 | `abdb187` | Billing draft foundation             | Added customers, contacts, products/services, exact invoice totals, draft invoice API/UI, and migration.                      |
+| `8499997` | Invoice delivery foundation          | Added invoice PDF preview, confirmed send, payment recording, recurrence jobs, mock email delivery, and dashboard controls.   |
 
 ## Implementation Notes
 
