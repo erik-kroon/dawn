@@ -162,6 +162,13 @@
       "when": 1781540100000,
       "tag": "0022_matching_suggestion_evidence",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1781542400000,
+      "tag": "0023_transaction_accountant_lifecycle",
+      "breakpoints": true
     }
   ]
 }

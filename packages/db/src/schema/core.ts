@@ -232,6 +232,9 @@ export const transaction = pgTable(
       onDelete: "set null",
     }),
     reviewState: text("review_state").default("needs_review").notNull(),
+    accountantStatus: text("accountant_status").default("needs_review").notNull(),
+    accountantStatusReason: text("accountant_status_reason"),
+    accountantStatusUpdatedAt: timestamp("accountant_status_updated_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
       .defaultNow()

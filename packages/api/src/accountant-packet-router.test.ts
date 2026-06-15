@@ -44,6 +44,17 @@ describe("transactionReview.exportPacket router", () => {
         reviewState: "reviewed",
       }),
     );
+    repository.packetAttachments.push({
+      transactionId: "txn_1",
+      documentId: "doc_1",
+      inboxItemId: "inbox_1",
+      versionId: "ver_1",
+      objectKey: "receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 12,
+      title: "Receipt",
+    });
     const { createAppRouter } = await import("./routers/index");
     const router = createAppRouter({
       dawnRepository: repository as unknown as DawnRepository,
@@ -75,5 +86,42 @@ describe("transactionReview.exportPacket router", () => {
     expect(result.manifest.transactionCount).toBe(1);
     expect(zipText).toContain("transactions.csv");
     expect(zipText).toContain("manifest.json");
+  });
+
+  test("updates accountant lifecycle status through the router", async () => {
+    process.env.DATABASE_URL ??= "postgres://test";
+    process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";
+    process.env.BETTER_AUTH_URL ??= "http://localhost:3000";
+    process.env.POLAR_ACCESS_TOKEN ??= "test";
+    process.env.POLAR_SUCCESS_URL ??= "http://localhost:3001/success";
+    process.env.CORS_ORIGIN ??= "http://localhost:3001";
+
+    const repository = createReviewRepository("member");
+    const { createAppRouter } = await import("./routers/index");
+    const router = createAppRouter({
+      dawnRepository: repository as unknown as DawnRepository,
+      bankingProviders: [],
+      integrationProviders: [],
+      emailInboxConnectors: [],
+      documentUrlSigner,
+      invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
+      invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
+    });
+
+    const result = await call(
+      router.transactionReview.updateAccountantStatus,
+      {
+        teamId: "team_1",
+        transactionId: "txn_1",
+        action: "archive",
+        idempotencyKey: "status_1",
+      },
+      {
+        context: createApiTestContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(result.transaction.accountantStatus).toBe("archived");
+    expect(result.nextStatus).toBe("archived");
   });
 });

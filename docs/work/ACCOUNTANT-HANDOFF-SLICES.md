@@ -44,16 +44,16 @@ Live Gmail OAuth and email delivery should not block completion of local product
 
 ## Progress Tracker
 
-| Slice | Status | Notes |
-| --- | --- | --- |
-| 1. Accountant Packet Tracer | Completed | Local tracer exports reviewed transactions to a ZIP with `transactions.csv`, `manifest.json`, optional resolved attachments, idempotency, audit, outbox, API, and transactions-page download wiring. Browser smoke reached `/login`; authenticated click smoke still needs a local test account/session. |
-| 2. Midday-Parity Transaction Lifecycle And Review Queue | Not started | Needed before final export-depth semantics. |
-| 3. CSV Import Wizard Parity Plus | Not started | Makes bank CSV import Midday-parity or better. |
-| 4. Gmail Connector Production Readiness | Not started | Live proof depends on Google OAuth credentials. |
-| 5. Receipt Matching Parity Plus | Not started | Bidirectional matching and feedback memory. |
-| 6. Accountant Export Package Depth | Not started | ZIP/XLSX/email/status/history depth. |
-| 7. Accountant Access And Handoff Audit | Not started | Uses accountant role for better-than-Midday collaboration. |
-| 8. Operational Hardening And Accountant Close Loop | Not started | Monthly close reliability and observability. |
+| Slice                                                   | Status      | Notes                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Accountant Packet Tracer                             | Completed   | Local tracer exports reviewed transactions to a ZIP with `transactions.csv`, `manifest.json`, optional resolved attachments, idempotency, audit, outbox, API, and transactions-page download wiring. Browser smoke reached `/login`; authenticated click smoke still needs a local test account/session. |
+| 2. Midday-Parity Transaction Lifecycle And Review Queue | Completed   | Added accountant lifecycle status, derived receipt/export readiness, DB persistence, audited/idempotent status transitions, sync invalidation, ready-only export semantics, and transactions-page queue filters/actions. Browser smoke still needs a local test account/session for authenticated UI clicks. |
+| 3. CSV Import Wizard Parity Plus                        | Not started | Makes bank CSV import Midday-parity or better.                                                                                                                                                                                                                                                           |
+| 4. Gmail Connector Production Readiness                 | Not started | Live proof depends on Google OAuth credentials.                                                                                                                                                                                                                                                          |
+| 5. Receipt Matching Parity Plus                         | Not started | Bidirectional matching and feedback memory.                                                                                                                                                                                                                                                              |
+| 6. Accountant Export Package Depth                      | Not started | ZIP/XLSX/email/status/history depth.                                                                                                                                                                                                                                                                     |
+| 7. Accountant Access And Handoff Audit                  | Not started | Uses accountant role for better-than-Midday collaboration.                                                                                                                                                                                                                                               |
+| 8. Operational Hardening And Accountant Close Loop      | Not started | Monthly close reliability and observability.                                                                                                                                                                                                                                                             |
 
 ## Outcome
 
@@ -172,6 +172,8 @@ Status: Completed on 2026-06-15.
 
 Make the transactions screen behave like a real accountant work queue, not just a generic transaction list.
 
+Status: Completed on 2026-06-15.
+
 ## Scope
 
 - Add an explicit accountant workflow status model that can represent Midday's important states: no receipt, receipt found, ready to export, exporting, exported, export failed, excluded, and archived.
@@ -194,20 +196,23 @@ Make the transactions screen behave like a real accountant work queue, not just 
 
 ## Acceptance Criteria
 
-- [ ] The Review tab is an actionable accountant queue with stable counts.
-- [ ] A reviewed transaction with an accepted receipt match can become ready to export.
-- [ ] A transaction without receipt evidence is clearly separated from ready-to-export items.
-- [ ] Excluded and archived transactions do not appear in the default export queue.
-- [ ] Exported transactions disappear from the ready queue but can still be found by filter.
-- [ ] Failed exports remain visible with retry affordance and error detail.
-- [ ] All state changes are permissioned, audited, and idempotent.
+- [x] The Review tab is an actionable accountant queue with stable counts.
+- [x] A reviewed transaction with an accepted receipt match can become ready to export.
+- [x] A transaction without receipt evidence is clearly separated from ready-to-export items.
+- [x] Excluded and archived transactions do not appear in the default export queue.
+- [x] Exported transactions disappear from the ready queue but can still be found by filter.
+- [x] Failed exports remain visible with retry affordance and error detail.
+- [x] All state changes are permissioned, audited, and idempotent.
 
 ## Verification
 
-- Domain tests for status derivation.
-- App use-case tests for status transitions and permission failures.
-- Web typecheck and browser smoke for queue filters/counts.
-- `bun run check-types`
+- `bun test packages/domain/src/transaction-review.test.ts packages/app/src/transaction-review.test.ts packages/app/src/accountant-packet.test.ts packages/api/src/accountant-packet-router.test.ts` passed: 22 tests.
+- `bun test packages/app` passed: 119 tests.
+- `bun test ./src/index.test.ts` from `packages/jobs` passed: 17 tests.
+- `bun test` from `packages/jobs` passed: 17 tests.
+- `bun run check-types` passed, including the web production build.
+- `bun run check` passed; it runs `oxlint && oxfmt --write`.
+- Browser smoke opened `http://localhost:3001/transactions`, which redirected to `http://localhost:3001/login`; authenticated queue chip/action/download smoke remains blocked until a local test account/session is available.
 
 ## Dependencies
 

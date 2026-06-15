@@ -67,13 +67,18 @@ import type {
   TeamRole,
   TimeEntry,
   Transaction,
+  TransactionAccountantStatus,
   TransactionTag,
   WebhookDelivery,
   WebhookSubscription,
   InboxMatchCandidate,
   InboxMatchSuggestion,
 } from "@dawn/domain";
-import { calculateInvoiceTotals, ledgerDuplicateKey } from "@dawn/domain";
+import {
+  calculateInvoiceTotals,
+  deriveTransactionAccountantStatus,
+  ledgerDuplicateKey,
+} from "@dawn/domain";
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 
 import { db } from "./index";
@@ -203,12 +208,18 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       .from(schema.transaction)
       .where(eq(schema.transaction.teamId, teamId))
       .orderBy(desc(schema.transaction.postedAt));
+    const attachmentCounts = await this.transactionAttachmentCounts(
+      teamId,
+      transactions.map((transaction) => transaction.id),
+    );
 
     return {
       teamId,
       teamName: team?.name ?? "Workspace",
       categories: categories.map(mapCategory),
-      transactions: transactions.map(mapTransaction),
+      transactions: transactions.map((transaction) =>
+        mapTransaction(transaction, attachmentCounts.get(transaction.id) ?? 0),
+      ),
       sync: {
         collection: "transactions",
         cursor: transactions[0]?.updatedAt.toISOString() ?? null,
@@ -240,7 +251,14 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       .where(and(eq(schema.transaction.teamId, teamId), eq(schema.transaction.id, transactionId)))
       .limit(1);
 
-    return transaction ? mapTransaction(transaction) : null;
+    if (!transaction) {
+      return null;
+    }
+
+    return mapTransaction(
+      transaction,
+      await this.countTransactionAttachmentsForTeam({ teamId, transactionId }),
+    );
   }
 
   async getCategoryForTeam(teamId: string, categoryId: string) {
@@ -256,6 +274,37 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       .limit(1);
 
     return category ? mapCategory(category) : null;
+  }
+
+  async countTransactionAttachmentsForTeam(input: {
+    teamId: string;
+    transactionId: string;
+  }): Promise<number> {
+    const counts = await this.transactionAttachmentCounts(input.teamId, [input.transactionId]);
+
+    return counts.get(input.transactionId) ?? 0;
+  }
+
+  private async transactionAttachmentCounts(teamId: string, transactionIds: readonly string[]) {
+    if (transactionIds.length === 0) {
+      return new Map<string, number>();
+    }
+
+    const rows = await this.client
+      .select({
+        transactionId: schema.transactionAttachment.transactionId,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(schema.transactionAttachment)
+      .where(
+        and(
+          eq(schema.transactionAttachment.teamId, teamId),
+          inArray(schema.transactionAttachment.transactionId, [...transactionIds]),
+        ),
+      )
+      .groupBy(schema.transactionAttachment.transactionId);
+
+    return new Map(rows.map((row) => [row.transactionId, Number(row.count)]));
   }
 
   async listCounterparties(teamId: string): Promise<Counterparty[]> {
@@ -3443,8 +3492,14 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       .from(schema.transaction)
       .where(and(...conditions))
       .orderBy(desc(schema.transaction.postedAt));
+    const attachmentCounts = await this.transactionAttachmentCounts(
+      input.teamId,
+      transactions.map((transaction) => transaction.id),
+    );
 
-    return transactions.map(mapTransaction);
+    return transactions.map((transaction) =>
+      mapTransaction(transaction, attachmentCounts.get(transaction.id) ?? 0),
+    );
   }
 
   async listAccountantPacketTransactionRows(input: {
@@ -3555,22 +3610,26 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       attachmentsByTransactionId.set(row.attachment.transactionId, current);
     }
 
-    return rows.map((row) => ({
-      transaction: mapTransaction(row.transaction),
-      account: row.account
-        ? {
-            id: row.account.id,
-            name: row.account.name,
-            currency: row.account.currency,
-          }
-        : null,
-      category: row.category ? { id: row.category.id, name: row.category.name } : null,
-      counterparty: row.counterparty
-        ? { id: row.counterparty.id, name: row.counterparty.name }
-        : null,
-      tags: tagsByTransactionId.get(row.transaction.id) ?? [],
-      attachments: attachmentsByTransactionId.get(row.transaction.id) ?? [],
-    }));
+    return rows.map((row) => {
+      const attachments = attachmentsByTransactionId.get(row.transaction.id) ?? [];
+
+      return {
+        transaction: mapTransaction(row.transaction, attachments.length),
+        account: row.account
+          ? {
+              id: row.account.id,
+              name: row.account.name,
+              currency: row.account.currency,
+            }
+          : null,
+        category: row.category ? { id: row.category.id, name: row.category.name } : null,
+        counterparty: row.counterparty
+          ? { id: row.counterparty.id, name: row.counterparty.name }
+          : null,
+        tags: tagsByTransactionId.get(row.transaction.id) ?? [],
+        attachments,
+      };
+    });
   }
 
   async listTransactionsForSync(input: { teamId: string; cursor?: string | null }) {
@@ -3585,8 +3644,14 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       .from(schema.transaction)
       .where(and(...conditions))
       .orderBy(asc(schema.transaction.updatedAt));
+    const attachmentCounts = await this.transactionAttachmentCounts(
+      input.teamId,
+      transactions.map((transaction) => transaction.id),
+    );
 
-    return transactions.map(mapTransaction);
+    return transactions.map((transaction) =>
+      mapTransaction(transaction, attachmentCounts.get(transaction.id) ?? 0),
+    );
   }
 
   async createLedgerTransactionForTeam(input: {
@@ -3733,6 +3798,41 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     }
 
     return mapTransaction(transaction);
+  }
+
+  async updateTransactionAccountantStatusForTeam(input: {
+    teamId: string;
+    transactionId: string;
+    accountantStatus: TransactionAccountantStatus;
+    reason?: string | null;
+  }) {
+    const [transaction] = await this.client
+      .update(schema.transaction)
+      .set({
+        accountantStatus: input.accountantStatus,
+        accountantStatusReason: input.reason ?? null,
+        accountantStatusUpdatedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.transaction.teamId, input.teamId),
+          eq(schema.transaction.id, input.transactionId),
+        ),
+      )
+      .returning();
+
+    if (!transaction) {
+      throw new Error("Transaction accountant status was not updated");
+    }
+
+    return mapTransaction(
+      transaction,
+      await this.countTransactionAttachmentsForTeam({
+        teamId: input.teamId,
+        transactionId: input.transactionId,
+      }),
+    );
   }
 
   async appendAuditEvent(input: {
@@ -4754,8 +4854,11 @@ function latestExtractionForItem(
   );
 }
 
-function mapTransaction(transaction: typeof schema.transaction.$inferSelect): Transaction {
-  return {
+function mapTransaction(
+  transaction: typeof schema.transaction.$inferSelect,
+  acceptedAttachmentCount = 0,
+): Transaction {
+  const base: Transaction = {
     id: transaction.id,
     teamId: transaction.teamId,
     accountId: transaction.accountId,
@@ -4779,8 +4882,19 @@ function mapTransaction(transaction: typeof schema.transaction.$inferSelect): Tr
     providerTransactionId: transaction.providerTransactionId,
     categoryId: transaction.categoryId,
     reviewState: transaction.reviewState === "reviewed" ? "reviewed" : "needs_review",
+    accountantStatus: transaction.accountantStatus as TransactionAccountantStatus,
+    accountantStatusReason: transaction.accountantStatusReason,
+    accountantStatusUpdatedAt: transaction.accountantStatusUpdatedAt?.toISOString() ?? null,
     duplicateKey: transaction.duplicateKey,
     updatedAt: transaction.updatedAt.toISOString(),
+  };
+
+  return {
+    ...base,
+    accountantStatus: deriveTransactionAccountantStatus({
+      transaction: base,
+      acceptedAttachmentCount,
+    }),
   };
 }
 

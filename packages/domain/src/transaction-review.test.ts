@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { applyTransactionReview } from "./index";
+import { applyTransactionReview, deriveTransactionAccountantStatus } from "./index";
 
 const transaction = {
   id: "txn_1",
@@ -45,5 +45,51 @@ describe("applyTransactionReview", () => {
         name: "Travel",
       }),
     ).toThrow("Transaction category must belong to the transaction team");
+  });
+});
+
+describe("deriveTransactionAccountantStatus", () => {
+  test("separates review, receipt, and export-ready states", () => {
+    expect(
+      deriveTransactionAccountantStatus({
+        transaction: { reviewState: "needs_review" },
+        acceptedAttachmentCount: 0,
+      }),
+    ).toBe("needs_review");
+    expect(
+      deriveTransactionAccountantStatus({
+        transaction: { reviewState: "needs_review" },
+        acceptedAttachmentCount: 1,
+      }),
+    ).toBe("receipt_found");
+    expect(
+      deriveTransactionAccountantStatus({
+        transaction: { reviewState: "reviewed" },
+        acceptedAttachmentCount: 0,
+      }),
+    ).toBe("missing_receipt");
+    expect(
+      deriveTransactionAccountantStatus({
+        transaction: { reviewState: "reviewed" },
+        acceptedAttachmentCount: 1,
+      }),
+    ).toBe("ready_to_export");
+  });
+
+  test("persistent export and exclusion states override derived queue state", () => {
+    for (const accountantStatus of [
+      "exporting",
+      "exported",
+      "export_failed",
+      "excluded",
+      "archived",
+    ] as const) {
+      expect(
+        deriveTransactionAccountantStatus({
+          transaction: { reviewState: "reviewed", accountantStatus },
+          acceptedAttachmentCount: 1,
+        }),
+      ).toBe(accountantStatus);
+    }
   });
 });

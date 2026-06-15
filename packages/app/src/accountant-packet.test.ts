@@ -82,6 +82,7 @@ describe("exportAccountantPacket", () => {
     expect(zipText).toContain("manifest.json");
     expect(zipText).toContain("Figma subscription");
     expect(zipText).toContain("receipt bytes");
+    expect(repository.transactions.get("txn_1")?.accountantStatus).toBe("exported");
     expect(repository.auditEvents).toMatchObject([{ action: "accountant_packet.exported" }]);
     expect(repository.outboxEvents).toMatchObject([{ type: "accountant_packet.exported" }]);
   });
@@ -115,6 +116,17 @@ describe("exportAccountantPacket", () => {
         reviewState: "reviewed",
       }),
     );
+    repository.packetAttachments.push({
+      transactionId: "txn_1",
+      documentId: "doc_1",
+      inboxItemId: "inbox_1",
+      versionId: "ver_1",
+      objectKey: "receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 12,
+      title: "Receipt",
+    });
     const command = {
       teamId: "team_1",
       from: "2026-06-01T00:00:00.000Z",

@@ -1,4 +1,5 @@
 import { Button } from "@dawn/ui/components/button";
+import { Badge } from "@dawn/ui/components/badge";
 import { Checkbox } from "@dawn/ui/components/checkbox";
 import {
   DropdownMenu,
@@ -16,7 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from "@dawn/ui/components/table";
-import { formatMoney, type Transaction } from "@dawn/domain";
+import { formatMoney, type Transaction, type TransactionAccountantStatus } from "@dawn/domain";
 import type { TransactionSyncRecord } from "@dawn/sync";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -39,17 +40,73 @@ import { orpc } from "@/utils/orpc";
 import { ensureCurrentTeam, optionalStringSearchParam } from "../-team-routing";
 
 type TransactionTab = "all" | "review";
+type TransactionQueueFilter =
+  | "queue"
+  | "ready"
+  | "missing_receipt"
+  | "export_failed"
+  | "exported"
+  | "excluded"
+  | "archived";
+type UpdateTransactionAccountantStatusAction =
+  | "exclude"
+  | "archive"
+  | "unarchive"
+  | "mark_exporting"
+  | "mark_exported"
+  | "mark_export_failed"
+  | "retry_export";
+type QueueBadgeVariant =
+  | "default"
+  | "secondary"
+  | "outline"
+  | "success"
+  | "warning"
+  | "destructive"
+  | "muted";
 
 type TransactionsSearch = {
   q?: string;
   tab?: TransactionTab;
+  status?: TransactionQueueFilter;
+};
+
+const transactionQueueFilters = [
+  { value: "queue", label: "Queue" },
+  { value: "ready", label: "Ready" },
+  { value: "missing_receipt", label: "Missing receipt" },
+  { value: "export_failed", label: "Failed" },
+  { value: "exported", label: "Exported" },
+  { value: "excluded", label: "Excluded" },
+  { value: "archived", label: "Archived" },
+] as const satisfies readonly { value: TransactionQueueFilter; label: string }[];
+
+const defaultQueueStatuses = new Set<TransactionAccountantStatus>([
+  "needs_review",
+  "receipt_found",
+  "missing_receipt",
+  "ready_to_export",
+  "exporting",
+  "export_failed",
+]);
+
+const queueFilterStatus: Record<
+  Exclude<TransactionQueueFilter, "queue" | "ready">,
+  TransactionAccountantStatus
+> = {
+  missing_receipt: "missing_receipt",
+  export_failed: "export_failed",
+  exported: "exported",
+  excluded: "excluded",
+  archived: "archived",
 };
 
 export const Route = createFileRoute("/_auth/transactions")({
   component: TransactionsRoute,
   validateSearch: (search: Record<string, unknown>): TransactionsSearch => ({
     q: optionalStringSearchParam(search.q),
-    tab: search.tab === "review" ? "review" : undefined,
+    tab: search.tab === "all" || search.tab === "review" ? search.tab : undefined,
+    status: isTransactionQueueFilter(search.status) ? search.status : undefined,
   }),
   loaderDeps: ({ search }) => ({ teamId: search.teamId }),
   loader: async ({ context, deps }) => {
@@ -86,7 +143,8 @@ function TransactionsRoute() {
   const navigate = useNavigate({ from: Route.fullPath });
   const queryClient = useQueryClient();
   const query = search.q ?? "";
-  const tab = search.tab ?? "all";
+  const tab = search.tab ?? "review";
+  const statusFilter = search.status ?? "queue";
   const [selectedTransactionIds, setSelectedTransactionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -114,6 +172,19 @@ function TransactionsRoute() {
     }),
   );
   const exportMutation = useMutation(orpc.transactionReview.exportPacket.mutationOptions());
+  const accountantStatusMutation = useMutation(
+    orpc.transactionReview.updateAccountantStatus.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({
+          queryKey: orpc.transactionReview.list.queryKey(),
+        });
+        await queryClient.invalidateQueries({
+          queryKey: orpc.ledger.summary.queryKey(),
+        });
+        await transactionSync.refetch();
+      },
+    }),
+  );
 
   function updateSearch(next: TransactionsSearch) {
     void navigate({
@@ -140,16 +211,14 @@ function TransactionsRoute() {
       ? syncedTransactions
       : (transactionReview.data?.transactions ?? []);
   const categories = transactionReview.data?.categories ?? [];
-  const reviewCount = transactions.filter(
-    (transaction) => transaction.reviewState !== "reviewed",
-  ).length;
+  const queueCounts = useMemo(() => createQueueCounts(transactions), [transactions]);
   const monthLabel = monthChip(transactions[0]?.postedAt);
 
   const visibleTransactions = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
     return transactions.filter((transaction) => {
-      if (tab === "review" && transaction.reviewState === "reviewed") {
+      if (tab === "review" && !transactionMatchesQueueFilter(transaction, statusFilter)) {
         return false;
       }
 
@@ -162,20 +231,23 @@ function TransactionsRoute() {
         transaction.description,
         transaction.providerTransactionId,
         category?.name,
+        accountantStatusLabel(accountantStatusFor(transaction)),
         formatMoney(transaction.money),
         formatDate(transaction.postedAt),
       ]
         .filter(Boolean)
         .some((value) => value!.toLowerCase().includes(normalizedQuery));
     });
-  }, [categories, query, tab, transactions]);
+  }, [categories, query, statusFilter, tab, transactions]);
   const selectedTransactions = useMemo(
     () => transactions.filter((transaction) => selectedTransactionIds.has(transaction.id)),
     [selectedTransactionIds, transactions],
   );
-  const selectedReviewedTransactions = useMemo(
+  const selectedReadyTransactions = useMemo(
     () =>
-      selectedTransactions.filter((transaction) => transaction.reviewState === "reviewed"),
+      selectedTransactions.filter(
+        (transaction) => accountantStatusFor(transaction) === "ready_to_export",
+      ),
     [selectedTransactions],
   );
 
@@ -234,27 +306,59 @@ function TransactionsRoute() {
   }
 
   async function exportSelectedTransactions() {
-    if (!transactionReview.data || selectedReviewedTransactions.length === 0) {
+    if (!transactionReview.data || selectedReadyTransactions.length === 0) {
       return;
     }
 
     setExportError(null);
 
     try {
-      const postedTimes = selectedReviewedTransactions.map((transaction) =>
+      const postedTimes = selectedReadyTransactions.map((transaction) =>
         new Date(transaction.postedAt).getTime(),
       );
       const result = await exportMutation.mutateAsync({
         teamId: transactionReview.data.teamId,
         from: new Date(Math.min(...postedTimes)).toISOString(),
         to: new Date(Math.max(...postedTimes)).toISOString(),
-        transactionIds: selectedReviewedTransactions.map((transaction) => transaction.id),
+        transactionIds: selectedReadyTransactions.map((transaction) => transaction.id),
         idempotencyKey: crypto.randomUUID(),
       });
 
       downloadBase64File(result.bodyBase64, result.contentType, result.fileName);
+      await queryClient.invalidateQueries({
+        queryKey: orpc.transactionReview.list.queryKey(),
+      });
+      await queryClient.invalidateQueries({
+        queryKey: orpc.ledger.summary.queryKey(),
+      });
+      await transactionSync.refetch();
+      setSelectedTransactionIds(new Set());
     } catch (error) {
       setExportError(error instanceof Error ? error.message : "Accountant packet export failed");
+    }
+  }
+
+  async function updateAccountantStatus(
+    transaction: Transaction | TransactionSyncRecord,
+    action: UpdateTransactionAccountantStatusAction,
+    reason?: string,
+  ) {
+    if (!transactionReview.data) {
+      return;
+    }
+
+    setExportError(null);
+
+    try {
+      await accountantStatusMutation.mutateAsync({
+        teamId: transactionReview.data.teamId,
+        transactionId: transaction.id,
+        action,
+        reason,
+        idempotencyKey: crypto.randomUUID(),
+      });
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Accountant status update failed");
     }
   }
 
@@ -312,7 +416,7 @@ function TransactionsRoute() {
             <button
               className="min-w-16 border-r border-border px-4 text-sm text-foreground transition-colors hover:bg-muted/30 data-[active=true]:bg-card active:scale-[0.98]"
               data-active={tab === "all"}
-              onClick={() => updateSearch({ tab: undefined })}
+              onClick={() => updateSearch({ tab: "all", status: undefined })}
               type="button"
             >
               All
@@ -320,13 +424,35 @@ function TransactionsRoute() {
             <button
               className="min-w-32 px-4 text-sm text-muted-foreground transition-colors hover:bg-muted/30 data-[active=true]:bg-card data-[active=true]:text-foreground active:scale-[0.98]"
               data-active={tab === "review"}
-              onClick={() => updateSearch({ tab: "review" })}
+              onClick={() => updateSearch({ tab: "review", status: undefined })}
               type="button"
             >
-              In review ({reviewCount})
+              Review queue ({queueCounts.queue})
             </button>
           </div>
         </div>
+      </div>
+
+      <div className="flex gap-2 overflow-x-auto pb-px" aria-label="Transaction queue filters">
+        {transactionQueueFilters.map((filter) => {
+          const isActive = tab === "review" && statusFilter === filter.value;
+          const count = queueCounts[filter.value];
+
+          return (
+            <Button
+              className="gap-2 border-border px-3 data-[active=true]:border-foreground data-[active=true]:bg-card data-[active=true]:text-foreground"
+              data-active={isActive}
+              key={filter.value}
+              onClick={() => updateSearch({ tab: "review", status: filter.value })}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              {filter.label}
+              <span className="font-mono text-[11px] text-muted-foreground">{count}</span>
+            </Button>
+          );
+        })}
       </div>
 
       <section
@@ -394,6 +520,8 @@ function TransactionsRoute() {
                   "";
                 const canReview = transaction.reviewState !== "reviewed" && categoryId.length > 0;
                 const isSelected = selectedTransactionIds.has(transaction.id);
+                const accountantStatus = accountantStatusFor(transaction);
+                const statusMeta = accountantStatusMeta(accountantStatus);
 
                 return (
                   <TableRow
@@ -475,14 +603,19 @@ function TransactionsRoute() {
                       </div>
                     </TableCell>
                     <TableCell className="text-sm text-foreground">
-                      {transaction.reviewState === "reviewed" ? (
-                        <span className="inline-flex items-center gap-2 text-muted-foreground">
-                          <CheckIcon aria-hidden="true" className="size-3.5" />
-                          Reviewed
-                        </span>
-                      ) : (
-                        "In review"
-                      )}
+                      <div className="flex min-w-0 flex-col gap-1">
+                        <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
+                        {transaction.accountantStatusReason ? (
+                          <span className="truncate text-xs text-muted-foreground">
+                            {transaction.accountantStatusReason}
+                          </span>
+                        ) : transaction.reviewState === "reviewed" ? (
+                          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                            <CheckIcon aria-hidden="true" className="size-3" />
+                            Reviewed
+                          </span>
+                        ) : null}
+                      </div>
                     </TableCell>
                     <TableCell className="text-center">
                       <DropdownMenu>
@@ -505,6 +638,73 @@ function TransactionsRoute() {
                           >
                             Mark reviewed
                           </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          {accountantStatus === "export_failed" ? (
+                            <DropdownMenuItem
+                              disabled={accountantStatusMutation.isPending}
+                              onClick={() =>
+                                void updateAccountantStatus(transaction, "retry_export")
+                              }
+                            >
+                              Retry export
+                            </DropdownMenuItem>
+                          ) : null}
+                          {accountantStatus === "exporting" ? (
+                            <DropdownMenuItem
+                              disabled={accountantStatusMutation.isPending}
+                              onClick={() =>
+                                void updateAccountantStatus(
+                                  transaction,
+                                  "mark_export_failed",
+                                  "Marked failed from transaction queue",
+                                )
+                              }
+                            >
+                              Mark failed
+                            </DropdownMenuItem>
+                          ) : null}
+                          {accountantStatus === "ready_to_export" ||
+                          accountantStatus === "exporting" ||
+                          accountantStatus === "export_failed" ? (
+                            <DropdownMenuItem
+                              disabled={accountantStatusMutation.isPending}
+                              onClick={() =>
+                                void updateAccountantStatus(transaction, "mark_exported")
+                              }
+                            >
+                              Mark exported
+                            </DropdownMenuItem>
+                          ) : null}
+                          {accountantStatus === "archived" ? (
+                            <DropdownMenuItem
+                              disabled={accountantStatusMutation.isPending}
+                              onClick={() => void updateAccountantStatus(transaction, "unarchive")}
+                            >
+                              Unarchive
+                            </DropdownMenuItem>
+                          ) : (
+                            <DropdownMenuItem
+                              disabled={accountantStatusMutation.isPending}
+                              onClick={() => void updateAccountantStatus(transaction, "archive")}
+                            >
+                              Archive
+                            </DropdownMenuItem>
+                          )}
+                          {accountantStatus === "excluded" ? (
+                            <DropdownMenuItem
+                              disabled={accountantStatusMutation.isPending}
+                              onClick={() => void updateAccountantStatus(transaction, "unarchive")}
+                            >
+                              Restore to queue
+                            </DropdownMenuItem>
+                          ) : (
+                            <DropdownMenuItem
+                              disabled={accountantStatusMutation.isPending}
+                              onClick={() => void updateAccountantStatus(transaction, "exclude")}
+                            >
+                              Exclude
+                            </DropdownMenuItem>
+                          )}
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
                             onClick={() =>
@@ -547,6 +747,9 @@ function TransactionsRoute() {
       {exportMutation.error ? (
         <p className="text-xs text-destructive">{exportMutation.error.message}</p>
       ) : null}
+      {accountantStatusMutation.error ? (
+        <p className="text-xs text-destructive">{accountantStatusMutation.error.message}</p>
+      ) : null}
       {selectedTransactionIds.size > 0 ? (
         <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 flex justify-center bg-gradient-to-t from-background via-background/85 to-transparent px-4 py-7">
           <div
@@ -554,7 +757,7 @@ function TransactionsRoute() {
             className="pointer-events-auto flex min-h-11 w-full max-w-lg items-center justify-between border border-border bg-card px-3 text-sm shadow-[0_-16px_48px_rgba(0,0,0,0.45)]"
           >
             <span className="truncate text-muted-foreground">
-              {selectedTransactionIds.size} selected
+              {selectedTransactionIds.size} selected · {selectedReadyTransactions.length} ready
             </span>
             <div className="flex items-center gap-2">
               <Button
@@ -569,7 +772,7 @@ function TransactionsRoute() {
               </Button>
               <Button
                 className="gap-2 px-3"
-                disabled={exportMutation.isPending || selectedReviewedTransactions.length === 0}
+                disabled={exportMutation.isPending || selectedReadyTransactions.length === 0}
                 onClick={() => void exportSelectedTransactions()}
                 size="sm"
                 type="button"
@@ -583,6 +786,117 @@ function TransactionsRoute() {
       ) : null}
     </div>
   );
+}
+
+function isTransactionQueueFilter(value: unknown): value is TransactionQueueFilter {
+  return transactionQueueFilters.some((filter) => filter.value === value);
+}
+
+function accountantStatusFor(
+  transaction: Pick<Transaction, "reviewState" | "accountantStatus">,
+): TransactionAccountantStatus {
+  return (
+    transaction.accountantStatus ??
+    (transaction.reviewState === "reviewed" ? "missing_receipt" : "needs_review")
+  );
+}
+
+function transactionMatchesQueueFilter(
+  transaction: Pick<Transaction, "reviewState" | "accountantStatus">,
+  filter: TransactionQueueFilter,
+) {
+  const status = accountantStatusFor(transaction);
+
+  if (filter === "queue") {
+    return defaultQueueStatuses.has(status);
+  }
+
+  if (filter === "ready") {
+    return status === "ready_to_export";
+  }
+
+  return status === queueFilterStatus[filter];
+}
+
+function createQueueCounts(
+  transactions: readonly Pick<Transaction, "reviewState" | "accountantStatus">[],
+) {
+  const counts: Record<TransactionQueueFilter, number> = {
+    queue: 0,
+    ready: 0,
+    missing_receipt: 0,
+    export_failed: 0,
+    exported: 0,
+    excluded: 0,
+    archived: 0,
+  };
+
+  for (const transaction of transactions) {
+    const status = accountantStatusFor(transaction);
+
+    if (defaultQueueStatuses.has(status)) {
+      counts.queue += 1;
+    }
+
+    if (status === "ready_to_export") {
+      counts.ready += 1;
+    } else if (status === "missing_receipt") {
+      counts.missing_receipt += 1;
+    } else if (status === "export_failed") {
+      counts.export_failed += 1;
+    } else if (status === "exported") {
+      counts.exported += 1;
+    } else if (status === "excluded") {
+      counts.excluded += 1;
+    } else if (status === "archived") {
+      counts.archived += 1;
+    }
+  }
+
+  return counts;
+}
+
+function accountantStatusLabel(status: TransactionAccountantStatus) {
+  return accountantStatusMeta(status).label;
+}
+
+function accountantStatusMeta(status: TransactionAccountantStatus): {
+  label: string;
+  variant: QueueBadgeVariant;
+} {
+  if (status === "ready_to_export") {
+    return { label: "Ready to export", variant: "success" };
+  }
+
+  if (status === "receipt_found") {
+    return { label: "Receipt found", variant: "secondary" };
+  }
+
+  if (status === "missing_receipt") {
+    return { label: "Missing receipt", variant: "warning" };
+  }
+
+  if (status === "exporting") {
+    return { label: "Exporting", variant: "secondary" };
+  }
+
+  if (status === "exported") {
+    return { label: "Exported", variant: "muted" };
+  }
+
+  if (status === "export_failed") {
+    return { label: "Export failed", variant: "destructive" };
+  }
+
+  if (status === "excluded") {
+    return { label: "Excluded", variant: "outline" };
+  }
+
+  if (status === "archived") {
+    return { label: "Archived", variant: "outline" };
+  }
+
+  return { label: "Needs review", variant: "outline" };
 }
 
 function formatDate(value: string) {

@@ -8,6 +8,7 @@ import type {
   ReportTotals,
   TeamRole,
   Transaction,
+  TransactionAccountantStatus,
   TransactionTag,
 } from "@dawn/domain";
 import {
@@ -15,6 +16,7 @@ import {
   assertLedgerTransactionDraft,
   createReportTotals,
   csvRowToLedgerDraft,
+  deriveTransactionAccountantStatus,
   ledgerDuplicateKey,
   parseCsvTransactionRows,
 } from "@dawn/domain";
@@ -68,6 +70,30 @@ export type ReviewTransactionCommand = {
 
 export type ReviewTransactionResult = {
   transaction: Transaction;
+  replayed: boolean;
+};
+
+export type UpdateTransactionAccountantStatusAction =
+  | "exclude"
+  | "archive"
+  | "unarchive"
+  | "mark_exporting"
+  | "mark_exported"
+  | "mark_export_failed"
+  | "retry_export";
+
+export type UpdateTransactionAccountantStatusCommand = {
+  teamId: string;
+  transactionId: string;
+  action: UpdateTransactionAccountantStatusAction;
+  reason?: string | null;
+  idempotencyKey: string;
+};
+
+export type UpdateTransactionAccountantStatusResult = {
+  transaction: Transaction;
+  previousStatus: TransactionAccountantStatus;
+  nextStatus: TransactionAccountantStatus;
   replayed: boolean;
 };
 
@@ -414,7 +440,21 @@ export type LedgerMetadataRepository = {
 
 export type LedgerRepository = TransactionReviewRepository & LedgerMetadataRepository;
 
+export type TransactionAccountantLifecycleRepository = TransactionReviewRepository & {
+  countTransactionAttachmentsForTeam(input: {
+    teamId: string;
+    transactionId: string;
+  }): Promise<number>;
+  updateTransactionAccountantStatusForTeam(input: {
+    teamId: string;
+    transactionId: string;
+    accountantStatus: TransactionAccountantStatus;
+    reason?: string | null;
+  }): Promise<Transaction>;
+};
+
 const reviewTransactionOperation = "transaction.review";
+const updateTransactionAccountantStatusOperation = "transaction.accountant_status.update";
 const createLedgerTransactionOperation = "ledger.transaction.create";
 const createLedgerCounterpartyOperation = "ledger.counterparty.create";
 const createTransactionTagOperation = "ledger.transaction_tag.create";
@@ -520,12 +560,17 @@ export async function reviewTransaction(
 
     const reviewChange = applyTransactionReview(transaction, category);
 
-    const updatedTransaction = await transactionRepository.updateTransactionReviewForTeam({
+    const reviewedTransaction = await transactionRepository.updateTransactionReviewForTeam({
       teamId: command.teamId,
       transactionId: transaction.id,
       categoryId: reviewChange.transaction.categoryId ?? category.id,
       reviewState: reviewChange.transaction.reviewState,
     });
+    const updatedTransaction = await updateDerivedAccountantStatusIfSupported(
+      transactionRepository,
+      command.teamId,
+      reviewedTransaction,
+    );
 
     await transactionRepository.appendAuditEvent({
       teamId: command.teamId,
@@ -567,6 +612,210 @@ export function transactionReviewFingerprint(command: ReviewTransactionCommand) 
     transactionId: command.transactionId,
     categoryId: command.categoryId,
   });
+}
+
+export async function updateTransactionAccountantStatus(
+  repository: TransactionAccountantLifecycleRepository,
+  context: TransactionReviewContext,
+  command: UpdateTransactionAccountantStatusCommand,
+): Promise<UpdateTransactionAccountantStatusResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const lifecycleRepository = transactionRepository as TransactionAccountantLifecycleRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Transaction not found");
+
+    await resolveTeamAccess(
+      lifecycleRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.export",
+      "You cannot update accountant transaction status for this team",
+    );
+
+    const fingerprint = updateTransactionAccountantStatusFingerprint(command);
+    const replayed = await lifecycleRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      updateTransactionAccountantStatusOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different accountant status update",
+        );
+      }
+
+      return {
+        ...(replayed.result as UpdateTransactionAccountantStatusResult),
+        replayed: true,
+      };
+    }
+
+    const transaction = await lifecycleRepository.getTransactionForTeam(
+      command.teamId,
+      command.transactionId,
+    );
+
+    if (!transaction) {
+      throw new AppError("NOT_FOUND", "Transaction not found");
+    }
+
+    const attachmentCount = await lifecycleRepository.countTransactionAttachmentsForTeam({
+      teamId: command.teamId,
+      transactionId: transaction.id,
+    });
+    const previousStatus = deriveTransactionAccountantStatus({
+      transaction,
+      acceptedAttachmentCount: attachmentCount,
+    });
+    const nextStatus = nextAccountantStatusForAction({
+      action: command.action,
+      transaction,
+      attachmentCount,
+    });
+    const updatedTransaction = await lifecycleRepository.updateTransactionAccountantStatusForTeam({
+      teamId: command.teamId,
+      transactionId: transaction.id,
+      accountantStatus: nextStatus,
+      reason: normalizedAccountantStatusReason(command.reason),
+    });
+
+    await lifecycleRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: `transaction.accountant_status.${command.action}`,
+      entityType: "transaction",
+      entityId: transaction.id,
+      metadata: {
+        previousStatus,
+        nextStatus,
+        reason: normalizedAccountantStatusReason(command.reason),
+      },
+    });
+
+    await lifecycleRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "transaction.accountant_status_changed",
+      version: 1,
+      payload: {
+        transactionId: transaction.id,
+        previousStatus,
+        nextStatus,
+        action: command.action,
+      },
+    });
+
+    const result = {
+      transaction: updatedTransaction,
+      previousStatus,
+      nextStatus,
+      replayed: false,
+    };
+
+    await lifecycleRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: updateTransactionAccountantStatusOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export function updateTransactionAccountantStatusFingerprint(
+  command: UpdateTransactionAccountantStatusCommand,
+) {
+  return JSON.stringify({
+    teamId: command.teamId,
+    transactionId: command.transactionId,
+    action: command.action,
+    reason: normalizedAccountantStatusReason(command.reason),
+  });
+}
+
+async function updateDerivedAccountantStatusIfSupported(
+  repository: TransactionReviewRepository,
+  teamId: string,
+  transaction: Transaction,
+) {
+  if (!isTransactionAccountantLifecycleRepository(repository)) {
+    return transaction;
+  }
+
+  const attachmentCount = await repository.countTransactionAttachmentsForTeam({
+    teamId,
+    transactionId: transaction.id,
+  });
+  const nextStatus = deriveTransactionAccountantStatus({
+    transaction,
+    acceptedAttachmentCount: attachmentCount,
+  });
+
+  if (transaction.accountantStatus === nextStatus) {
+    return transaction;
+  }
+
+  return repository.updateTransactionAccountantStatusForTeam({
+    teamId,
+    transactionId: transaction.id,
+    accountantStatus: nextStatus,
+    reason: null,
+  });
+}
+
+function nextAccountantStatusForAction(input: {
+  action: UpdateTransactionAccountantStatusAction;
+  transaction: Transaction;
+  attachmentCount: number;
+}): TransactionAccountantStatus {
+  if (input.action === "exclude") {
+    return "excluded";
+  }
+
+  if (input.action === "archive") {
+    return "archived";
+  }
+
+  if (input.action === "mark_exporting") {
+    return "exporting";
+  }
+
+  if (input.action === "mark_exported") {
+    return "exported";
+  }
+
+  if (input.action === "mark_export_failed") {
+    return "export_failed";
+  }
+
+  return deriveTransactionAccountantStatus({
+    transaction: {
+      ...input.transaction,
+      accountantStatus: "needs_review",
+    },
+    acceptedAttachmentCount: input.attachmentCount,
+  });
+}
+
+function normalizedAccountantStatusReason(reason: string | null | undefined) {
+  return reason?.trim() || null;
+}
+
+function isTransactionAccountantLifecycleRepository(
+  repository: TransactionReviewRepository,
+): repository is TransactionAccountantLifecycleRepository {
+  return (
+    "countTransactionAttachmentsForTeam" in repository &&
+    "updateTransactionAccountantStatusForTeam" in repository
+  );
 }
 
 export async function listLedgerSummary(

@@ -24,6 +24,7 @@ import type {
   CsvTransactionImportMapping,
   LedgerRepository,
   ReviewWorkspaceData,
+  TransactionAccountantLifecycleRepository,
   TransactionImportSession,
 } from "./banking-ledger";
 import type { AccountantPacketRepository as AccountantPacketUseCaseRepository } from "./accountant-packet";
@@ -255,6 +256,7 @@ export type OutboxQueuePublisher = {
 
 export type DawnRepository = BankingUseCaseRepository &
   AccountantPacketUseCaseRepository &
+  TransactionAccountantLifecycleRepository &
   LedgerRepository &
   DocumentsInboxUseCaseRepository &
   BillingRepository &

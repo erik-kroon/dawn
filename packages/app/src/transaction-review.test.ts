@@ -5,6 +5,7 @@ import {
   listTransactionSyncCollection,
   listTransactionReviewWorkspace,
   reviewTransaction,
+  updateTransactionAccountantStatus,
 } from "./index";
 import {
   createReviewRepository,
@@ -28,6 +29,41 @@ describe("reviewTransaction", () => {
     expect(result.replayed).toBe(false);
     expect(repository.auditEvents).toHaveLength(1);
     expect(repository.outboxEvents).toHaveLength(1);
+  });
+
+  test("marks reviewed transactions without receipts as missing receipt", async () => {
+    const repository = createReviewRepository("member");
+
+    const result = await reviewTransaction(
+      repository,
+      { actor: testActor, requestId: "request_1" },
+      { teamId: "team_1", transactionId: "txn_1", categoryId: "cat_1", idempotencyKey: "idem_1" },
+    );
+
+    expect(result.transaction.accountantStatus).toBe("missing_receipt");
+  });
+
+  test("marks reviewed transactions with accepted receipts as ready to export", async () => {
+    const repository = createReviewRepository("member");
+    repository.packetAttachments.push({
+      transactionId: "txn_1",
+      documentId: "doc_1",
+      inboxItemId: "inbox_1",
+      versionId: "ver_1",
+      objectKey: "receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 12,
+      title: "Receipt",
+    });
+
+    const result = await reviewTransaction(
+      repository,
+      { actor: testActor, requestId: "request_1" },
+      { teamId: "team_1", transactionId: "txn_1", categoryId: "cat_1", idempotencyKey: "idem_1" },
+    );
+
+    expect(result.transaction.accountantStatus).toBe("ready_to_export");
   });
 
   test("rejects a forbidden actor", async () => {
@@ -110,6 +146,109 @@ describe("reviewTransaction", () => {
         { teamId: "team_2", transactionId: "txn_1", categoryId: "cat_1", idempotencyKey: "idem_1" },
       ),
     ).rejects.toEqual(new AppError("NOT_FOUND", "Transaction not found"));
+  });
+});
+
+describe("updateTransactionAccountantStatus", () => {
+  test("excludes transactions with audit, outbox, and idempotency", async () => {
+    const repository = createReviewRepository("member");
+    repository.transactions.set(
+      "txn_1",
+      createTestTransaction({
+        id: "txn_1",
+        categoryId: "cat_1",
+        reviewState: "reviewed",
+      }),
+    );
+    const command = {
+      teamId: "team_1",
+      transactionId: "txn_1",
+      action: "exclude" as const,
+      reason: "Owner confirmed personal spend",
+      idempotencyKey: "status_1",
+    };
+
+    const first = await updateTransactionAccountantStatus(
+      repository,
+      { actor: testActor, requestId: "request_1" },
+      command,
+    );
+    const second = await updateTransactionAccountantStatus(
+      repository,
+      { actor: testActor, requestId: "request_2" },
+      command,
+    );
+
+    expect(first.transaction.accountantStatus).toBe("excluded");
+    expect(first.nextStatus).toBe("excluded");
+    expect(second.replayed).toBe(true);
+    expect(repository.auditEvents).toMatchObject([
+      { action: "transaction.accountant_status.exclude" },
+    ]);
+    expect(repository.outboxEvents).toMatchObject([
+      {
+        type: "transaction.accountant_status_changed",
+        payload: { transactionId: "txn_1", nextStatus: "excluded" },
+      },
+    ]);
+  });
+
+  test("retries failed exports back to the derived ready state", async () => {
+    const repository = createReviewRepository("member");
+    repository.transactions.set(
+      "txn_1",
+      createTestTransaction({
+        id: "txn_1",
+        categoryId: "cat_1",
+        reviewState: "reviewed",
+        accountantStatus: "export_failed",
+      }),
+    );
+    repository.packetAttachments.push({
+      transactionId: "txn_1",
+      documentId: "doc_1",
+      inboxItemId: "inbox_1",
+      versionId: "ver_1",
+      objectKey: "receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 12,
+      title: "Receipt",
+    });
+
+    const result = await updateTransactionAccountantStatus(
+      repository,
+      { actor: testActor, requestId: "request_1" },
+      {
+        teamId: "team_1",
+        transactionId: "txn_1",
+        action: "retry_export",
+        idempotencyKey: "status_1",
+      },
+    );
+
+    expect(result.previousStatus).toBe("export_failed");
+    expect(result.nextStatus).toBe("ready_to_export");
+    expect(result.transaction.accountantStatus).toBe("ready_to_export");
+  });
+
+  test("rejects a viewer changing accountant status", async () => {
+    const repository = createReviewRepository("viewer");
+
+    await expect(
+      updateTransactionAccountantStatus(
+        repository,
+        { actor: testActor, requestId: "request_1" },
+        {
+          teamId: "team_1",
+          transactionId: "txn_1",
+          action: "archive",
+          idempotencyKey: "status_1",
+        },
+      ),
+    ).rejects.toEqual(
+      new AppError("FORBIDDEN", "You cannot update accountant transaction status for this team"),
+    );
   });
 });
 

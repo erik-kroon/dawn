@@ -12,6 +12,7 @@ import type {
 } from "@dawn/domain";
 import {
   calibrateMatchPolicy,
+  deriveTransactionAccountantStatus,
   evaluateAutoMatch,
   suggestInboxTransactionMatches,
 } from "@dawn/domain";
@@ -19,6 +20,7 @@ import {
 import {
   AppError,
   resolveTeamAccess,
+  type TransactionAccountantLifecycleRepository,
   type TransactionReviewContext,
   type TransactionReviewRepository,
 } from "./index";
@@ -1262,6 +1264,11 @@ export async function acceptInboxMatch(
       suggestionId: command.suggestionId,
       actorId: context.actor.id,
     });
+    await updateMatchedTransactionAccountantStatus(
+      inboxRepository,
+      command.teamId,
+      accepted.suggestion.transactionId,
+    );
 
     await inboxRepository.appendAuditEvent({
       teamId: command.teamId,
@@ -1362,6 +1369,11 @@ export async function rejectInboxMatch(
       reason: command.reason,
       actorId: context.actor.id,
     });
+    await updateMatchedTransactionAccountantStatus(
+      inboxRepository,
+      command.teamId,
+      suggestion.transactionId,
+    );
 
     await inboxRepository.appendAuditEvent({
       teamId: command.teamId,
@@ -1633,6 +1645,51 @@ function replaceAcceptedSuggestion(
   return accepted
     ? suggestions.map((suggestion) => (suggestion.id === accepted.id ? accepted : suggestion))
     : suggestions;
+}
+
+async function updateMatchedTransactionAccountantStatus(
+  repository: DocumentsInboxUseCaseRepository,
+  teamId: string,
+  transactionId: string,
+) {
+  if (!isTransactionAccountantLifecycleRepository(repository)) {
+    return;
+  }
+
+  const transaction = await repository.getTransactionForTeam(teamId, transactionId);
+
+  if (!transaction) {
+    return;
+  }
+
+  const acceptedAttachmentCount = await repository.countTransactionAttachmentsForTeam({
+    teamId,
+    transactionId,
+  });
+  const nextStatus = deriveTransactionAccountantStatus({
+    transaction,
+    acceptedAttachmentCount,
+  });
+
+  if (transaction.accountantStatus === nextStatus) {
+    return;
+  }
+
+  await repository.updateTransactionAccountantStatusForTeam({
+    teamId,
+    transactionId,
+    accountantStatus: nextStatus,
+    reason: null,
+  });
+}
+
+function isTransactionAccountantLifecycleRepository(
+  repository: DocumentsInboxUseCaseRepository,
+): repository is DocumentsInboxUseCaseRepository & TransactionAccountantLifecycleRepository {
+  return (
+    "countTransactionAttachmentsForTeam" in repository &&
+    "updateTransactionAccountantStatusForTeam" in repository
+  );
 }
 
 export function matchPendingInboxForTransactionFingerprint(

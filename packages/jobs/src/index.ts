@@ -276,8 +276,13 @@ function createSyncInvalidationJob(event: OutboxEventForJob): SyncInvalidationJo
     event.type !== "transaction.created" &&
     event.type !== "transaction.transfer_pair.created" &&
     event.type !== "transaction.reviewed" &&
+    event.type !== "transaction.accountant_status_changed" &&
     event.type !== "transaction_import.committed" &&
-    event.type !== "bank_connection.synced"
+    event.type !== "bank_connection.synced" &&
+    event.type !== "accountant_packet.exported" &&
+    event.type !== "inbox_match.accepted" &&
+    event.type !== "inbox_match.rejected" &&
+    event.type !== "inbox_match.auto_matched"
   ) {
     return null;
   }

@@ -13,6 +13,25 @@ export type TransactionSource = "manual" | "csv_import" | "bank_sync" | "provide
 
 export type TransactionReviewState = "needs_review" | "reviewed";
 
+export type TransactionAccountantStatus =
+  | "needs_review"
+  | "receipt_found"
+  | "missing_receipt"
+  | "ready_to_export"
+  | "exporting"
+  | "exported"
+  | "export_failed"
+  | "excluded"
+  | "archived";
+
+export const persistentTransactionAccountantStatuses = [
+  "exporting",
+  "exported",
+  "export_failed",
+  "excluded",
+  "archived",
+] as const satisfies readonly TransactionAccountantStatus[];
+
 export type Transaction = {
   id: string;
   teamId: string;
@@ -28,6 +47,9 @@ export type Transaction = {
   providerTransactionId?: string | null;
   categoryId: string | null;
   reviewState: TransactionReviewState;
+  accountantStatus?: TransactionAccountantStatus;
+  accountantStatusReason?: string | null;
+  accountantStatusUpdatedAt?: string | null;
   duplicateKey?: string | null;
   updatedAt?: string | null;
 };
@@ -152,6 +174,41 @@ export function applyTransactionReview(
       nextReviewState,
     },
   };
+}
+
+export function deriveTransactionAccountantStatus(input: {
+  transaction: Pick<Transaction, "reviewState" | "accountantStatus">;
+  acceptedAttachmentCount: number;
+}): TransactionAccountantStatus {
+  const persistent = input.transaction.accountantStatus;
+
+  if (persistent && isPersistentTransactionAccountantStatus(persistent)) {
+    return persistent;
+  }
+
+  const hasReceiptEvidence = input.acceptedAttachmentCount > 0;
+
+  if (input.transaction.reviewState !== "reviewed") {
+    return hasReceiptEvidence ? "receipt_found" : "needs_review";
+  }
+
+  return hasReceiptEvidence ? "ready_to_export" : "missing_receipt";
+}
+
+export function isPersistentTransactionAccountantStatus(
+  status: TransactionAccountantStatus,
+): status is (typeof persistentTransactionAccountantStatuses)[number] {
+  return persistentTransactionAccountantStatuses.includes(
+    status as (typeof persistentTransactionAccountantStatuses)[number],
+  );
+}
+
+export function isTransactionReadyForAccountantExport(
+  transaction: Pick<Transaction, "reviewState" | "accountantStatus">,
+) {
+  return (
+    transaction.accountantStatus === "ready_to_export" && transaction.reviewState === "reviewed"
+  );
 }
 
 export function assertLedgerTransactionDraft(draft: LedgerTransactionDraft) {

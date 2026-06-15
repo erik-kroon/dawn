@@ -45,6 +45,9 @@ export function createTestTransaction(overrides: Partial<Transaction> = {}): Tra
     money: { amountMinor: -1200, currency: "USD" },
     categoryId: null,
     reviewState: "needs_review",
+    accountantStatus: "needs_review",
+    accountantStatusReason: null,
+    accountantStatusUpdatedAt: null,
     updatedAt: "2026-06-14T10:00:00.000Z",
     ...overrides,
   };

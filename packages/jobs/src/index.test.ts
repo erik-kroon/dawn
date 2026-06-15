@@ -234,6 +234,46 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps accountant status changes to transaction invalidation input", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "transaction.accountant_status_changed",
+        payload: {
+          transactionId: "txn_1",
+          previousStatus: "ready_to_export",
+          nextStatus: "exported",
+        },
+      }),
+    ).toContainEqual({
+      type: "sync.invalidate",
+      teamId: "team_1",
+      collection: "transactions",
+      cursor: null,
+      changedIds: ["txn_1"],
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "sync:transactions:outbox_1",
+    });
+  });
+
+  test("maps accountant packet exports to transaction invalidation input", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "accountant_packet.exported",
+        payload: { packetId: "packet_1", transactionIds: ["txn_1", "txn_2"] },
+      }),
+    ).toContainEqual({
+      type: "sync.invalidate",
+      teamId: "team_1",
+      collection: "transactions",
+      cursor: null,
+      changedIds: ["txn_1", "txn_2"],
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "sync:transactions:outbox_1",
+    });
+  });
+
   test("maps bank sync requests to queued bank sync jobs", () => {
     expect(
       outboxEventToQueueMessages({

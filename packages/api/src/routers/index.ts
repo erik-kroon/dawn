@@ -78,6 +78,7 @@ import {
   syncIntegration,
   syncBankConnection,
   createLedgerTransferPair,
+  updateTransactionAccountantStatus,
   type DawnRepository,
   type AccountantPacketAttachmentResolver,
   type DocumentExtractionFields,
@@ -135,6 +136,22 @@ const exportAccountantPacketInput = z.object({
   from: z.iso.datetime(),
   to: z.iso.datetime(),
   transactionIds: z.array(z.string().min(1)).optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const updateTransactionAccountantStatusInput = z.object({
+  teamId: z.string().min(1),
+  transactionId: z.string().min(1),
+  action: z.enum([
+    "exclude",
+    "archive",
+    "unarchive",
+    "mark_exporting",
+    "mark_exported",
+    "mark_export_failed",
+    "retry_export",
+  ]),
+  reason: z.string().trim().max(500).nullable().optional(),
   idempotencyKey: z.string().min(1),
 });
 
@@ -864,6 +881,19 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 transactionIds: input.transactionIds ?? [],
               },
               accountantPacketAttachmentResolver,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      updateAccountantStatus: protectedProcedure
+        .input(updateTransactionAccountantStatusInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await updateTransactionAccountantStatus(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
             );
           } catch (error) {
             mapAppError(error);

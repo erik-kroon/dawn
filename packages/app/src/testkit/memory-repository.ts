@@ -9,8 +9,10 @@ import type {
   TeamMembership,
   TeamRole,
   Transaction,
+  TransactionAccountantStatus,
   TransactionTag,
 } from "@dawn/domain";
+import { deriveTransactionAccountantStatus } from "@dawn/domain";
 
 import type {
   AccountantPacketAttachment,
@@ -74,9 +76,9 @@ export class MemoryAppRepository implements LedgerRepository {
       teamId,
       teamName: "Test Team",
       categories: [...this.categories.values()].filter((category) => category.teamId === teamId),
-      transactions: [...this.transactions.values()].filter(
-        (transaction) => transaction.teamId === teamId,
-      ),
+      transactions: [...this.transactions.values()]
+        .filter((transaction) => transaction.teamId === teamId)
+        .map((transaction) => this.transactionWithDerivedAccountantStatus(transaction)),
       sync: {
         collection: "transactions",
         cursor: null,
@@ -92,7 +94,9 @@ export class MemoryAppRepository implements LedgerRepository {
 
   async getTransactionForTeam(teamId: string, transactionId: string) {
     const transaction = this.transactions.get(transactionId);
-    return transaction?.teamId === teamId ? transaction : null;
+    return transaction?.teamId === teamId
+      ? this.transactionWithDerivedAccountantStatus(transaction)
+      : null;
   }
 
   async getCategoryForTeam(teamId: string, categoryId: string) {
@@ -174,11 +178,13 @@ export class MemoryAppRepository implements LedgerRepository {
   }
 
   async listTransactionsForReport(input: { teamId: string; accountId?: string }) {
-    return [...this.transactions.values()].filter(
-      (transaction) =>
-        transaction.teamId === input.teamId &&
-        (!input.accountId || transaction.accountId === input.accountId),
-    );
+    return [...this.transactions.values()]
+      .filter(
+        (transaction) =>
+          transaction.teamId === input.teamId &&
+          (!input.accountId || transaction.accountId === input.accountId),
+      )
+      .map((transaction) => this.transactionWithDerivedAccountantStatus(transaction));
   }
 
   async listAccountantPacketTransactionRows(input: {
@@ -200,25 +206,29 @@ export class MemoryAppRepository implements LedgerRepository {
       })
       .filter((transaction) => transactionIds.size === 0 || transactionIds.has(transaction.id))
       .sort((left, right) => left.postedAt.localeCompare(right.postedAt))
-      .map((transaction) => ({
-        transaction,
-        account: transaction.accountId
-          ? (this.accounts.get(transaction.accountId) ?? null)
-          : null,
-        category: transaction.categoryId
-          ? (this.categories.get(transaction.categoryId) ?? null)
-          : null,
-        counterparty: transaction.counterpartyId
-          ? (this.counterparties.get(transaction.counterpartyId) ?? null)
-          : null,
-        tags: this.tagAssignments
-          .filter((assignment) => assignment.transactionId === transaction.id)
-          .map((assignment) => this.tags.get(assignment.tagId))
-          .filter((tag): tag is TransactionTag => Boolean(tag)),
-        attachments: this.packetAttachments.filter(
+      .map((transaction) => {
+        const attachments = this.packetAttachments.filter(
           (attachment) => attachment.transactionId === transaction.id,
-        ),
-      }));
+        );
+
+        return {
+          transaction: this.transactionWithDerivedAccountantStatus(transaction),
+          account: transaction.accountId
+            ? (this.accounts.get(transaction.accountId) ?? null)
+            : null,
+          category: transaction.categoryId
+            ? (this.categories.get(transaction.categoryId) ?? null)
+            : null,
+          counterparty: transaction.counterpartyId
+            ? (this.counterparties.get(transaction.counterpartyId) ?? null)
+            : null,
+          tags: this.tagAssignments
+            .filter((assignment) => assignment.transactionId === transaction.id)
+            .map((assignment) => this.tags.get(assignment.tagId))
+            .filter((tag): tag is TransactionTag => Boolean(tag)),
+          attachments,
+        };
+      });
   }
 
   async listTransactionsForSync(input: { teamId: string; cursor?: string | null }) {
@@ -238,7 +248,8 @@ export class MemoryAppRepository implements LedgerRepository {
       .sort(
         (left, right) =>
           new Date(left.updatedAt ?? 0).getTime() - new Date(right.updatedAt ?? 0).getTime(),
-      );
+      )
+      .map((transaction) => this.transactionWithDerivedAccountantStatus(transaction));
   }
 
   async createLedgerTransactionForTeam(input: {
@@ -260,6 +271,9 @@ export class MemoryAppRepository implements LedgerRepository {
       providerTransactionId: input.draft.providerTransactionId ?? null,
       categoryId: input.draft.categoryId ?? null,
       reviewState: "needs_review" as const,
+      accountantStatus: "needs_review" as const,
+      accountantStatusReason: null,
+      accountantStatusUpdatedAt: null,
       duplicateKey: input.duplicateKey,
       updatedAt: new Date().toISOString(),
     };
@@ -316,9 +330,41 @@ export class MemoryAppRepository implements LedgerRepository {
       ...transaction,
       categoryId: input.categoryId,
       reviewState: input.reviewState,
+      updatedAt: new Date().toISOString(),
     };
     this.transactions.set(input.transactionId, updated);
-    return updated;
+    return this.transactionWithDerivedAccountantStatus(updated);
+  }
+
+  async countTransactionAttachmentsForTeam(input: { teamId: string; transactionId: string }) {
+    return this.packetAttachments.filter(
+      (attachment) =>
+        attachment.transactionId === input.transactionId &&
+        this.transactions.get(attachment.transactionId)?.teamId === input.teamId,
+    ).length;
+  }
+
+  async updateTransactionAccountantStatusForTeam(input: {
+    teamId: string;
+    transactionId: string;
+    accountantStatus: TransactionAccountantStatus;
+    reason?: string | null;
+  }) {
+    const transaction = this.transactions.get(input.transactionId);
+
+    if (!transaction || transaction.teamId !== input.teamId) {
+      throw new Error("missing transaction");
+    }
+
+    const updated = {
+      ...transaction,
+      accountantStatus: input.accountantStatus,
+      accountantStatusReason: input.reason ?? null,
+      accountantStatusUpdatedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    this.transactions.set(input.transactionId, updated);
+    return this.transactionWithDerivedAccountantStatus(updated);
   }
 
   async appendAuditEvent(input: unknown) {
@@ -373,5 +419,17 @@ export class MemoryAppRepository implements LedgerRepository {
 
   async updateTeamMemberRole(): Promise<TeamMember> {
     throw new Error("Unexpected team member role update");
+  }
+
+  private transactionWithDerivedAccountantStatus(transaction: Transaction): Transaction {
+    return {
+      ...transaction,
+      accountantStatus: deriveTransactionAccountantStatus({
+        transaction,
+        acceptedAttachmentCount: this.packetAttachments.filter(
+          (attachment) => attachment.transactionId === transaction.id,
+        ).length,
+      }),
+    };
   }
 }

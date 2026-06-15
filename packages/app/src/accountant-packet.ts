@@ -2,10 +2,12 @@ import type {
   LedgerAccount,
   Money,
   Transaction,
+  TransactionAccountantStatus,
   TransactionTag,
   Counterparty,
   Category,
 } from "@dawn/domain";
+import { isTransactionReadyForAccountantExport } from "@dawn/domain";
 
 import {
   AppError,
@@ -93,6 +95,12 @@ export interface AccountantPacketRepository extends TransactionReviewRepository 
     to: string;
     transactionIds?: readonly string[];
   }): Promise<AccountantPacketTransactionRow[]>;
+  updateTransactionAccountantStatusForTeam(input: {
+    teamId: string;
+    transactionId: string;
+    accountantStatus: TransactionAccountantStatus;
+    reason?: string | null;
+  }): Promise<Transaction>;
 }
 
 type PacketFile = {
@@ -150,9 +158,12 @@ export async function exportAccountantPacket(
       to: command.to,
       transactionIds: normalizedTransactionIds(command.transactionIds),
     });
+    const exportableRows = rows.filter((row) =>
+      isTransactionReadyForAccountantExport(row.transaction),
+    );
 
-    if (rows.length === 0) {
-      throw new AppError("CONFLICT", "No reviewed transactions are available for export");
+    if (exportableRows.length === 0) {
+      throw new AppError("CONFLICT", "No ready-to-export transactions are available for export");
     }
 
     const result = await buildAccountantPacket({
@@ -160,10 +171,20 @@ export async function exportAccountantPacket(
       actorId: context.actor.id,
       from: command.from,
       to: command.to,
-      transactionIds: normalizedTransactionIds(command.transactionIds),
-      rows,
+      transactionIds: exportableRows.map((row) => row.transaction.id).sort(),
+      rows: exportableRows,
       attachmentResolver,
     });
+    await Promise.all(
+      exportableRows.map((row) =>
+        packetRepository.updateTransactionAccountantStatusForTeam({
+          teamId: command.teamId,
+          transactionId: row.transaction.id,
+          accountantStatus: "exported",
+          reason: `Accountant packet ${result.packetId}`,
+        }),
+      ),
+    );
 
     await packetRepository.appendAuditEvent({
       teamId: command.teamId,
