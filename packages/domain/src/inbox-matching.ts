@@ -170,6 +170,23 @@ export type InboxMatchSuggestion = {
   matchType: Extract<MatchType, "suggested">;
 };
 
+export type AutoMatchEvaluation = {
+  eligible: boolean;
+  reasons: string[];
+  threshold: number;
+  closestAlternativeScore?: number;
+};
+
+export type AutoMatchEvaluationInput = {
+  enabled?: boolean;
+  candidate?: InboxMatchSuggestion | null;
+  alternatives?: readonly InboxMatchSuggestion[];
+  policy?: MatchPolicy;
+  minimumScoreGap?: number;
+  minimumFeedbackCount?: number;
+  minimumNameScore?: number;
+};
+
 export const defaultMatchPolicy: MatchPolicy = {
   minimumScore: 0,
   suggestedScoreThreshold: 0.35,
@@ -247,6 +264,72 @@ export function suggestInboxTransactionMatches(
       (left, right) =>
         right.score - left.score || left.transactionId.localeCompare(right.transactionId),
     );
+}
+
+export function evaluateAutoMatch(input: AutoMatchEvaluationInput): AutoMatchEvaluation {
+  const policy = normalizeMatchPolicy(input.policy);
+  const threshold = policy.autoMatchScoreThreshold;
+  const reasons: string[] = [];
+  const candidate = input.candidate ?? null;
+  const minimumScoreGap = input.minimumScoreGap ?? 0.15;
+  const minimumFeedbackCount = input.minimumFeedbackCount ?? 2;
+  const minimumNameScore = input.minimumNameScore ?? 0.16;
+
+  if (!input.enabled) {
+    reasons.push("Auto-match is disabled");
+  }
+
+  if (!candidate) {
+    reasons.push("No candidate to evaluate");
+    return { eligible: false, reasons, threshold };
+  }
+
+  if (candidate.score < threshold) {
+    reasons.push("Score is below the auto-match threshold");
+  }
+
+  const nameScore = candidate.signalDetails.name?.score ?? 0;
+  if (!candidate.signalDetails.name?.matched || nameScore < minimumNameScore) {
+    reasons.push("Name evidence is not strong enough");
+  }
+
+  const feedbackSignal = candidate.signalDetails.feedback;
+  const feedbackCount = numericEvidence(feedbackSignal, "feedbackCount");
+  const acceptedScore = numericEvidence(feedbackSignal, "acceptedScore");
+  const rejectedScore = numericEvidence(feedbackSignal, "rejectedScore");
+
+  if (
+    !feedbackSignal?.matched ||
+    feedbackSignal.score <= 0 ||
+    feedbackCount < minimumFeedbackCount ||
+    acceptedScore <= rejectedScore
+  ) {
+    reasons.push("No repeated confirmed team pattern");
+  }
+
+  if (rejectedScore > 0.04) {
+    reasons.push("Negative feedback is too recent or too strong");
+  }
+
+  if (candidate.signalDetails.hardNegative?.matched) {
+    reasons.push("Pair was explicitly rejected before");
+  }
+
+  const closestAlternativeScore = (input.alternatives ?? [])
+    .filter((alternative) => alternative.transactionId !== candidate.transactionId)
+    .map((alternative) => alternative.score)
+    .sort((left, right) => right - left)[0];
+
+  if (closestAlternativeScore != null && candidate.score - closestAlternativeScore < minimumScoreGap) {
+    reasons.push("A competing candidate is too close");
+  }
+
+  return {
+    eligible: reasons.length === 0,
+    reasons,
+    threshold,
+    closestAlternativeScore,
+  };
 }
 
 export function scoreDocumentTransactionMatches(
@@ -603,6 +686,11 @@ function addSignal(
 ) {
   signals[name] = signal;
   explanation.push(signal.reason);
+}
+
+function numericEvidence(signal: MatchSignal | undefined, key: string) {
+  const value = signal?.evidence?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function normalizeMatchPolicy(policy: Partial<MatchPolicy> | undefined): MatchPolicy {

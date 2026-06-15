@@ -2,7 +2,7 @@
 
 Triage: ready-for-agent
 Publication: Local repo artifact. No project issue tracker or remote is assumed.
-Status: Slice 7 implemented; Slice 8 next
+Status: Slice 8 implemented; Slice 9 next
 Date: 2026-06-15
 Source material: `docs/PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, Dawn matching code, and Midday reference matching docs/code under `ref/midday`.
 
@@ -443,17 +443,28 @@ Allow automatic document attachment only when score, threshold, and historical p
 
 ## Acceptance Criteria
 
-- [ ] One-off high-confidence matches create suggestions, not automatic attachments.
-- [ ] Eligible repeated merchant patterns can auto-attach when the policy is enabled.
-- [ ] Auto-matches create accepted suggestion records or equivalent feedback records.
-- [ ] Auto-matches attach the document, resolve the inbox item, and write audit/outbox records.
-- [ ] Auto-match can be disabled without disabling suggestions.
-- [ ] Rejecting or unmatching an auto-match becomes negative memory.
+- [x] One-off high-confidence matches create suggestions, not automatic attachments.
+- [x] Eligible repeated merchant patterns can auto-attach when the policy is enabled.
+- [x] Auto-matches create accepted suggestion records or equivalent feedback records.
+- [x] Auto-matches attach the document, resolve the inbox item, and write audit/outbox records.
+- [x] Auto-match can be disabled without disabling suggestions.
+- [x] Rejecting or unmatching an auto-match becomes negative memory.
+
+## Implementation Notes
+
+- Added a pure `evaluateAutoMatch` domain policy that requires opt-in enablement, calibrated auto threshold, strong name evidence, repeated positive team feedback, low negative evidence, no hard negative, and no close competing candidate.
+- Added explicit `autoMatch: { enabled: true }` command options for forward and reverse matching; default behavior remains suggestion-only.
+- Forward and reverse app use cases now persist suggestions and optional auto-accepts inside the app use case transaction.
+- Auto-matches use the existing accepted suggestion lifecycle, attach the document, resolve the inbox item, and emit `inbox_match.auto_matched` audit/outbox records.
+- Rejecting an accepted match now behaves as an unmatch: it removes the attachment, reopens the inbox item, marks the suggestion rejected, and records hard-negative feedback.
 
 ## Verification
 
-- App tests for disabled auto-match, one-off high score, repeated eligible pair, competing candidate, audit/outbox writes, and rejection feedback.
-- `bun run check-types`
+- [x] App tests for disabled auto-match, one-off high score, repeated eligible pair, audit/outbox writes, and rejection feedback.
+- [x] Domain tests for one-off high score, repeated eligible pair, and competing close candidate.
+- [x] `bun test packages/domain/src/matching.test.ts packages/app/src/inbox-matching.test.ts`
+- [x] `bun test packages/db/src/dawn-repository.pglite.test.ts`
+- [x] `bun run check-types`
 
 ## Dependencies
 

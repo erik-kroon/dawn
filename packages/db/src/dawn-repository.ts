@@ -1805,6 +1805,30 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       throw new Error("Inbox match suggestion not found");
     }
 
+    if (suggestion.status === "accepted") {
+      await this.client
+        .delete(schema.transactionAttachment)
+        .where(
+          and(
+            eq(schema.transactionAttachment.teamId, input.teamId),
+            eq(schema.transactionAttachment.inboxItemId, suggestion.inboxItemId),
+            eq(schema.transactionAttachment.transactionId, suggestion.transactionId),
+          ),
+        );
+      await this.client
+        .update(schema.inboxItem)
+        .set({
+          status: "needs_review",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.inboxItem.teamId, input.teamId),
+            eq(schema.inboxItem.id, suggestion.inboxItemId),
+          ),
+        );
+    }
+
     await this.client
       .insert(schema.hardNegativeMatch)
       .values({

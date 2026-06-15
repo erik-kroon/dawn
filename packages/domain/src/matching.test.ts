@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   calibrateMatchPolicy,
+  evaluateAutoMatch,
   scoreDocumentTransactionMatch,
   suggestInboxTransactionMatches,
   type DocumentMatchSubject,
@@ -333,6 +334,100 @@ describe("inbox transaction matching", () => {
       suggested: 0.3,
       autoMatch: 0.9,
     });
+  });
+
+  test("does not auto-match one-off high scores without repeated feedback", () => {
+    const [suggestion] = suggestInboxTransactionMatches(baseInput, [
+      {
+        transaction: transaction({ id: "txn_one_off" }),
+        counterpartyName: "Figma Inc",
+      },
+    ]);
+    const evaluation = evaluateAutoMatch({
+      enabled: true,
+      candidate: suggestion ?? null,
+      alternatives: suggestion ? [suggestion] : [],
+    });
+
+    expect(evaluation.eligible).toBe(false);
+    expect(evaluation.reasons).toContain("No repeated confirmed team pattern");
+  });
+
+  test("auto-match policy accepts repeated confirmed patterns above threshold", () => {
+    const memory = {
+      feedback: [
+        {
+          source: "Figma Inc",
+          target: "Figma Inc INV-100",
+          status: "accepted" as const,
+          count: 2,
+        },
+      ],
+    };
+    const policy = calibrateMatchPolicy(memory);
+    const [suggestion] = suggestInboxTransactionMatches(
+      baseInput,
+      [
+        {
+          transaction: transaction({ id: "txn_repeated" }),
+          counterpartyName: "Figma Inc",
+        },
+      ],
+      memory,
+      policy,
+    );
+    const evaluation = evaluateAutoMatch({
+      enabled: true,
+      candidate: suggestion ?? null,
+      alternatives: suggestion ? [suggestion] : [],
+      policy,
+    });
+
+    expect(evaluation).toMatchObject({
+      eligible: true,
+      threshold: 0.95,
+    });
+  });
+
+  test("auto-match policy rejects close competing candidates", () => {
+    const memory = {
+      feedback: [
+        {
+          source: "Figma Inc",
+          target: "Figma Inc INV-100",
+          status: "accepted" as const,
+          count: 2,
+        },
+      ],
+    };
+    const policy = calibrateMatchPolicy(memory);
+    const [suggestion] = suggestInboxTransactionMatches(
+      baseInput,
+      [
+        {
+          transaction: transaction({ id: "txn_best" }),
+          counterpartyName: "Figma Inc",
+        },
+      ],
+      memory,
+      policy,
+    );
+    const closeAlternative = suggestion
+      ? {
+          ...suggestion,
+          transactionId: "txn_close",
+          score: Math.max(0, suggestion.score - 0.05),
+        }
+      : undefined;
+    const evaluation = evaluateAutoMatch({
+      enabled: true,
+      candidate: suggestion ?? null,
+      alternatives: closeAlternative && suggestion ? [suggestion, closeAlternative] : [],
+      policy,
+    });
+
+    expect(evaluation.eligible).toBe(false);
+    expect(evaluation.reasons).toContain("A competing candidate is too close");
   });
 
   test("uses sender text as a supporting signal", () => {

@@ -279,6 +279,7 @@ class MemoryMatchingRepository {
       throw new Error("Inbox match suggestion not found");
     }
 
+    const wasAccepted = suggestion.status === "accepted";
     const rejected = { ...suggestion, status: "rejected" as const };
     this.suggestions.set(rejected.id, rejected);
     this.hardNegatives.push({
@@ -289,6 +290,14 @@ class MemoryMatchingRepository {
       reason: input.reason,
       createdAt: "2026-06-14T00:00:00.000Z",
     });
+    if (wasAccepted) {
+      this.attachments = this.attachments.filter(
+        (attachment) =>
+          attachment.transactionId !== rejected.transactionId ||
+          attachment.documentId !== this.inboxItem.documentId,
+      );
+      this.inboxItem = { ...this.inboxItem, status: "needs_review", matchSuggestions: [rejected] };
+    }
     return rejected;
   }
 
@@ -344,8 +353,98 @@ describe("inbox matching use cases", () => {
     expect(result.suggestions).toHaveLength(1);
     expect(result.suggestions[0]?.transactionId).toBe("txn_1");
     expect(result.suggestions[0]?.score).toBeGreaterThanOrEqual(0.75);
+    expect(result.suggestions[0]?.status).toBe("suggested");
     expect(result.suggestions[0]?.explanation).toContain("Amount matches exactly");
+    expect(repository.attachments).toEqual([]);
     expect(repository.listTransactionsForReportCalls).toBe(0);
+  });
+
+  test("does not auto-match one-off high-confidence suggestions", async () => {
+    const repository = new MemoryMatchingRepository();
+
+    const result = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        autoMatch: { enabled: true },
+      },
+    );
+
+    expect(result.suggestions).toHaveLength(1);
+    expect(result.suggestions[0]?.status).toBe("suggested");
+    expect(repository.attachments).toEqual([]);
+    expect(repository.auditEvents).toEqual([]);
+    expect(repository.outboxEvents).toEqual([]);
+  });
+
+  test("auto-matches repeated confirmed patterns and can reject them into negative memory", async () => {
+    const repository = new MemoryMatchingRepository();
+
+    for (const index of [1, 2]) {
+      const transaction = {
+        ...repository.transactions[0]!,
+        id: `txn_history_${index}`,
+        providerTransactionId: `provider_history_${index}`,
+      };
+      repository.suggestions.set(`history_${index}`, {
+        id: `history_${index}`,
+        teamId: "team_1",
+        inboxItemId: `history_inbox_${index}`,
+        transactionId: transaction.id,
+        score: 1,
+        confidence: "high",
+        explanation: ["Historical accepted suggestion"],
+        status: "accepted",
+        createdAt: "2026-06-14T00:00:00.000Z",
+        updatedAt: "2026-06-14T00:00:00.000Z",
+        transaction,
+      });
+    }
+
+    const generated = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        autoMatch: { enabled: true },
+      },
+    );
+
+    expect(generated.suggestions).toHaveLength(1);
+    expect(generated.suggestions[0]).toMatchObject({
+      transactionId: "txn_1",
+      status: "accepted",
+    });
+    expect(repository.attachments).toEqual([{ transactionId: "txn_1", documentId: "doc_1" }]);
+    expect(repository.inboxItem.status).toBe("resolved");
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.outboxEvents).toMatchObject([{ type: "inbox_match.auto_matched" }]);
+
+    const rejected = await rejectInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: generated.suggestions[0]?.id ?? "",
+      reason: "wrong auto-match",
+      idempotencyKey: "reject_auto_1",
+    });
+
+    expect(rejected.suggestion.status).toBe("rejected");
+    expect(repository.attachments).toEqual([]);
+    expect(repository.inboxItem.status).toBe("needs_review");
+    expect(repository.hardNegatives).toMatchObject([
+      { inboxItemId: "inbox_1", transactionId: "txn_1", reason: "wrong auto-match" },
+    ]);
+    expect(await repository.listTeamMatchFeedback("team_1")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "Figma Inc",
+          target: "Figma Inc INV-100",
+          status: "rejected",
+        }),
+      ]),
+    );
   });
 
   test("ranks multiple bounded transaction candidates through repository retrieval", async () => {

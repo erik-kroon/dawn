@@ -2,11 +2,16 @@ import type {
   InboxMatchConfidence,
   InboxMatchCandidate,
   InboxMatchSuggestion,
+  MatchPolicy,
   TeamMatchAlias,
   TeamMatchFeedback,
   Transaction,
 } from "@dawn/domain";
-import { calibrateMatchPolicy, suggestInboxTransactionMatches } from "@dawn/domain";
+import {
+  calibrateMatchPolicy,
+  evaluateAutoMatch,
+  suggestInboxTransactionMatches,
+} from "@dawn/domain";
 
 import {
   AppError,
@@ -202,6 +207,7 @@ export type GenerateInboxMatchSuggestionsCommand = {
   teamId: string;
   inboxItemId: string;
   limit?: number;
+  autoMatch?: AutoMatchOptions;
 };
 
 export type GenerateInboxMatchSuggestionsResult = {
@@ -216,6 +222,7 @@ export type MatchPendingInboxForTransactionCommand = {
   idempotencyKey: string;
   limit?: number;
   enforceCallerPermission?: boolean;
+  autoMatch?: AutoMatchOptions;
 };
 
 export type MatchPendingInboxForTransactionResult = {
@@ -246,6 +253,10 @@ export type RejectInboxMatchCommand = {
 export type RejectInboxMatchResult = {
   suggestion: InboxTransactionMatchSuggestion;
   replayed: boolean;
+};
+
+export type AutoMatchOptions = {
+  enabled?: boolean;
 };
 
 export type DocumentExtractionProvider = {
@@ -962,66 +973,80 @@ export async function generateInboxMatchSuggestions(
   context: TransactionReviewContext,
   command: GenerateInboxMatchSuggestionsCommand,
 ): Promise<GenerateInboxMatchSuggestionsResult> {
-  assertCommandTeamMatchesContext(context, command.teamId, "Inbox item not found");
+  return repository.withTransaction(async (transactionRepository) => {
+    const inboxRepository = transactionRepository as DocumentsInboxUseCaseRepository;
 
-  await resolveTeamAccess(
-    repository,
-    { ...context, teamId: command.teamId },
-    "documents.read",
-    "You cannot read inbox items for this team",
-  );
-  await resolveTeamAccess(
-    repository,
-    { ...context, teamId: command.teamId },
-    "transactions.read",
-    "You cannot read transactions for this team",
-  );
+    assertCommandTeamMatchesContext(context, command.teamId, "Inbox item not found");
 
-  const [inboxItem, aliases, feedback, hardNegatives] = await Promise.all([
-    repository.getInboxItemForTeam(command.teamId, command.inboxItemId),
-    repository.listTeamAliases(command.teamId),
-    repository.listTeamMatchFeedback(command.teamId),
-    repository.listHardNegativeMatches(command.teamId, command.inboxItemId),
-  ]);
+    await resolveTeamAccess(
+      inboxRepository,
+      { ...context, teamId: command.teamId },
+      "documents.read",
+      "You cannot read inbox items for this team",
+    );
+    await resolveTeamAccess(
+      inboxRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.read",
+      "You cannot read transactions for this team",
+    );
 
-  if (!inboxItem || !inboxItem.latestExtraction) {
-    throw new AppError("NOT_FOUND", "Inbox item not found");
-  }
+    const [inboxItem, aliases, feedback, hardNegatives] = await Promise.all([
+      inboxRepository.getInboxItemForTeam(command.teamId, command.inboxItemId),
+      inboxRepository.listTeamAliases(command.teamId),
+      inboxRepository.listTeamMatchFeedback(command.teamId),
+      inboxRepository.listHardNegativeMatches(command.teamId, command.inboxItemId),
+    ]);
 
-  const candidates = await repository.listTransactionMatchCandidatesForInboxItem({
-    teamId: command.teamId,
-    inboxItem,
-    limit: normalizeMatchCandidateLimit(command.limit),
-  });
-  const memory = {
-    aliases,
-    feedback,
-    hardNegatives,
-  };
-  const policy = calibrateMatchPolicy(memory);
-  const suggestions = suggestInboxTransactionMatches(
-    {
-      inboxItemId: inboxItem.id,
-      documentId: inboxItem.documentId,
-      sender: inboxItem.source?.name,
-      documentText: inboxItem.latestExtraction.rawText,
-      fields: inboxItem.latestExtraction.fields,
-    },
-    candidates,
-    memory,
-    policy,
-  )
-    .filter((suggestion) => suggestion.score >= policy.suggestedScoreThreshold)
-    .slice(0, 5);
+    if (!inboxItem || !inboxItem.latestExtraction) {
+      throw new AppError("NOT_FOUND", "Inbox item not found");
+    }
 
-  return {
-    inboxItemId: inboxItem.id,
-    suggestions: await repository.upsertInboxMatchSuggestions({
+    const candidates = await inboxRepository.listTransactionMatchCandidatesForInboxItem({
+      teamId: command.teamId,
+      inboxItem,
+      limit: normalizeMatchCandidateLimit(command.limit),
+    });
+    const memory = {
+      aliases,
+      feedback,
+      hardNegatives,
+    };
+    const policy = calibrateMatchPolicy(memory);
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        inboxItemId: inboxItem.id,
+        documentId: inboxItem.documentId,
+        sender: inboxItem.source?.name,
+        documentText: inboxItem.latestExtraction.rawText,
+        fields: inboxItem.latestExtraction.fields,
+      },
+      candidates,
+      memory,
+      policy,
+    )
+      .filter((suggestion) => suggestion.score >= policy.suggestedScoreThreshold)
+      .slice(0, 5);
+    const persistedSuggestions = await inboxRepository.upsertInboxMatchSuggestions({
       teamId: command.teamId,
       inboxItemId: inboxItem.id,
       suggestions,
-    }),
-  };
+    });
+    const autoAccepted = await maybeAutoAcceptInboxMatch({
+      repository: inboxRepository,
+      context,
+      teamId: command.teamId,
+      persistedSuggestions,
+      candidateSuggestions: suggestions,
+      policy,
+      autoMatch: command.autoMatch,
+    });
+
+    return {
+      inboxItemId: inboxItem.id,
+      suggestions: replaceAcceptedSuggestion(persistedSuggestions, autoAccepted),
+    };
+  });
 }
 
 export async function matchPendingInboxForTransaction(
@@ -1125,12 +1150,23 @@ export async function matchPendingInboxForTransaction(
         inboxItemId: inboxItem.id,
         suggestions: [suggestion],
       });
+      const autoAccepted = await maybeAutoAcceptInboxMatch({
+        repository: inboxRepository,
+        context,
+        teamId: command.teamId,
+        persistedSuggestions: upserted,
+        candidateSuggestions: [suggestion],
+        policy,
+        autoMatch: command.autoMatch,
+      });
       const persisted = upserted.find(
         (candidate) =>
           candidate.inboxItemId === inboxItem.id && candidate.transactionId === transaction.id,
       );
 
-      if (persisted) {
+      if (autoAccepted) {
+        persistedSuggestions.push(autoAccepted);
+      } else if (persisted) {
         persistedSuggestions.push(persisted);
       }
     }
@@ -1303,10 +1339,6 @@ export async function rejectInboxMatch(
 
     if (!existing) {
       throw new AppError("NOT_FOUND", "Inbox match not found");
-    }
-
-    if (existing.status === "accepted") {
-      throw new AppError("CONFLICT", "Accepted inbox matches cannot be rejected");
     }
 
     const suggestion = await inboxRepository.rejectInboxMatchSuggestion({
@@ -1509,6 +1541,83 @@ function inboxMatchInputForItem(inboxItem: InboxItem) {
     documentText: inboxItem.latestExtraction.rawText,
     fields: inboxItem.latestExtraction.fields,
   };
+}
+
+async function maybeAutoAcceptInboxMatch(input: {
+  repository: DocumentsInboxUseCaseRepository;
+  context: TransactionReviewContext;
+  teamId: string;
+  persistedSuggestions: InboxTransactionMatchSuggestion[];
+  candidateSuggestions: InboxMatchSuggestion[];
+  policy: MatchPolicy;
+  autoMatch?: AutoMatchOptions;
+}): Promise<InboxTransactionMatchSuggestion | null> {
+  const [candidate] = input.candidateSuggestions;
+  const persisted = candidate
+    ? input.persistedSuggestions.find(
+        (suggestion) =>
+          suggestion.inboxItemId === candidate.inboxItemId &&
+          suggestion.transactionId === candidate.transactionId,
+      )
+    : null;
+  const evaluation = evaluateAutoMatch({
+    enabled: input.autoMatch?.enabled === true,
+    candidate: candidate ?? null,
+    alternatives: input.candidateSuggestions,
+    policy: input.policy,
+  });
+
+  if (!evaluation.eligible || !persisted) {
+    return null;
+  }
+
+  const accepted = await input.repository.acceptInboxMatchSuggestion({
+    teamId: input.teamId,
+    suggestionId: persisted.id,
+    actorId: input.context.actor.id,
+  });
+
+  await input.repository.appendAuditEvent({
+    teamId: input.teamId,
+    actorId: input.context.actor.id,
+    requestId: input.context.requestId,
+    action: "inbox_match.auto_matched",
+    entityType: "inbox_item",
+    entityId: accepted.inboxItem.id,
+    metadata: {
+      suggestionId: accepted.suggestion.id,
+      transactionId: accepted.suggestion.transactionId,
+      documentId: accepted.inboxItem.documentId,
+      score: accepted.suggestion.score,
+      threshold: evaluation.threshold,
+      closestAlternativeScore: evaluation.closestAlternativeScore ?? null,
+    },
+  });
+
+  await input.repository.appendOutboxEvent({
+    teamId: input.teamId,
+    actorId: input.context.actor.id,
+    requestId: input.context.requestId,
+    type: "inbox_match.auto_matched",
+    version: 1,
+    payload: {
+      inboxItemId: accepted.inboxItem.id,
+      suggestionId: accepted.suggestion.id,
+      transactionId: accepted.suggestion.transactionId,
+      documentId: accepted.inboxItem.documentId,
+    },
+  });
+
+  return accepted.suggestion;
+}
+
+function replaceAcceptedSuggestion(
+  suggestions: InboxTransactionMatchSuggestion[],
+  accepted: InboxTransactionMatchSuggestion | null,
+) {
+  return accepted
+    ? suggestions.map((suggestion) => (suggestion.id === accepted.id ? accepted : suggestion))
+    : suggestions;
 }
 
 export function matchPendingInboxForTransactionFingerprint(
