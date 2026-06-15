@@ -3,6 +3,7 @@ import { call } from "@orpc/server";
 import { createDeterministicInvoicePdfRenderer } from "@dawn/app";
 import type {
   Actor,
+  AssistantActionApproval,
   AssistantMessage,
   AssistantThread,
   AssistantToolCall,
@@ -85,6 +86,7 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   assistantThreads = new Map<string, AssistantThread>();
   assistantMessages = new Map<string, AssistantMessage>();
   assistantToolCalls = new Map<string, AssistantToolCall>();
+  assistantApprovals = new Map<string, AssistantActionApproval>();
   aliases: TeamAlias[] = [];
   hardNegatives: HardNegativeTransactionMatch[] = [];
   attachments: { transactionId: string; documentId: string }[] = [];
@@ -1421,6 +1423,107 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return toolCalls;
   }
 
+  async listPendingAssistantActionApprovals(teamId: string) {
+    return [...this.assistantApprovals.values()].filter(
+      (approval) => approval.teamId === teamId && approval.status === "pending",
+    );
+  }
+
+  async listAssistantActionApprovals(threadId: string) {
+    return [...this.assistantApprovals.values()].filter(
+      (approval) => approval.threadId === threadId,
+    );
+  }
+
+  async getAssistantActionApprovalForTeam(teamId: string, approvalId: string) {
+    const approval = this.assistantApprovals.get(approvalId);
+    return approval?.teamId === teamId ? approval : null;
+  }
+
+  async createAssistantActionApproval(input: {
+    approvalId: string;
+    threadId: string;
+    requestedByMessageId: string;
+    teamId: string;
+    toolName: string;
+    risk: AssistantActionApproval["risk"];
+    input: Record<string, unknown>;
+    preview: Record<string, unknown>;
+    sourceRefs: ReportSourceRef[];
+    requestedByActorId: string;
+    createdAt: string;
+  }) {
+    const approval = {
+      id: input.approvalId,
+      threadId: input.threadId,
+      requestedByMessageId: input.requestedByMessageId,
+      teamId: input.teamId,
+      toolName: input.toolName,
+      risk: input.risk,
+      status: "pending" as const,
+      input: input.input,
+      preview: input.preview,
+      result: null,
+      sourceRefs: input.sourceRefs,
+      requestedByActorId: input.requestedByActorId,
+      approvedByActorId: null,
+      rejectedByActorId: null,
+      createdAt: input.createdAt,
+      decidedAt: null,
+      executedAt: null,
+    };
+    this.assistantApprovals.set(approval.id, approval);
+    return approval;
+  }
+
+  async markAssistantActionApprovalRejected(input: {
+    teamId: string;
+    approvalId: string;
+    rejectedByActorId: string;
+    decidedAt: string;
+  }) {
+    const approval = this.assistantApprovals.get(input.approvalId);
+
+    if (!approval || approval.teamId !== input.teamId || approval.status !== "pending") {
+      throw new Error("Approval not found");
+    }
+
+    const rejected = {
+      ...approval,
+      status: "rejected" as const,
+      rejectedByActorId: input.rejectedByActorId,
+      decidedAt: input.decidedAt,
+    };
+    this.assistantApprovals.set(rejected.id, rejected);
+    return rejected;
+  }
+
+  async markAssistantActionApprovalExecuted(input: {
+    teamId: string;
+    approvalId: string;
+    approvedByActorId: string;
+    result: Record<string, unknown>;
+    decidedAt: string;
+    executedAt: string;
+  }) {
+    const approval = this.assistantApprovals.get(input.approvalId);
+
+    if (!approval || approval.teamId !== input.teamId || approval.status !== "pending") {
+      throw new Error("Approval not found");
+    }
+
+    const executed = {
+      ...approval,
+      status: "executed" as const,
+      approvedByActorId: input.approvedByActorId,
+      result: input.result,
+      decidedAt: input.decidedAt,
+      executedAt: input.executedAt,
+    };
+    this.assistantApprovals.set(executed.id, executed);
+    return executed;
+  }
+
   private invoiceFromInput(
     invoiceId: string,
     input: {
@@ -2285,6 +2388,70 @@ describe("appRouter", () => {
     expect(answer.messages[1]?.sourceRefs.length).toBeGreaterThan(0);
     expect(thread.messages).toHaveLength(2);
     expect(thread.toolCalls.length).toBeGreaterThan(0);
+  });
+
+  test("approves assistant draft actions through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+    const customer = await call(
+      router.billing.createCustomer,
+      {
+        teamId: "team_1",
+        name: "Acme Co",
+        email: "billing@example.com",
+        idempotencyKey: "assistant_approval_customer_1",
+      },
+      context,
+    );
+    await call(
+      router.billing.createProduct,
+      {
+        teamId: "team_1",
+        name: "Consulting",
+        type: "service",
+        unitPrice: { amountMinor: 100_00, currency: "USD" },
+        defaultTaxRateBasisPoints: 0,
+        idempotencyKey: "assistant_approval_product_1",
+      },
+      context,
+    );
+
+    const proposed = await call(
+      router.assistant.ask,
+      {
+        teamId: "team_1",
+        message: `Draft invoice for ${customer.customer.name}`,
+      },
+      context,
+    );
+    const approval = proposed.actionApprovals.find(
+      (candidate) => candidate.toolName === "create_invoice_draft",
+    );
+
+    if (!approval) {
+      throw new Error("Missing assistant draft approval");
+    }
+
+    const approved = await call(
+      router.assistant.approveAction,
+      {
+        teamId: "team_1",
+        approvalId: approval.id,
+        idempotencyKey: "assistant_approval_execute_1",
+      },
+      context,
+    );
+    const billing = await call(router.billing.list, { teamId: "team_1" }, context);
+
+    expect(approved.approval).toMatchObject({
+      id: approval.id,
+      status: "executed",
+      risk: "draft",
+    });
+    expect(billing.draftInvoices).toHaveLength(1);
   });
 
   test("creates and signs document uploads and downloads through protected routes", async () => {

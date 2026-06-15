@@ -84,10 +84,16 @@ describe("mock insight generation provider", () => {
 });
 
 describe("assistant tool registry", () => {
-  test("defines permissioned read and suggest tools that never mutate state", () => {
-    expect(assistantTools.length).toBeGreaterThanOrEqual(9);
-    expect(assistantTools.every((tool) => tool.approvalRequired === false)).toBe(true);
-    expect(assistantTools.every((tool) => tool.mutatesState === false)).toBe(true);
+  test("defines permissioned tools with approval, audit, and rate-limit metadata", () => {
+    expect(assistantTools.length).toBeGreaterThanOrEqual(12);
+    expect(
+      assistantTools.every((tool) => tool.auditEvent && tool.rateLimitPolicy && tool.outputSchema),
+    ).toBe(true);
+    expect(
+      assistantTools
+        .filter((tool) => tool.risk === "read" || tool.risk === "suggest")
+        .every((tool) => tool.approvalRequired === false && tool.mutatesState === false),
+    ).toBe(true);
     expect(getAssistantTool("search_transactions")).toMatchObject({
       requiredPermission: "transactions.read",
       risk: "read",
@@ -95,6 +101,19 @@ describe("assistant tool registry", () => {
     expect(getAssistantTool("suggest_invoice_email_copy")).toMatchObject({
       requiredPermission: "invoices.read",
       risk: "suggest",
+    });
+    expect(getAssistantTool("create_invoice_draft")).toMatchObject({
+      requiredPermission: "invoices.write",
+      risk: "draft",
+      approvalRequired: true,
+      mutatesState: true,
+      rateLimitPolicy: "mutation",
+    });
+    expect(getAssistantTool("send_invoice")).toMatchObject({
+      requiredPermission: "invoices.send",
+      risk: "external_side_effect",
+      approvalRequired: true,
+      rateLimitPolicy: "external_side_effect",
     });
   });
 
@@ -107,6 +126,12 @@ describe("assistant tool registry", () => {
     expect(() =>
       getAssistantTool("get_report_overview").inputSchema.parse({ from: "not-a-date" }),
     ).toThrow();
+    expect(
+      getAssistantTool("create_invoice_draft").inputSchema.parse({
+        customerId: "customer_1",
+        productId: "product_1",
+      }),
+    ).toEqual({ customerId: "customer_1", productId: "product_1" });
   });
 
   test("plans grounded tools from natural language questions", () => {
@@ -117,6 +142,8 @@ describe("assistant tool registry", () => {
     expect(planAssistantTools("Suggest invoice email copy")).toContain(
       "suggest_invoice_email_copy",
     );
+    expect(planAssistantTools("Draft invoice for Acme")).toContain("create_invoice_draft");
+    expect(planAssistantTools("Send invoice")).toContain("send_invoice");
   });
 
   test("mock assistant response cites completed tool sources and refuses without permissions", async () => {

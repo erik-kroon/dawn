@@ -16,16 +16,22 @@ export type AssistantToolName =
   | "get_report_overview"
   | "suggest_transaction_category"
   | "suggest_inbox_match"
-  | "suggest_invoice_email_copy";
+  | "suggest_invoice_email_copy"
+  | "create_invoice_draft"
+  | "categorize_transaction"
+  | "send_invoice";
 
 export type AssistantToolDefinition = {
   name: AssistantToolName;
   description: string;
   inputSchema: z.ZodType<Record<string, unknown>>;
+  outputSchema: z.ZodType<Record<string, unknown>>;
   requiredPermission: Permission;
   risk: AssistantToolRisk;
   approvalRequired: boolean;
   mutatesState: boolean;
+  auditEvent: string;
+  rateLimitPolicy: "standard" | "mutation" | "external_side_effect";
 };
 
 export type AssistantToolResult = {
@@ -55,52 +61,86 @@ export type AssistantResponseProvider = {
 const optionalQuerySchema = z.object({
   query: z.string().trim().min(1).max(200).optional(),
 });
+const genericOutputSchema = z.record(z.string(), z.unknown());
+const createInvoiceDraftInputSchema = z.object({
+  customerId: z.string().min(1).optional(),
+  productId: z.string().min(1).optional(),
+  invoiceNumber: z.string().min(1).max(80).optional(),
+  issueDate: z.string().datetime().optional(),
+  dueDate: z.string().datetime().nullable().optional(),
+  quantityMilli: z.number().int().positive().optional(),
+});
+const categorizeTransactionInputSchema = z.object({
+  transactionId: z.string().min(1).optional(),
+  categoryId: z.string().min(1).optional(),
+});
+const sendInvoiceInputSchema = z.object({
+  invoiceId: z.string().min(1).optional(),
+  toEmail: z.string().email().nullable().optional(),
+  subject: z.string().trim().min(1).max(200).nullable().optional(),
+  message: z.string().trim().min(1).max(2_000).nullable().optional(),
+});
 
 export const assistantToolRegistry = {
   search_transactions: {
     name: "search_transactions",
     description: "Search team-scoped ledger transactions.",
     inputSchema: optionalQuerySchema,
+    outputSchema: genericOutputSchema,
     requiredPermission: "transactions.read",
     risk: "read",
     approvalRequired: false,
     mutatesState: false,
+    auditEvent: "assistant.tool.search_transactions",
+    rateLimitPolicy: "standard",
   },
   list_open_invoices: {
     name: "list_open_invoices",
     description: "List unpaid team invoices.",
     inputSchema: optionalQuerySchema,
+    outputSchema: genericOutputSchema,
     requiredPermission: "invoices.read",
     risk: "read",
     approvalRequired: false,
     mutatesState: false,
+    auditEvent: "assistant.tool.list_open_invoices",
+    rateLimitPolicy: "standard",
   },
   search_documents: {
     name: "search_documents",
     description: "Search team-scoped documents and inbox extraction summaries.",
     inputSchema: optionalQuerySchema,
+    outputSchema: genericOutputSchema,
     requiredPermission: "documents.read",
     risk: "read",
     approvalRequired: false,
     mutatesState: false,
+    auditEvent: "assistant.tool.search_documents",
+    rateLimitPolicy: "standard",
   },
   list_customers: {
     name: "list_customers",
     description: "List customers and contacts.",
     inputSchema: optionalQuerySchema,
+    outputSchema: genericOutputSchema,
     requiredPermission: "invoices.read",
     risk: "read",
     approvalRequired: false,
     mutatesState: false,
+    auditEvent: "assistant.tool.list_customers",
+    rateLimitPolicy: "standard",
   },
   list_projects: {
     name: "list_projects",
     description: "List projects and time-tracking summaries.",
     inputSchema: optionalQuerySchema,
+    outputSchema: genericOutputSchema,
     requiredPermission: "projects.read",
     risk: "read",
     approvalRequired: false,
     mutatesState: false,
+    auditEvent: "assistant.tool.list_projects",
+    rateLimitPolicy: "standard",
   },
   get_report_overview: {
     name: "get_report_overview",
@@ -109,37 +149,86 @@ export const assistantToolRegistry = {
       from: z.string().datetime().nullable().optional(),
       to: z.string().datetime().nullable().optional(),
     }),
+    outputSchema: genericOutputSchema,
     requiredPermission: "transactions.read",
     risk: "read",
     approvalRequired: false,
     mutatesState: false,
+    auditEvent: "assistant.tool.get_report_overview",
+    rateLimitPolicy: "standard",
   },
   suggest_transaction_category: {
     name: "suggest_transaction_category",
     description: "Suggest likely transaction categories without applying them.",
     inputSchema: optionalQuerySchema,
+    outputSchema: genericOutputSchema,
     requiredPermission: "transactions.read",
     risk: "suggest",
     approvalRequired: false,
     mutatesState: false,
+    auditEvent: "assistant.tool.suggest_transaction_category",
+    rateLimitPolicy: "standard",
   },
   suggest_inbox_match: {
     name: "suggest_inbox_match",
     description: "Suggest likely inbox-to-transaction matches without accepting them.",
     inputSchema: optionalQuerySchema,
+    outputSchema: genericOutputSchema,
     requiredPermission: "documents.read",
     risk: "suggest",
     approvalRequired: false,
     mutatesState: false,
+    auditEvent: "assistant.tool.suggest_inbox_match",
+    rateLimitPolicy: "standard",
   },
   suggest_invoice_email_copy: {
     name: "suggest_invoice_email_copy",
     description: "Draft invoice email copy without sending it.",
     inputSchema: optionalQuerySchema,
+    outputSchema: genericOutputSchema,
     requiredPermission: "invoices.read",
     risk: "suggest",
     approvalRequired: false,
     mutatesState: false,
+    auditEvent: "assistant.tool.suggest_invoice_email_copy",
+    rateLimitPolicy: "standard",
+  },
+  create_invoice_draft: {
+    name: "create_invoice_draft",
+    description: "Prepare an editable draft invoice through an approval-gated app use case.",
+    inputSchema: createInvoiceDraftInputSchema,
+    outputSchema: genericOutputSchema,
+    requiredPermission: "invoices.write",
+    risk: "draft",
+    approvalRequired: true,
+    mutatesState: true,
+    auditEvent: "assistant.action.create_invoice_draft",
+    rateLimitPolicy: "mutation",
+  },
+  categorize_transaction: {
+    name: "categorize_transaction",
+    description: "Categorize and review a transaction after explicit approval.",
+    inputSchema: categorizeTransactionInputSchema,
+    outputSchema: genericOutputSchema,
+    requiredPermission: "transactions.categorize",
+    risk: "mutate",
+    approvalRequired: true,
+    mutatesState: true,
+    auditEvent: "assistant.action.categorize_transaction",
+    rateLimitPolicy: "mutation",
+  },
+  send_invoice: {
+    name: "send_invoice",
+    description:
+      "Send an invoice through the configured delivery provider after explicit confirmation.",
+    inputSchema: sendInvoiceInputSchema,
+    outputSchema: genericOutputSchema,
+    requiredPermission: "invoices.send",
+    risk: "external_side_effect",
+    approvalRequired: true,
+    mutatesState: true,
+    auditEvent: "assistant.action.send_invoice",
+    rateLimitPolicy: "external_side_effect",
   },
 } satisfies Record<AssistantToolName, AssistantToolDefinition>;
 
@@ -187,6 +276,18 @@ export function planAssistantTools(question: string): AssistantToolName[] {
 
   if (matchesAny(normalized, ["invoice email", "email copy", "follow up"])) {
     planned.add("suggest_invoice_email_copy");
+  }
+
+  if (matchesAny(normalized, ["draft invoice", "create invoice draft", "invoice draft"])) {
+    planned.add("create_invoice_draft");
+  }
+
+  if (matchesAny(normalized, ["apply category", "categorize transaction", "review transaction"])) {
+    planned.add("categorize_transaction");
+  }
+
+  if (matchesAny(normalized, ["send invoice", "email invoice", "deliver invoice"])) {
+    planned.add("send_invoice");
   }
 
   if (planned.size === 0) {

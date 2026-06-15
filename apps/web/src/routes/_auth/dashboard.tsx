@@ -422,6 +422,23 @@ function RouteComponent() {
       },
     }),
   );
+  const approveAssistantActionMutation = useMutation(
+    orpc.assistant.approveAction.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.assistant.list.queryKey() });
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
+        await queryClient.invalidateQueries({ queryKey: orpc.transactionReview.list.queryKey() });
+        await transactionSync.refetch();
+      },
+    }),
+  );
+  const rejectAssistantActionMutation = useMutation(
+    orpc.assistant.rejectAction.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.assistant.list.queryKey() });
+      },
+    }),
+  );
 
   useEffect(() => {
     if (!teams.data || !selectedTeamId) {
@@ -830,6 +847,59 @@ function RouteComponent() {
                         <span className="text-xs text-muted-foreground">{toolCall.risk}</span>
                       </div>
                     )) ?? <p className="text-muted-foreground">No calls yet</p>}
+                  </div>
+                </div>
+                <div>
+                  <p className="font-medium">Pending approvals</p>
+                  <div className="mt-2 grid gap-2">
+                    {assistant.data?.pendingApprovals.length ? (
+                      assistant.data.pendingApprovals.slice(0, 3).map((approval) => (
+                        <div className="grid gap-2 border p-2" key={approval.id}>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate">{approval.toolName}</span>
+                            <span className="text-xs text-muted-foreground">{approval.risk}</span>
+                          </div>
+                          <p className="break-words text-xs text-muted-foreground">
+                            {formatApprovalPreview(approval.preview)}
+                          </p>
+                          <div className="flex gap-2">
+                            <Button
+                              disabled={approveAssistantActionMutation.isPending}
+                              onClick={() => {
+                                if (!currentTeamId) {
+                                  return;
+                                }
+
+                                approveAssistantActionMutation.mutate({
+                                  teamId: currentTeamId,
+                                  approvalId: approval.id,
+                                  idempotencyKey: crypto.randomUUID(),
+                                });
+                              }}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              disabled={rejectAssistantActionMutation.isPending}
+                              onClick={() => {
+                                if (!currentTeamId) {
+                                  return;
+                                }
+
+                                rejectAssistantActionMutation.mutate({
+                                  teamId: currentTeamId,
+                                  approvalId: approval.id,
+                                });
+                              }}
+                            >
+                              Reject
+                            </Button>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-muted-foreground">No pending approvals</p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2592,7 +2662,7 @@ function sourceHref(type: string) {
     return "#transactions";
   }
 
-  if (type === "invoice" || type === "customer") {
+  if (type === "invoice" || type === "customer" || type === "product") {
     return "#billing";
   }
 
@@ -2609,6 +2679,14 @@ function sourceHref(type: string) {
   }
 
   return "#";
+}
+
+function formatApprovalPreview(preview: Record<string, unknown>) {
+  const values = Object.values(preview)
+    .filter((value) => typeof value === "string" || typeof value === "number")
+    .slice(0, 3);
+
+  return values.length ? values.join(" · ") : "Review action details before approving.";
 }
 
 function errorMessage(error: unknown) {

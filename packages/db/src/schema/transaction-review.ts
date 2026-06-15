@@ -1055,6 +1055,40 @@ export const assistantToolCall = pgTable(
   ],
 );
 
+export const assistantActionApproval = pgTable(
+  "assistant_action_approval",
+  {
+    id: text("id").primaryKey(),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => assistantThread.id, { onDelete: "cascade" }),
+    requestedByMessageId: text("requested_by_message_id")
+      .notNull()
+      .references(() => assistantMessage.id, { onDelete: "cascade" }),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    toolName: text("tool_name").notNull(),
+    risk: text("risk").notNull(),
+    status: text("status").default("pending").notNull(),
+    input: jsonb("input").$type<Record<string, unknown>>().notNull(),
+    preview: jsonb("preview").$type<Record<string, unknown>>().notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    sourceRefs: jsonb("source_refs").$type<Record<string, unknown>[]>().notNull(),
+    requestedByActorId: text("requested_by_actor_id").notNull(),
+    approvedByActorId: text("approved_by_actor_id"),
+    rejectedByActorId: text("rejected_by_actor_id"),
+    rejectionReason: text("rejection_reason"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    decidedAt: timestamp("decided_at"),
+    executedAt: timestamp("executed_at"),
+  },
+  (table) => [
+    index("assistant_action_approval_team_status_idx").on(table.teamId, table.status),
+    index("assistant_action_approval_thread_created_idx").on(table.threadId, table.createdAt),
+  ],
+);
+
 export const idempotencyKey = pgTable(
   "idempotency_key",
   {

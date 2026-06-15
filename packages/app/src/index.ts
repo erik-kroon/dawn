@@ -10,6 +10,7 @@ import {
 } from "@dawn/ai";
 import type {
   Actor,
+  AssistantActionApproval,
   AssistantMessage,
   AssistantThread,
   AssistantToolCall,
@@ -736,6 +737,7 @@ export type GenerateWeeklyInsightsResult = {
 export type AssistantWorkspace = {
   teamId: string;
   threads: AssistantThread[];
+  pendingApprovals: AssistantActionApproval[];
 };
 
 export type AssistantConversation = {
@@ -743,6 +745,7 @@ export type AssistantConversation = {
   thread: AssistantThread;
   messages: AssistantMessage[];
   toolCalls: AssistantToolCall[];
+  actionApprovals: AssistantActionApproval[];
 };
 
 export type SendAssistantMessageCommand = {
@@ -753,6 +756,22 @@ export type SendAssistantMessageCommand = {
 
 export type SendAssistantMessageResult = AssistantConversation & {
   toolResults: AssistantToolResult[];
+};
+
+export type ApproveAssistantActionCommand = {
+  teamId: string;
+  approvalId: string;
+  idempotencyKey: string;
+};
+
+export type RejectAssistantActionCommand = {
+  teamId: string;
+  approvalId: string;
+  reason?: string | null;
+};
+
+export type AssistantActionApprovalResult = {
+  approval: AssistantActionApproval;
 };
 
 type NormalizedInvoiceDraftInput = Omit<InvoiceDraftInput, "discountBasisPoints" | "lines"> & {
@@ -1200,6 +1219,12 @@ export type AssistantRepository = {
   getAssistantThreadForTeam(teamId: string, threadId: string): Promise<AssistantThread | null>;
   listAssistantMessages(threadId: string): Promise<AssistantMessage[]>;
   listAssistantToolCalls(threadId: string): Promise<AssistantToolCall[]>;
+  listPendingAssistantActionApprovals(teamId: string): Promise<AssistantActionApproval[]>;
+  listAssistantActionApprovals(threadId: string): Promise<AssistantActionApproval[]>;
+  getAssistantActionApprovalForTeam(
+    teamId: string,
+    approvalId: string,
+  ): Promise<AssistantActionApproval | null>;
   createAssistantThread(input: {
     threadId: string;
     teamId: string;
@@ -1231,6 +1256,34 @@ export type AssistantRepository = {
       createdAt: string;
     }>;
   }): Promise<AssistantToolCall[]>;
+  createAssistantActionApproval(input: {
+    approvalId: string;
+    threadId: string;
+    requestedByMessageId: string;
+    teamId: string;
+    toolName: string;
+    risk: AssistantActionApproval["risk"];
+    input: Record<string, unknown>;
+    preview: Record<string, unknown>;
+    sourceRefs: ReportSourceRef[];
+    requestedByActorId: string;
+    createdAt: string;
+  }): Promise<AssistantActionApproval>;
+  markAssistantActionApprovalRejected(input: {
+    teamId: string;
+    approvalId: string;
+    rejectedByActorId: string;
+    decidedAt: string;
+    reason?: string | null;
+  }): Promise<AssistantActionApproval>;
+  markAssistantActionApprovalExecuted(input: {
+    teamId: string;
+    approvalId: string;
+    approvedByActorId: string;
+    result: Record<string, unknown>;
+    decidedAt: string;
+    executedAt: string;
+  }): Promise<AssistantActionApproval>;
 };
 
 export type OutboxDispatchRepository = {
@@ -4281,6 +4334,7 @@ export async function listAssistantWorkspace(
   return {
     teamId: access.teamId,
     threads: await repository.listAssistantThreads(access.teamId),
+    pendingApprovals: await repository.listPendingAssistantActionApprovals(access.teamId),
   };
 }
 
@@ -4306,6 +4360,7 @@ export async function getAssistantConversation(
     thread,
     messages: await repository.listAssistantMessages(thread.id),
     toolCalls: await repository.listAssistantToolCalls(thread.id),
+    actionApprovals: await repository.listAssistantActionApprovals(thread.id),
   };
 }
 
@@ -4348,7 +4403,14 @@ export async function sendAssistantMessage(
       sourceRefs: [],
       createdAt: now,
     });
-    const toolResults = await runAssistantTools(assistantRepository, access, message);
+    const toolResults = await runAssistantTools(
+      assistantRepository,
+      access,
+      message,
+      thread,
+      userMessage,
+      context.actor.id,
+    );
     const response = await provider.generateResponse({ question: message, toolResults });
     const assistantMessage = await assistantRepository.createAssistantMessage({
       messageId: crypto.randomUUID(),
@@ -4394,8 +4456,114 @@ export async function sendAssistantMessage(
       thread,
       messages: await assistantRepository.listAssistantMessages(thread.id),
       toolCalls: await assistantRepository.listAssistantToolCalls(thread.id),
+      actionApprovals: await assistantRepository.listAssistantActionApprovals(thread.id),
       toolResults,
     };
+  });
+}
+
+export async function approveAssistantAction(
+  repository: DawnRepository,
+  renderer: InvoicePdfRenderer,
+  emailProvider: InvoiceEmailDeliveryProvider,
+  context: TransactionReviewContext,
+  command: ApproveAssistantActionCommand,
+): Promise<AssistantActionApprovalResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const assistantRepository = transactionRepository as DawnRepository;
+    const approval = await loadPendingAssistantApproval(
+      assistantRepository,
+      command.teamId,
+      command.approvalId,
+    );
+    const tool = getAssistantTool(approval.toolName as AssistantToolName);
+
+    await resolveTeamAccess(
+      assistantRepository,
+      { ...context, teamId: command.teamId },
+      tool.requiredPermission,
+      "You cannot approve this assistant action for this team",
+    );
+
+    const result = await executeApprovedAssistantAction(
+      assistantRepository,
+      renderer,
+      emailProvider,
+      context,
+      approval,
+      command.idempotencyKey,
+    );
+    const now = new Date().toISOString();
+    const executed = await assistantRepository.markAssistantActionApprovalExecuted({
+      teamId: command.teamId,
+      approvalId: command.approvalId,
+      approvedByActorId: context.actor.id,
+      result,
+      decidedAt: now,
+      executedAt: now,
+    });
+
+    await assistantRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "assistant.action.executed",
+      entityType: "assistant_action_approval",
+      entityId: command.approvalId,
+      metadata: {
+        toolName: approval.toolName,
+        risk: approval.risk,
+        result,
+      },
+    });
+
+    return { approval: executed };
+  });
+}
+
+export async function rejectAssistantAction(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: RejectAssistantActionCommand,
+): Promise<AssistantActionApprovalResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const assistantRepository = transactionRepository as DawnRepository;
+    const approval = await loadPendingAssistantApproval(
+      assistantRepository,
+      command.teamId,
+      command.approvalId,
+    );
+
+    await resolveTeamAccess(
+      assistantRepository,
+      { ...context, teamId: command.teamId },
+      "assistant.use",
+      "You cannot reject this assistant action for this team",
+    );
+
+    const rejected = await assistantRepository.markAssistantActionApprovalRejected({
+      teamId: command.teamId,
+      approvalId: command.approvalId,
+      rejectedByActorId: context.actor.id,
+      decidedAt: new Date().toISOString(),
+      reason: command.reason ?? null,
+    });
+
+    await assistantRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "assistant.action.rejected",
+      entityType: "assistant_action_approval",
+      entityId: command.approvalId,
+      metadata: {
+        toolName: approval.toolName,
+        risk: approval.risk,
+        reason: command.reason ?? null,
+      },
+    });
+
+    return { approval: rejected };
   });
 }
 
@@ -4409,10 +4577,31 @@ async function loadAssistantThread(repository: DawnRepository, teamId: string, t
   return thread;
 }
 
+async function loadPendingAssistantApproval(
+  repository: DawnRepository,
+  teamId: string,
+  approvalId: string,
+) {
+  const approval = await repository.getAssistantActionApprovalForTeam(teamId, approvalId);
+
+  if (!approval) {
+    throw new AppError("NOT_FOUND", "Assistant action approval was not found");
+  }
+
+  if (approval.status !== "pending") {
+    throw new AppError("CONFLICT", "Assistant action approval is no longer pending");
+  }
+
+  return approval;
+}
+
 async function runAssistantTools(
   repository: DawnRepository,
   access: ResolvedTeamAccess,
   question: string,
+  thread: AssistantThread,
+  userMessage: AssistantMessage,
+  requestedByActorId: string,
 ): Promise<AssistantToolResult[]> {
   const toolNames = planAssistantTools(question);
   const results: AssistantToolResult[] = [];
@@ -4433,6 +4622,21 @@ async function runAssistantTools(
         },
         sourceRefs: [],
       });
+      continue;
+    }
+
+    if (tool.approvalRequired) {
+      results.push(
+        await createAssistantActionProposal(
+          repository,
+          access.teamId,
+          toolName,
+          input,
+          thread,
+          userMessage,
+          requestedByActorId,
+        ),
+      );
       continue;
     }
 
@@ -4537,6 +4741,284 @@ async function executeAssistantTool(
     input,
     await suggestAssistantInvoiceEmailCopy(repository, teamId),
   );
+}
+
+async function createAssistantActionProposal(
+  repository: DawnRepository,
+  teamId: string,
+  toolName: AssistantToolName,
+  input: Record<string, unknown>,
+  thread: AssistantThread,
+  userMessage: AssistantMessage,
+  requestedByActorId: string,
+): Promise<AssistantToolResult> {
+  const tool = getAssistantTool(toolName);
+  const proposal = await buildAssistantActionProposal(repository, teamId, toolName, input);
+  const approval = await repository.createAssistantActionApproval({
+    approvalId: crypto.randomUUID(),
+    threadId: thread.id,
+    requestedByMessageId: userMessage.id,
+    teamId,
+    toolName,
+    risk: tool.risk,
+    input: proposal.input,
+    preview: proposal.preview,
+    sourceRefs: proposal.sources,
+    requestedByActorId,
+    createdAt: new Date().toISOString(),
+  });
+
+  return {
+    toolName,
+    risk: tool.risk,
+    status: "completed",
+    input,
+    output: {
+      summary: proposal.summary,
+      approvalId: approval.id,
+      approvalStatus: approval.status,
+      preview: proposal.preview,
+    },
+    sourceRefs: proposal.sources,
+  };
+}
+
+async function buildAssistantActionProposal(
+  repository: DawnRepository,
+  teamId: string,
+  toolName: AssistantToolName,
+  input: Record<string, unknown>,
+) {
+  if (toolName === "create_invoice_draft") {
+    return buildDraftInvoiceProposal(repository, teamId, input);
+  }
+
+  if (toolName === "categorize_transaction") {
+    return buildCategorizeTransactionProposal(repository, teamId, input);
+  }
+
+  if (toolName === "send_invoice") {
+    return buildSendInvoiceProposal(repository, teamId, input);
+  }
+
+  throw new AppError("CONFLICT", `Tool ${toolName} does not require approval`);
+}
+
+async function buildDraftInvoiceProposal(
+  repository: DawnRepository,
+  teamId: string,
+  input: Record<string, unknown>,
+) {
+  const [customers, products] = await Promise.all([
+    repository.listCustomers(teamId),
+    repository.listProducts(teamId),
+  ]);
+  const customer =
+    customers.find((candidate) => candidate.id === input.customerId) ?? customers[0] ?? null;
+  const product =
+    products.find((candidate) => candidate.id === input.productId) ?? products[0] ?? null;
+
+  if (!customer || !product) {
+    throw new AppError(
+      "CONFLICT",
+      "Assistant invoice drafts require at least one customer and product",
+    );
+  }
+
+  const issueDate =
+    typeof input.issueDate === "string" ? input.issueDate : new Date().toISOString();
+  const dueDate = typeof input.dueDate === "string" ? input.dueDate : null;
+  const quantityMilli = typeof input.quantityMilli === "number" ? input.quantityMilli : 1_000;
+  const invoiceNumber =
+    typeof input.invoiceNumber === "string" && input.invoiceNumber.trim()
+      ? input.invoiceNumber.trim()
+      : `AI-${new Date(issueDate).toISOString().slice(0, 10).replaceAll("-", "")}`;
+  const draftInput = {
+    teamId,
+    customerId: customer.id,
+    invoiceNumber,
+    issueDate,
+    dueDate,
+    currency: product.unitPrice.currency,
+    discountBasisPoints: 0,
+    notes: "Drafted by Dawn assistant and awaiting user review.",
+    lines: [
+      {
+        productId: product.id,
+        description: product.name,
+        quantityMilli,
+        unitPrice: product.unitPrice,
+        taxRateBasisPoints: product.defaultTaxRateBasisPoints,
+      },
+    ],
+  };
+
+  return {
+    input: draftInput,
+    preview: {
+      invoiceNumber,
+      customerName: customer.name,
+      lineDescription: product.name,
+      unitPrice: product.unitPrice,
+      quantityMilli,
+    },
+    summary: `Prepared an editable draft invoice proposal for ${customer.name}.`,
+    sources: [customerSource(customer), productSource(product)],
+  };
+}
+
+async function buildCategorizeTransactionProposal(
+  repository: DawnRepository,
+  teamId: string,
+  input: Record<string, unknown>,
+) {
+  const [workspace, transactions] = await Promise.all([
+    repository.listWorkspace({ id: "assistant", type: "user" }, teamId),
+    repository.listTransactionsForReport({ teamId }),
+  ]);
+  const transaction =
+    transactions.find((candidate) => candidate.id === input.transactionId) ??
+    transactions.find((candidate) => candidate.categoryId === null) ??
+    null;
+  const category =
+    workspace.categories.find((candidate) => candidate.id === input.categoryId) ??
+    workspace.categories.find((candidate) =>
+      transaction?.description.toLowerCase().includes(candidate.name.toLowerCase()),
+    ) ??
+    workspace.categories[0] ??
+    null;
+
+  if (!transaction || !category) {
+    throw new AppError("CONFLICT", "Assistant categorization requires a transaction and category");
+  }
+
+  return {
+    input: {
+      teamId,
+      transactionId: transaction.id,
+      categoryId: category.id,
+    },
+    preview: {
+      transactionDescription: transaction.description,
+      transactionAmount: transaction.money,
+      categoryName: category.name,
+    },
+    summary: `Prepared a transaction categorization proposal for ${transaction.description}.`,
+    sources: [transactionSource(transaction)],
+  };
+}
+
+async function buildSendInvoiceProposal(
+  repository: DawnRepository,
+  teamId: string,
+  input: Record<string, unknown>,
+) {
+  const invoices = await repository.listInvoices(teamId);
+  const invoice =
+    invoices.find((candidate) => candidate.id === input.invoiceId) ??
+    invoices.find(
+      (candidate) => candidate.status === "draft" || candidate.status === "scheduled",
+    ) ??
+    null;
+
+  if (!invoice) {
+    throw new AppError("CONFLICT", "Assistant invoice send requires a draft or scheduled invoice");
+  }
+
+  const customer = await repository.getCustomerForTeam(teamId, invoice.customerId);
+  const contact = customer
+    ? await repository.getCustomerContactForCustomer(teamId, customer.id)
+    : null;
+  const toEmail =
+    typeof input.toEmail === "string" && input.toEmail.trim()
+      ? input.toEmail.trim()
+      : (contact?.email ?? customer?.email ?? null);
+
+  if (!toEmail) {
+    throw new AppError("CONFLICT", "Assistant invoice send requires a recipient email");
+  }
+
+  const subject =
+    typeof input.subject === "string" && input.subject.trim()
+      ? input.subject.trim()
+      : `Invoice ${invoice.invoiceNumber}`;
+  const message =
+    typeof input.message === "string" && input.message.trim()
+      ? input.message.trim()
+      : `Attached invoice ${invoice.invoiceNumber}`;
+
+  return {
+    input: {
+      teamId,
+      invoiceId: invoice.id,
+      toEmail,
+      subject,
+      message,
+    },
+    preview: {
+      invoiceNumber: invoice.invoiceNumber,
+      customerName: customer?.name ?? invoice.customerId,
+      toEmail,
+      subject,
+      total: invoice.totals.total,
+    },
+    summary: `Prepared an invoice send proposal for ${invoice.invoiceNumber}.`,
+    sources: [invoiceSource(invoice)],
+  };
+}
+
+async function executeApprovedAssistantAction(
+  repository: DawnRepository,
+  renderer: InvoicePdfRenderer,
+  emailProvider: InvoiceEmailDeliveryProvider,
+  context: TransactionReviewContext,
+  approval: AssistantActionApproval,
+  idempotencyKey: string,
+): Promise<Record<string, unknown>> {
+  if (approval.toolName === "create_invoice_draft") {
+    const result = await createDraftInvoice(repository, context, {
+      ...(approval.input as Omit<CreateDraftInvoiceCommand, "idempotencyKey">),
+      idempotencyKey,
+    });
+
+    return {
+      invoiceId: result.invoice.id,
+      invoiceNumber: result.invoice.invoiceNumber,
+      status: result.invoice.status,
+      replayed: result.replayed,
+    };
+  }
+
+  if (approval.toolName === "categorize_transaction") {
+    const result = await reviewTransaction(repository, context, {
+      ...(approval.input as Omit<ReviewTransactionCommand, "idempotencyKey">),
+      idempotencyKey,
+    });
+
+    return {
+      transactionId: result.transaction.id,
+      categoryId: result.transaction.categoryId,
+      reviewState: result.transaction.reviewState,
+      replayed: result.replayed,
+    };
+  }
+
+  if (approval.toolName === "send_invoice") {
+    const result = await sendInvoice(repository, renderer, emailProvider, context, {
+      ...(approval.input as Omit<SendInvoiceCommand, "confirm" | "idempotencyKey">),
+      confirm: true,
+      idempotencyKey,
+    });
+
+    return {
+      invoiceId: result.invoice.id,
+      status: result.invoice.status,
+      providerMessageId: result.providerMessageId,
+      replayed: result.replayed,
+    };
+  }
+
+  throw new AppError("CONFLICT", `Unsupported assistant action ${approval.toolName}`);
 }
 
 function assistantToolResult(
@@ -5087,6 +5569,14 @@ function customerSource(customer: Customer): ReportSourceRef {
     type: "customer",
     id: customer.id,
     label: customer.name,
+  };
+}
+
+function productSource(product: Product): ReportSourceRef {
+  return {
+    type: "product",
+    id: product.id,
+    label: product.name,
   };
 }
 

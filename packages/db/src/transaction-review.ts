@@ -27,6 +27,7 @@ import type {
 } from "@dawn/app";
 import type {
   Actor,
+  AssistantActionApproval,
   AssistantMessage,
   AssistantThread,
   AssistantToolCall,
@@ -2249,6 +2250,151 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return toolCalls.map(mapAssistantToolCall);
   }
 
+  async listPendingAssistantActionApprovals(teamId: string): Promise<AssistantActionApproval[]> {
+    const approvals = await this.client
+      .select()
+      .from(schema.assistantActionApproval)
+      .where(
+        and(
+          eq(schema.assistantActionApproval.teamId, teamId),
+          eq(schema.assistantActionApproval.status, "pending"),
+        ),
+      )
+      .orderBy(desc(schema.assistantActionApproval.createdAt));
+
+    return approvals.map(mapAssistantActionApproval);
+  }
+
+  async listAssistantActionApprovals(threadId: string): Promise<AssistantActionApproval[]> {
+    const approvals = await this.client
+      .select()
+      .from(schema.assistantActionApproval)
+      .where(eq(schema.assistantActionApproval.threadId, threadId))
+      .orderBy(asc(schema.assistantActionApproval.createdAt));
+
+    return approvals.map(mapAssistantActionApproval);
+  }
+
+  async getAssistantActionApprovalForTeam(
+    teamId: string,
+    approvalId: string,
+  ): Promise<AssistantActionApproval | null> {
+    const [approval] = await this.client
+      .select()
+      .from(schema.assistantActionApproval)
+      .where(
+        and(
+          eq(schema.assistantActionApproval.teamId, teamId),
+          eq(schema.assistantActionApproval.id, approvalId),
+        ),
+      )
+      .limit(1);
+
+    return approval ? mapAssistantActionApproval(approval) : null;
+  }
+
+  async createAssistantActionApproval(input: {
+    approvalId: string;
+    threadId: string;
+    requestedByMessageId: string;
+    teamId: string;
+    toolName: string;
+    risk: AssistantActionApproval["risk"];
+    input: Record<string, unknown>;
+    preview: Record<string, unknown>;
+    sourceRefs: ReportSourceRef[];
+    requestedByActorId: string;
+    createdAt: string;
+  }): Promise<AssistantActionApproval> {
+    const [approval] = await this.client
+      .insert(schema.assistantActionApproval)
+      .values({
+        id: input.approvalId,
+        threadId: input.threadId,
+        requestedByMessageId: input.requestedByMessageId,
+        teamId: input.teamId,
+        toolName: input.toolName,
+        risk: input.risk,
+        status: "pending",
+        input: input.input,
+        preview: input.preview,
+        sourceRefs: input.sourceRefs,
+        requestedByActorId: input.requestedByActorId,
+        createdAt: new Date(input.createdAt),
+      })
+      .returning();
+
+    if (!approval) {
+      throw new Error("Failed to create assistant action approval");
+    }
+
+    return mapAssistantActionApproval(approval);
+  }
+
+  async markAssistantActionApprovalRejected(input: {
+    teamId: string;
+    approvalId: string;
+    rejectedByActorId: string;
+    decidedAt: string;
+    reason?: string | null;
+  }): Promise<AssistantActionApproval> {
+    const [approval] = await this.client
+      .update(schema.assistantActionApproval)
+      .set({
+        status: "rejected",
+        rejectedByActorId: input.rejectedByActorId,
+        rejectionReason: input.reason ?? null,
+        decidedAt: new Date(input.decidedAt),
+      })
+      .where(
+        and(
+          eq(schema.assistantActionApproval.teamId, input.teamId),
+          eq(schema.assistantActionApproval.id, input.approvalId),
+          eq(schema.assistantActionApproval.status, "pending"),
+        ),
+      )
+      .returning();
+
+    if (!approval) {
+      throw new Error("Failed to reject assistant action approval");
+    }
+
+    return mapAssistantActionApproval(approval);
+  }
+
+  async markAssistantActionApprovalExecuted(input: {
+    teamId: string;
+    approvalId: string;
+    approvedByActorId: string;
+    result: Record<string, unknown>;
+    decidedAt: string;
+    executedAt: string;
+  }): Promise<AssistantActionApproval> {
+    const [approval] = await this.client
+      .update(schema.assistantActionApproval)
+      .set({
+        status: "executed",
+        approvedByActorId: input.approvedByActorId,
+        result: input.result,
+        decidedAt: new Date(input.decidedAt),
+        executedAt: new Date(input.executedAt),
+      })
+      .where(
+        and(
+          eq(schema.assistantActionApproval.teamId, input.teamId),
+          eq(schema.assistantActionApproval.id, input.approvalId),
+          eq(schema.assistantActionApproval.status, "pending"),
+        ),
+      )
+      .returning();
+
+    if (!approval) {
+      throw new Error("Failed to execute assistant action approval");
+    }
+
+    return mapAssistantActionApproval(approval);
+  }
+
   private async insertInvoiceLines(input: {
     teamId: string;
     invoiceId: string;
@@ -3225,6 +3371,30 @@ function mapAssistantToolCall(
     output: toolCall.output,
     sourceRefs: toolCall.sourceRefs as ReportSourceRef[],
     createdAt: toolCall.createdAt.toISOString(),
+  };
+}
+
+function mapAssistantActionApproval(
+  approval: typeof schema.assistantActionApproval.$inferSelect,
+): AssistantActionApproval {
+  return {
+    id: approval.id,
+    threadId: approval.threadId,
+    requestedByMessageId: approval.requestedByMessageId,
+    teamId: approval.teamId,
+    toolName: approval.toolName,
+    risk: approval.risk as AssistantActionApproval["risk"],
+    status: approval.status as AssistantActionApproval["status"],
+    input: approval.input,
+    preview: approval.preview,
+    result: approval.result,
+    sourceRefs: approval.sourceRefs as ReportSourceRef[],
+    requestedByActorId: approval.requestedByActorId,
+    approvedByActorId: approval.approvedByActorId,
+    rejectedByActorId: approval.rejectedByActorId,
+    createdAt: approval.createdAt.toISOString(),
+    decidedAt: approval.decidedAt?.toISOString() ?? null,
+    executedAt: approval.executedAt?.toISOString() ?? null,
   };
 }
 

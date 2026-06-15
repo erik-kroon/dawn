@@ -4,6 +4,7 @@ import {
   AppError,
   acceptInboxMatch,
   acceptTeamInvite,
+  approveAssistantAction,
   commitCsvTransactionImport,
   createDeterministicInvoicePdfRenderer,
   connectMockBankConnection,
@@ -37,6 +38,7 @@ import {
   previewCsvTransactionImport,
   previewInvoicePdf,
   rejectInboxMatch,
+  rejectAssistantAction,
   recordInvoicePayment,
   reviewTransaction,
   sendInvoice,
@@ -114,6 +116,19 @@ const assistantAskInput = z.object({
   teamId: z.string().min(1).optional(),
   threadId: z.string().min(1).nullable().optional(),
   message: z.string().trim().min(1).max(2_000),
+});
+
+const assistantActionInput = z.object({
+  teamId: z.string().min(1),
+  approvalId: z.string().min(1),
+});
+
+const assistantApproveActionInput = assistantActionInput.extend({
+  idempotencyKey: z.string().min(1),
+});
+
+const assistantRejectActionInput = assistantActionInput.extend({
+  reason: z.string().max(500).nullable().optional(),
 });
 
 const bankConnectionInput = z.object({
@@ -685,6 +700,45 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
           mapAppError(error);
         }
       }),
+      approveAction: protectedProcedure
+        .input(assistantApproveActionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await approveAssistantAction(
+              transactionReviewRepository,
+              invoicePdfRenderer,
+              invoiceEmailDeliveryProvider,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      rejectAction: protectedProcedure
+        .input(assistantRejectActionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await rejectAssistantAction(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                reason: input.reason ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
     },
     banking: {
       list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
