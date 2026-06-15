@@ -49,6 +49,29 @@ Do not copy Midday's database-query-owned business policy. Use Midday for produc
 - Do not make candidate retrieval an unbounded report transaction scan.
 - Do not put matching decisions in queue handlers, API routers, or React components.
 
+## Commit Protocol
+
+Matching work should commit as it goes. Do not wait until several matcher slices
+have accumulated in one dirty worktree.
+
+After each verified slice, or after a coherent independently useful sub-slice:
+
+1. Run the slice's focused verification and any impacted workspace checks.
+2. Update the relevant implementation tracker with status, verification, blockers,
+   and the next slice.
+3. Inspect `git status --short` and the diff before staging.
+4. Stage only files owned by the matching slice; do not stage unrelated UI,
+   banking, Gmail, or user-owned worktree changes.
+5. Commit the verified unit with a concise conventional message, for example
+   `feat(matching): add reverse matching job` or
+   `refactor(matching): share deterministic score engine`.
+6. If live data or broader evaluation proof is blocked, commit the local/testable
+   foundation only when it is independently useful and record the prerequisite
+   explicitly.
+
+Use a separate docs checkpoint commit when tracking/docs updates are substantial
+or when separating them makes history easier to review.
+
 ## Ordered Slices
 
 ### 1. Reverse Matching Tracer
