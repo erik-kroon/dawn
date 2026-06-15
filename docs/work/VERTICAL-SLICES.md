@@ -175,11 +175,11 @@ Create a financial core that can safely support transactions, reporting, invoice
 
 ## Acceptance Criteria
 
-- [ ] Money operations avoid JavaScript floating point for authoritative calculations.
-- [ ] Transactions support income, expense, transfer, fee, refund, and adjustment classification.
-- [ ] Split transactions and tags are represented.
-- [ ] Duplicate detection has a deterministic key strategy.
-- [ ] Basic reports can be produced from ledger records.
+- [x] Money operations avoid JavaScript floating point for authoritative calculations.
+- [x] Transactions support income, expense, transfer, fee, refund, and adjustment classification.
+- [x] Split transactions and tags are represented.
+- [x] Duplicate detection has a deterministic key strategy.
+- [x] Basic reports can be produced from ledger records.
 
 ## Verification
 
