@@ -136,6 +136,32 @@ export class MemoryAppRepository implements LedgerRepository {
       .slice(0, limit);
   }
 
+  async revokeAccountantPacketExportForTeam(input: {
+    teamId: string;
+    packetId: string;
+    revokedAt: string;
+    revokedByActorId: string;
+    reason?: string | null;
+  }) {
+    const packet = await this.getAccountantPacketExportForTeam(input.teamId, input.packetId);
+
+    if (!packet) {
+      return null;
+    }
+
+    const updated: AccountantPacketExportRecord = {
+      ...packet,
+      status: "revoked",
+      revokedAt: input.revokedAt,
+      revokedByActorId: input.revokedByActorId,
+      revokeReason: input.reason ?? null,
+    };
+
+    this.accountantPacketExports.set(input.packetId, updated);
+
+    return updated;
+  }
+
   async getCounterpartyForTeam(teamId: string, counterpartyId: string) {
     const counterparty = this.counterparties.get(counterpartyId);
     return counterparty?.teamId === teamId ? counterparty : null;

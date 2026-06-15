@@ -183,6 +183,13 @@
       "when": 1781547000000,
       "tag": "0025_accountant_packet_exports",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1781548200000,
+      "tag": "0026_accountant_packet_revocation",
+      "breakpoints": true
     }
   ]
 }

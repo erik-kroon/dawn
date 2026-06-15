@@ -51,8 +51,8 @@ Live Gmail OAuth and email delivery should not block completion of local product
 | 3. CSV Import Wizard Parity Plus                        | Completed   | Added header auto-detection, mapped column selectors, sign inversion, richer preview metadata, duplicate visibility, synchronous commit, queued large-import sessions, R2-backed payload handoff, worker execution, payload cleanup, and operations-page queued feedback.                                    |
 | 4. Gmail Connector Production Readiness                 | Local backend/runtime hardening completed | Gmail config health, scheduled/manual sync locking, skipped-count reporting, and deterministic provider-boundary tests landed. Live OAuth smoke remains blocked on Google credentials and a test mailbox.                                                                                                    |
 | 5. Receipt Matching Parity Plus                         | Completed   | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Browser smoke remains deferred while inbox/transactions UI files are under concurrent coss work.                                                                   |
-| 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, signed download links, skipped attachment counts, and exported-after-storage status landed. Email delivery and visible export history remain open.                                             |
-| 7. Accountant Access And Handoff Audit                  | Partial     | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Stored packet records, export history API, and signed download audits exist; visible history UI, revocation, and email access audit remain open.                                         |
+| 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, signed download links, skipped attachment counts, exported-after-storage status, and packet download token policy landed. Email delivery and visible export history remain open.               |
+| 7. Accountant Access And Handoff Audit                  | Partial     | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Stored packet records, export history API, signed download audits, and revocable packet links exist; visible history UI and email access audit remain open.                               |
 | 8. Operational Hardening And Accountant Close Loop      | Partial     | Operations API now returns selected-period accountant close readiness from lifecycle states. Operations UI, representative monthly fixture, and retry affordances remain open.                                                                                                                                |
 
 ## Outcome
@@ -410,7 +410,8 @@ Match or exceed Midday's file export: ZIP with CSV, optional XLSX, attachments, 
 Status: Partially completed on 2026-06-15 for synchronous package format depth:
 CSV/XLSX selection, CSV delimiter, manifest hashes, attachments, skipped
 attachment counts, exported transaction state, and queued object-storage export
-processing, durable packet records, and signed download link creation.
+processing, durable packet records, signed download link creation, and scoped
+accountant packet download token policy.
 Accountant email delivery and visible export history remain open.
 
 ## Scope
@@ -462,6 +463,9 @@ Accountant email delivery and visible export history remain open.
   not marking transactions exported when object storage fails.
 - Signed download tests cover durable packet export records and the API route
   creating a signed download URL for the stored ZIP.
+- `bun test packages/api/src/document-url.test.ts` passed: 5 tests.
+- Document URL tests cover signed accountant packet download tokens, expiration,
+  tamper rejection, and scoped packet object keys.
 - Email request validation remains open.
 - Browser smoke for export settings modal and download.
 - Open the produced ZIP and verify file names, CSV rows, manifest counts, and attachment presence.
@@ -486,8 +490,9 @@ Make accountant collaboration better than Midday's email-only path where Dawn's 
 Status: Partially completed on 2026-06-15 for accountant role access. The
 accountant role can be invited and can export ready packets, but it no longer
 has transaction categorization or other write-oriented product permissions.
-Stored packet records and signed download-link audit now exist. Visible export
-history UI, link revocation, and email access audit remain open.
+Stored packet records, signed download-link audit, export history API, and
+revocable packet links now exist. Visible export history UI and email access
+audit remain open.
 
 ## Scope
 
@@ -515,7 +520,7 @@ history UI, link revocation, and email access audit remain open.
 - [x] An accountant cannot review, categorize, delete, or alter transactions unless a permission explicitly allows it.
 - [x] Export history API shows who generated each stored package.
 - [ ] Export history UI shows who generated and who accessed each package.
-- [ ] Revoked or expired links cannot be used.
+- [x] Revoked or expired links cannot be used.
 - [ ] Email-only handoff still works without creating a team member.
 
 ## Verification
@@ -526,9 +531,20 @@ history UI, link revocation, and email access audit remain open.
 - Permission matrix tests cover the accountant role.
 - App tests cover accountant export access and denied transaction review.
 - App/API tests cover stored packet export history for accountant-permitted actors.
-- App/API tests for revoked/expired links remain open.
+- `bun test packages/app/src/accountant-packet.test.ts` passed: 12 tests.
+- `DATABASE_URL=postgres://test BETTER_AUTH_SECRET=0123456789abcdef0123456789abcdef BETTER_AUTH_URL=http://localhost:3000 CORS_ORIGIN=http://localhost:3001 POLAR_ACCESS_TOKEN=test POLAR_SUCCESS_URL=http://localhost:3001/success bun test packages/api/src/accountant-packet-router.test.ts`
+  passed: 6 tests.
+- App/API tests cover revoking stored packet exports, idempotent revoke replay,
+  and blocking new signed download links for revoked packets.
+- Server download handling rechecks accountant packet status before reading R2,
+  so previously issued signed links stop working after revocation.
 - Browser smoke with owner and accountant accounts if test auth supports it.
-- `bun run check-types`
+- `bun run check-types` passed.
+- `bunx oxlint` passed.
+- `bunx oxfmt --check packages/api/src/document-url.ts packages/api/src/document-url.test.ts packages/app/src/accountant-packet.ts packages/app/src/accountant-packet.test.ts packages/app/src/testkit/memory-repository.ts packages/db/src/schema/core.ts packages/db/src/dawn-repository.ts packages/api/src/routers/index.ts packages/api/src/accountant-packet-router.test.ts apps/server/src/index.ts`
+  passed.
+- `git diff --check -- packages/api/src/document-url.ts packages/api/src/document-url.test.ts packages/app/src/accountant-packet.ts packages/app/src/accountant-packet.test.ts packages/app/src/testkit/memory-repository.ts packages/db/src/schema/core.ts packages/db/src/dawn-repository.ts packages/api/src/routers/index.ts packages/api/src/accountant-packet-router.test.ts apps/server/src/index.ts packages/db/src/migrations/0026_accountant_packet_revocation.sql packages/db/src/migrations/meta/_journal.json docs/work/ACCOUNTANT-HANDOFF-SLICES.md`
+  passed.
 
 ## Dependencies
 

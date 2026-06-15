@@ -3528,6 +3528,10 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         fileName: input.fileName,
         contentType: input.contentType,
         byteSize: input.byteSize,
+        status: input.status,
+        revokedAt: input.revokedAt ? new Date(input.revokedAt) : null,
+        revokedByActorId: input.revokedByActorId,
+        revokeReason: input.revokeReason,
         manifest: input.manifest,
         createdAt: new Date(input.createdAt),
       })
@@ -3539,6 +3543,10 @@ export class DrizzleDawnRepository implements DrizzleRepository {
           fileName: input.fileName,
           contentType: input.contentType,
           byteSize: input.byteSize,
+          status: input.status,
+          revokedAt: input.revokedAt ? new Date(input.revokedAt) : null,
+          revokedByActorId: input.revokedByActorId,
+          revokeReason: input.revokeReason,
           manifest: input.manifest,
         },
       })
@@ -3575,6 +3583,32 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       .limit(limit);
 
     return records.map(mapAccountantPacketExportRecord);
+  }
+
+  async revokeAccountantPacketExportForTeam(input: {
+    teamId: string;
+    packetId: string;
+    revokedAt: string;
+    revokedByActorId: string;
+    reason?: string | null;
+  }): Promise<AccountantPacketExportRecord | null> {
+    const [record] = await this.client
+      .update(schema.accountantPacketExport)
+      .set({
+        status: "revoked",
+        revokedAt: new Date(input.revokedAt),
+        revokedByActorId: input.revokedByActorId,
+        revokeReason: input.reason ?? null,
+      })
+      .where(
+        and(
+          eq(schema.accountantPacketExport.teamId, input.teamId),
+          eq(schema.accountantPacketExport.id, input.packetId),
+        ),
+      )
+      .returning();
+
+    return record ? mapAccountantPacketExportRecord(record) : null;
   }
 
   async listAccountantPacketTransactionRows(input: {
@@ -5039,6 +5073,10 @@ function mapAccountantPacketExportRecord(
     fileName: record.fileName,
     contentType: record.contentType as "application/zip",
     byteSize: record.byteSize,
+    status: record.status as AccountantPacketExportRecord["status"],
+    revokedAt: record.revokedAt?.toISOString() ?? null,
+    revokedByActorId: record.revokedByActorId,
+    revokeReason: record.revokeReason,
     manifest,
     createdAt: record.createdAt.toISOString(),
   };

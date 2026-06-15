@@ -69,6 +69,7 @@ import {
   requestEmailInboxSync,
   requestAccountantPacketExport,
   reviewTransaction,
+  revokeAccountantPacketExport,
   requestTeamDataDeletion,
   requestTeamDataExport,
   grantOAuthConsent,
@@ -154,6 +155,13 @@ const createAccountantPacketDownloadInput = z.object({
 const listAccountantPacketExportsInput = z.object({
   teamId: z.string().min(1),
   limit: z.number().int().min(1).max(100).optional(),
+});
+
+const revokeAccountantPacketExportInput = z.object({
+  teamId: z.string().min(1),
+  packetId: z.string().min(1),
+  reason: z.string().trim().max(500).nullable().optional(),
+  idempotencyKey: z.string().min(1),
 });
 
 const updateTransactionAccountantStatusInput = z.object({
@@ -946,6 +954,19 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await listAccountantPacketExportHistory(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      revokePacketExport: protectedProcedure
+        .input(revokeAccountantPacketExportInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await revokeAccountantPacketExport(
               dawnRepository,
               appRequestFromSession(context, { teamId: input.teamId }),
               input,

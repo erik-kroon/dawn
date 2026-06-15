@@ -7,6 +7,7 @@ import {
   exportAccountantPacket,
   listAccountantPacketExportHistory,
   requestAccountantPacketExport,
+  revokeAccountantPacketExport,
 } from "./index";
 import {
   createReviewRepository,
@@ -545,6 +546,10 @@ describe("exportAccountantPacket", () => {
       fileName: "old.zip",
       contentType: "application/zip",
       byteSize: 100,
+      status: "available",
+      revokedAt: null,
+      revokedByActorId: null,
+      revokeReason: null,
       manifest: {
         packetId: "packet_old",
         teamId: "team_1",
@@ -579,5 +584,88 @@ describe("exportAccountantPacket", () => {
     );
 
     expect(history.packets.map((packet) => packet.packetId)).toEqual(["packet_new"]);
+  });
+
+  test("revokes stored packet links and blocks new download links", async () => {
+    const repository = createReviewRepository("admin");
+    repository.accountantPacketExports.set("packet_1", {
+      packetId: "packet_1",
+      teamId: "team_1",
+      actorId: "user_1",
+      objectKey: "teams/team_1/accountant-packets/packet_1.zip",
+      fileName: "accountant-packet.zip",
+      contentType: "application/zip",
+      byteSize: 100,
+      status: "available",
+      revokedAt: null,
+      revokedByActorId: null,
+      revokeReason: null,
+      manifest: {
+        packetId: "packet_1",
+        teamId: "team_1",
+        actorId: "user_1",
+        generatedAt: "2026-06-15T12:00:00.000Z",
+        filters: {
+          from: "2026-06-01T00:00:00.000Z",
+          to: "2026-06-30T23:59:59.999Z",
+          transactionIds: ["txn_1"],
+        },
+        settings: { formats: ["csv"], csvDelimiter: "," },
+        transactionCount: 1,
+        attachmentCount: 0,
+        skippedAttachmentCount: 0,
+        currencyTotals: { USD: { amountMinor: -1200, currency: "USD" } },
+        files: [],
+      },
+      createdAt: "2026-06-15T12:00:00.000Z",
+    });
+    const signer = {
+      async createUploadUrl() {
+        throw new Error("upload signing should not be used");
+      },
+      async createDownloadUrl() {
+        return {
+          url: "http://localhost:3000/documents/download/token",
+          expiresAt: "2026-06-15T12:05:00.000Z",
+        };
+      },
+    };
+
+    const result = await revokeAccountantPacketExport(
+      repository,
+      { actor: testActor, requestId: "request_1", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        packetId: "packet_1",
+        reason: "Corrected June close",
+        idempotencyKey: "revoke_packet_1",
+      },
+    );
+    const replay = await revokeAccountantPacketExport(
+      repository,
+      { actor: testActor, requestId: "request_2", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        packetId: "packet_1",
+        reason: "Corrected June close",
+        idempotencyKey: "revoke_packet_1",
+      },
+    );
+
+    expect(result.packet).toMatchObject({
+      packetId: "packet_1",
+      status: "revoked",
+      revokedByActorId: "user_1",
+      revokeReason: "Corrected June close",
+    });
+    expect(replay.replayed).toBe(true);
+    await expect(
+      createAccountantPacketDownload(
+        repository,
+        signer,
+        { actor: testActor, requestId: "request_3", teamId: "team_1" },
+        { teamId: "team_1", packetId: "packet_1" },
+      ),
+    ).rejects.toEqual(new AppError("FORBIDDEN", "Accountant packet export link was revoked"));
   });
 });

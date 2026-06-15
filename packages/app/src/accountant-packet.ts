@@ -130,6 +130,10 @@ export type StoredAccountantPacketExportResult = Omit<
 export type AccountantPacketExportRecord = Omit<StoredAccountantPacketExportResult, "replayed"> & {
   teamId: string;
   actorId: string;
+  status: "available" | "revoked";
+  revokedAt: string | null;
+  revokedByActorId: string | null;
+  revokeReason: string | null;
   createdAt: string;
 };
 
@@ -143,10 +147,22 @@ export type ListAccountantPacketExportHistoryCommand = {
   limit?: number;
 };
 
+export type RevokeAccountantPacketExportCommand = {
+  teamId: string;
+  packetId: string;
+  reason?: string | null;
+  idempotencyKey: string;
+};
+
 export type CreateAccountantPacketDownloadResult = {
   packet: AccountantPacketExportRecord;
   downloadUrl: string;
   downloadExpiresAt: string;
+};
+
+export type RevokeAccountantPacketExportResult = {
+  packet: AccountantPacketExportRecord;
+  replayed?: boolean;
 };
 
 export type AccountantPacketExportHistory = {
@@ -186,6 +202,13 @@ export interface AccountantPacketRepository extends TransactionReviewRepository 
     teamId: string,
     limit: number,
   ): Promise<AccountantPacketExportRecord[]>;
+  revokeAccountantPacketExportForTeam(input: {
+    teamId: string;
+    packetId: string;
+    revokedAt: string;
+    revokedByActorId: string;
+    reason?: string | null;
+  }): Promise<AccountantPacketExportRecord | null>;
 }
 
 type PacketFile = {
@@ -201,6 +224,7 @@ type PacketFile = {
 const exportAccountantPacketOperation = "accountant_packet.export";
 const requestAccountantPacketExportOperation = "accountant_packet.export.request";
 const completeStoredAccountantPacketExportOperation = "accountant_packet.export.complete";
+const revokeAccountantPacketExportOperation = "accountant_packet.export.revoke";
 const accountantPacketExportSystemActorId = "system:accountant-packet-export";
 
 export async function exportAccountantPacket(
@@ -442,6 +466,10 @@ export async function completeStoredAccountantPacketExport(
       fileName: result.fileName,
       contentType: result.contentType,
       byteSize: result.byteSize,
+      status: "available",
+      revokedAt: null,
+      revokedByActorId: null,
+      revokeReason: null,
       manifest: result.manifest,
       createdAt: result.manifest.generatedAt,
     });
@@ -477,14 +505,10 @@ export async function createAccountantPacketDownload(
     "You cannot download accountant packets for this team",
   );
 
-  const packet = await repository.getAccountantPacketExportForTeam(
-    command.teamId,
-    command.packetId,
-  );
-
-  if (!packet) {
-    throw new AppError("NOT_FOUND", "Accountant packet export not found");
-  }
+  const packet = await assertAccountantPacketDownloadAvailable(repository, {
+    teamId: command.teamId,
+    packetId: command.packetId,
+  });
 
   const download = await signer.createDownloadUrl({
     teamId: command.teamId,
@@ -515,6 +539,27 @@ export async function createAccountantPacketDownload(
   };
 }
 
+export async function assertAccountantPacketDownloadAvailable(
+  repository: AccountantPacketRepository,
+  input: {
+    teamId: string;
+    packetId: string;
+    objectKey?: string;
+  },
+): Promise<AccountantPacketExportRecord> {
+  const packet = await repository.getAccountantPacketExportForTeam(input.teamId, input.packetId);
+
+  if (!packet || (input.objectKey && packet.objectKey !== input.objectKey)) {
+    throw new AppError("NOT_FOUND", "Accountant packet export not found");
+  }
+
+  if (packet.status === "revoked") {
+    throw new AppError("FORBIDDEN", "Accountant packet export link was revoked");
+  }
+
+  return packet;
+}
+
 export async function listAccountantPacketExportHistory(
   repository: AccountantPacketRepository,
   context: TransactionReviewContext,
@@ -534,6 +579,90 @@ export async function listAccountantPacketExportHistory(
       normalizePacketHistoryLimit(command.limit),
     ),
   };
+}
+
+export async function revokeAccountantPacketExport(
+  repository: AccountantPacketRepository,
+  context: TransactionReviewContext,
+  command: RevokeAccountantPacketExportCommand,
+): Promise<RevokeAccountantPacketExportResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const packetRepository = transactionRepository as AccountantPacketRepository;
+
+    await resolveTeamAccess(
+      packetRepository,
+      { ...context, teamId: command.teamId },
+      "team.manage",
+      "You cannot revoke accountant packet exports for this team",
+    );
+
+    if (!command.idempotencyKey.trim()) {
+      throw new AppError("CONFLICT", "Packet export revocation idempotency key is required");
+    }
+
+    const normalizedReason = normalizeOptionalReason(command.reason);
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      packetId: command.packetId,
+      reason: normalizedReason,
+    });
+    const replayed = await packetRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      revokeAccountantPacketExportOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different packet export revocation",
+        );
+      }
+
+      return { ...(replayed.result as RevokeAccountantPacketExportResult), replayed: true };
+    }
+
+    const revokedAt = new Date().toISOString();
+    const packet = await packetRepository.revokeAccountantPacketExportForTeam({
+      teamId: command.teamId,
+      packetId: command.packetId,
+      revokedAt,
+      revokedByActorId: context.actor.id,
+      reason: normalizedReason,
+    });
+
+    if (!packet) {
+      throw new AppError("NOT_FOUND", "Accountant packet export not found");
+    }
+
+    const result: RevokeAccountantPacketExportResult = { packet, replayed: false };
+
+    await packetRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "accountant_packet.revoked",
+      entityType: "accountant_packet",
+      entityId: packet.packetId,
+      metadata: {
+        objectKey: packet.objectKey,
+        revokedAt,
+        reason: normalizedReason,
+      },
+    });
+    await packetRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: revokeAccountantPacketExportOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
 }
 
 export function exportAccountantPacketFingerprint(command: ExportAccountantPacketCommand) {
@@ -793,6 +922,10 @@ function normalizedTransactionIds(transactionIds: readonly string[] | undefined)
 
 function normalizePacketHistoryLimit(limit?: number) {
   return Math.min(Math.max(Number.isInteger(limit) ? (limit ?? 20) : 20, 1), 100);
+}
+
+function normalizeOptionalReason(reason: string | null | undefined) {
+  return reason?.trim() || null;
 }
 
 function normalizeExportSettings(command: ExportAccountantPacketCommand) {

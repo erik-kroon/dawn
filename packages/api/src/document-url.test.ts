@@ -70,6 +70,32 @@ describe("document URL signer", () => {
     ).rejects.toThrow("Invalid document URL token");
   });
 
+  test("creates and verifies signed accountant packet download tokens", async () => {
+    const signer = createDocumentUrlSigner({
+      baseUrl: "https://files.example.com",
+      secret: "test_secret",
+    });
+    const signed = await signer.createDownloadUrl({
+      teamId: "team_1",
+      documentId: "packet_1",
+      versionId: "packet_1",
+      objectKey: "teams/team_1/accountant-packets/packet_1.zip",
+      fileName: "accountant-packet.zip",
+      contentType: "application/zip",
+    });
+    const token = new URL(signed.url).pathname.split("/").pop() ?? "";
+
+    await expect(
+      verifyDocumentUrlToken({ secret: "test_secret", token, kind: "download" }),
+    ).resolves.toMatchObject({
+      kind: "download",
+      teamId: "team_1",
+      documentId: "packet_1",
+      versionId: "packet_1",
+      objectKey: "teams/team_1/accountant-packets/packet_1.zip",
+    });
+  });
+
   test("enforces scoped object keys and upload actor metadata", () => {
     expect(() =>
       assertDocumentUrlPayloadPolicy({

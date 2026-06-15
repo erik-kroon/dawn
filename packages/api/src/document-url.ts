@@ -88,12 +88,17 @@ export async function verifyDocumentUrlToken(input: {
 
 export function assertDocumentUrlPayloadPolicy(payload: SignedDocumentUrlPayload) {
   const expectedPrefix = `teams/${payload.teamId}/documents/${payload.documentId}/versions/${payload.versionId}/`;
+  const expectedPacketKey = `teams/${payload.teamId}/accountant-packets/${payload.documentId}.zip`;
+  const isAccountantPacketDownload =
+    payload.kind === "download" &&
+    payload.versionId === payload.documentId &&
+    payload.objectKey === expectedPacketKey;
 
   if (
     !payload.teamId ||
     !payload.documentId ||
     !payload.versionId ||
-    !payload.objectKey.startsWith(expectedPrefix)
+    (!payload.objectKey.startsWith(expectedPrefix) && !isAccountantPacketDownload)
   ) {
     throw new Error("Document URL object key is out of scope");
   }

@@ -35,6 +35,7 @@ import {
   resolveSessionAppRequest,
   resolveTeamAccess,
   resolvePublicApiKey,
+  assertAccountantPacketDownloadAvailable,
   type CreateLedgerTransactionCommand,
   type DocumentExtractionFields,
   type ResolvedAppRequest,
@@ -250,6 +251,22 @@ app.get("/documents/download/:token", async (c) => {
     });
   } catch (error) {
     return c.json({ error: errorMessage(error) }, 401);
+  }
+
+  if (isAccountantPacketDownloadPayload(payload)) {
+    try {
+      await assertAccountantPacketDownloadAvailable(new DrizzleDawnRepository(), {
+        teamId: payload.teamId,
+        packetId: payload.documentId,
+        objectKey: payload.objectKey,
+      });
+    } catch (error) {
+      if (error instanceof AppError) {
+        return c.json({ error: error.message }, appErrorStatus(error));
+      }
+
+      throw error;
+    }
   }
 
   const object = await createR2DocumentObjectStorage(c.env.DAWN_DOCUMENTS).get(payload.objectKey);
@@ -1351,6 +1368,10 @@ function errorMessage(error: unknown) {
 
 function safeHeaderFileName(fileName: string) {
   return fileName.replace(/["\r\n]/g, "_");
+}
+
+function isAccountantPacketDownloadPayload(input: { kind: string; objectKey: string }) {
+  return input.kind === "download" && /\/accountant-packets\/[^/]+\.zip$/.test(input.objectKey);
 }
 
 class PublicApiHttpError extends Error {
