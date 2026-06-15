@@ -138,6 +138,8 @@ const exportAccountantPacketInput = z.object({
   from: z.iso.datetime(),
   to: z.iso.datetime(),
   transactionIds: z.array(z.string().min(1)).optional(),
+  formats: z.array(z.enum(["csv", "xlsx"])).optional(),
+  csvDelimiter: z.enum([",", ";", "\t"]).optional(),
   idempotencyKey: z.string().min(1),
 });
 

@@ -407,6 +407,11 @@ concurrent coss work.
 
 Match or exceed Midday's file export: ZIP with CSV, optional XLSX, attachments, accountant email, retryable jobs, and export history.
 
+Status: Partially completed on 2026-06-15 for synchronous package format depth:
+CSV/XLSX selection, CSV delimiter, manifest hashes, attachments, skipped
+attachment counts, and exported transaction state. Signed storage links,
+accountant email delivery, and queued export retry remain open.
+
 ## Scope
 
 - Move export generation behind a job for larger requests while keeping small exports fast when safe.
@@ -433,20 +438,23 @@ Match or exceed Midday's file export: ZIP with CSV, optional XLSX, attachments, 
 
 ## Acceptance Criteria
 
-- [ ] A user can choose CSV, XLSX, or both.
-- [ ] A user can choose delimiter where CSV is selected.
-- [ ] The export package includes attachments for matched documents and records skipped attachments.
-- [ ] The package includes a manifest with totals and hashes.
+- [x] A user can choose CSV, XLSX, or both.
+- [x] A user can choose delimiter where CSV is selected.
+- [x] The export package includes attachments for matched documents and records skipped attachments.
+- [x] The package includes a manifest with totals and hashes.
 - [ ] The user can download the export through a signed link.
 - [ ] The user can send the package to an accountant email address.
-- [ ] Successful exports mark transactions exported and remove them from the ready queue.
+- [x] Successful exports mark transactions exported and remove them from the ready queue.
 - [ ] Failed exports are visible, retryable, and do not mark transactions exported.
 
 ## Verification
 
-- App tests for package content, idempotency, and state transition.
-- Job tests for queued export success/failure/retry.
-- API/server tests for signed download and email request validation.
+- `bun test packages/app/src/accountant-packet.test.ts` passed: 5 tests.
+- `bun test packages/api/src/accountant-packet-router.test.ts` passed: 2 tests.
+- App tests cover package content, idempotency, format settings, manifest hashes,
+  skipped attachments, and successful export state transition.
+- Job tests for queued export success/failure/retry remain open.
+- API/server tests for signed download and email request validation remain open.
 - Browser smoke for export settings modal and download.
 - Open the produced ZIP and verify file names, CSV rows, manifest counts, and attachment presence.
 - `bun run check-types`

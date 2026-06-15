@@ -73,6 +73,8 @@ describe("transactionReview.exportPacket router", () => {
         from: "2026-06-01T00:00:00.000Z",
         to: "2026-06-30T23:59:59.999Z",
         transactionIds: ["txn_1"],
+        formats: ["csv", "xlsx"],
+        csvDelimiter: ";",
         idempotencyKey: "packet_1",
       },
       {
@@ -84,7 +86,9 @@ describe("transactionReview.exportPacket router", () => {
     expect(result.contentType).toBe("application/zip");
     expect(result.fileName).toMatch(/^accountant-packet-team_1-/);
     expect(result.manifest.transactionCount).toBe(1);
+    expect(result.manifest.settings).toEqual({ formats: ["csv", "xlsx"], csvDelimiter: ";" });
     expect(zipText).toContain("transactions.csv");
+    expect(zipText).toContain("transactions.xlsx");
     expect(zipText).toContain("manifest.json");
   });
 

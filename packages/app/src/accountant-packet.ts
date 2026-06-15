@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   LedgerAccount,
   Money,
@@ -37,11 +39,16 @@ export type AccountantPacketTransactionRow = {
   attachments: AccountantPacketAttachment[];
 };
 
+export type AccountantPacketFormat = "csv" | "xlsx";
+export type AccountantPacketCsvDelimiter = "," | ";" | "\t";
+
 export type ExportAccountantPacketCommand = {
   teamId: string;
   from: string;
   to: string;
   transactionIds?: readonly string[];
+  formats?: readonly AccountantPacketFormat[];
+  csvDelimiter?: AccountantPacketCsvDelimiter;
   idempotencyKey: string;
 };
 
@@ -53,9 +60,10 @@ export type AccountantPacketAttachmentResolver = {
 
 export type AccountantPacketManifestFile = {
   path: string;
-  kind: "transactions_csv" | "manifest_json" | "attachment";
+  kind: "transactions_csv" | "transactions_xlsx" | "manifest_json" | "attachment";
   contentType: string;
   byteSize: number;
+  sha256: string;
   sourceDocumentId?: string;
   sourceVersionId?: string;
   transactionId?: string;
@@ -70,6 +78,10 @@ export type AccountantPacketManifest = {
     from: string;
     to: string;
     transactionIds: string[];
+  };
+  settings: {
+    formats: AccountantPacketFormat[];
+    csvDelimiter: AccountantPacketCsvDelimiter;
   };
   transactionCount: number;
   attachmentCount: number;
@@ -172,6 +184,7 @@ export async function exportAccountantPacket(
       from: command.from,
       to: command.to,
       transactionIds: exportableRows.map((row) => row.transaction.id).sort(),
+      settings: normalizeExportSettings(command),
       rows: exportableRows,
       attachmentResolver,
     });
@@ -238,6 +251,7 @@ export function exportAccountantPacketFingerprint(command: ExportAccountantPacke
     from: normalizeDate(command.from, "from").toISOString(),
     to: normalizeDate(command.to, "to").toISOString(),
     transactionIds: normalizedTransactionIds(command.transactionIds),
+    settings: normalizeExportSettings(command),
   });
 }
 
@@ -247,6 +261,7 @@ async function buildAccountantPacket(input: {
   from: string;
   to: string;
   transactionIds: string[];
+  settings: AccountantPacketManifest["settings"];
   rows: AccountantPacketTransactionRow[];
   attachmentResolver?: AccountantPacketAttachmentResolver;
 }) {
@@ -259,15 +274,27 @@ async function buildAccountantPacket(input: {
     to: input.to,
     transactionIds: input.transactionIds,
   });
-  const csv = renderTransactionsCsv(input.rows);
-  const files: PacketFile[] = [
-    {
+  const transactionFiles: PacketFile[] = [];
+  const attachmentFiles: PacketFile[] = [];
+
+  if (input.settings.formats.includes("csv")) {
+    transactionFiles.push({
       path: "transactions.csv",
       contentType: "text/csv; charset=utf-8",
-      bytes: textBytes(csv),
+      bytes: textBytes(renderTransactionsCsv(input.rows, input.settings.csvDelimiter)),
       kind: "transactions_csv",
-    },
-  ];
+    });
+  }
+
+  if (input.settings.formats.includes("xlsx")) {
+    transactionFiles.push({
+      path: "transactions.xlsx",
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      bytes: renderTransactionsXlsx(input.rows),
+      kind: "transactions_xlsx",
+    });
+  }
+
   let skippedAttachmentCount = 0;
 
   for (const row of input.rows) {
@@ -281,7 +308,7 @@ async function buildAccountantPacket(input: {
         continue;
       }
 
-      files.push({
+      attachmentFiles.push({
         path: attachmentPath(row.transaction, attachment),
         contentType: resolved.contentType ?? attachment.contentType,
         bytes: bytesFromBody(resolved.body),
@@ -303,20 +330,24 @@ async function buildAccountantPacket(input: {
       to: normalizeDate(input.to, "to").toISOString(),
       transactionIds: input.transactionIds,
     },
+    settings: input.settings,
     transactionCount: input.rows.length,
-    attachmentCount: files.filter((file) => file.kind === "attachment").length,
+    attachmentCount: attachmentFiles.length,
     skippedAttachmentCount,
     currencyTotals: currencyTotals(input.rows.map((row) => row.transaction.money)),
     files: [],
   };
+  const filesBeforeManifest = [...transactionFiles, ...attachmentFiles];
 
   const manifestFile = {
     path: "manifest.json",
     contentType: "application/json; charset=utf-8",
-    bytes: textBytes(JSON.stringify({ ...manifest, files: manifestFiles(files) }, null, 2)),
+    bytes: textBytes(
+      JSON.stringify({ ...manifest, files: manifestFiles(filesBeforeManifest) }, null, 2),
+    ),
     kind: "manifest_json" as const,
   };
-  const finalFiles = [files[0], manifestFile, ...files.slice(1)].filter(
+  const finalFiles = [...transactionFiles, manifestFile, ...attachmentFiles].filter(
     (file): file is PacketFile => Boolean(file),
   );
   manifest.files = manifestFiles(finalFiles);
@@ -349,13 +380,55 @@ function assertExportCommand(command: ExportAccountantPacketCommand) {
   if (!command.idempotencyKey.trim()) {
     throw new AppError("CONFLICT", "Export idempotency key is required");
   }
+
+  normalizeExportSettings(command);
 }
 
 function normalizedTransactionIds(transactionIds: readonly string[] | undefined) {
   return [...new Set((transactionIds ?? []).map((id) => id.trim()).filter(Boolean))].sort();
 }
 
-function renderTransactionsCsv(rows: AccountantPacketTransactionRow[]) {
+function normalizeExportSettings(command: ExportAccountantPacketCommand) {
+  const formats = normalizedFormats(command.formats);
+  const csvDelimiter = normalizeCsvDelimiter(command.csvDelimiter);
+
+  return {
+    formats,
+    csvDelimiter,
+  };
+}
+
+function normalizedFormats(formats: readonly AccountantPacketFormat[] | undefined) {
+  const normalized: AccountantPacketFormat[] = [
+    ...new Set<AccountantPacketFormat>(formats ?? ["csv"]),
+  ];
+
+  if (normalized.length === 0) {
+    throw new AppError("CONFLICT", "At least one export format is required");
+  }
+
+  for (const format of normalized) {
+    if (format !== "csv" && format !== "xlsx") {
+      throw new AppError("CONFLICT", "Export format must be csv or xlsx");
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeCsvDelimiter(delimiter: AccountantPacketCsvDelimiter | undefined) {
+  if (!delimiter) {
+    return ",";
+  }
+
+  if (delimiter !== "," && delimiter !== ";" && delimiter !== "\t") {
+    throw new AppError("CONFLICT", "CSV delimiter must be comma, semicolon, or tab");
+  }
+
+  return delimiter;
+}
+
+function transactionExportTable(rows: AccountantPacketTransactionRow[]) {
   return [
     [
       "date",
@@ -385,14 +458,104 @@ function renderTransactionsCsv(rows: AccountantPacketTransactionRow[]) {
       row.attachments.length > 0 ? "matched" : "missing",
       row.attachments.map((attachment) => attachment.fileName).join("; "),
     ]),
-  ]
-    .map((row) => row.map(csvCell).join(","))
+  ];
+}
+
+function renderTransactionsCsv(
+  rows: AccountantPacketTransactionRow[],
+  delimiter: AccountantPacketCsvDelimiter,
+) {
+  return transactionExportTable(rows)
+    .map((row) => row.map((value) => csvCell(value, delimiter)).join(delimiter))
     .join("\n")
     .concat("\n");
 }
 
-function csvCell(value: string) {
-  return /[",\n\r]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+function csvCell(value: string, delimiter: AccountantPacketCsvDelimiter) {
+  return value.includes(delimiter) || /["\n\r]/.test(value)
+    ? `"${value.replaceAll('"', '""')}"`
+    : value;
+}
+
+function renderTransactionsXlsx(rows: AccountantPacketTransactionRow[]) {
+  const table = transactionExportTable(rows);
+  const sheetRows = table
+    .map(
+      (row, rowIndex) =>
+        `<row r="${rowIndex + 1}">${row
+          .map(
+            (value, columnIndex) =>
+              `<c r="${xlsxCellRef(rowIndex, columnIndex)}" t="inlineStr"><is><t>${xmlText(
+                value,
+              )}</t></is></c>`,
+          )
+          .join("")}</row>`,
+    )
+    .join("");
+
+  return createStoredZip([
+    {
+      path: "[Content_Types].xml",
+      contentType: "application/xml",
+      bytes: textBytes(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+      ),
+      kind: "transactions_xlsx",
+    },
+    {
+      path: "_rels/.rels",
+      contentType: "application/vnd.openxmlformats-package.relationships+xml",
+      bytes: textBytes(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+      ),
+      kind: "transactions_xlsx",
+    },
+    {
+      path: "xl/workbook.xml",
+      contentType: "application/xml",
+      bytes: textBytes(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Transactions" sheetId="1" r:id="rId1"/></sheets></workbook>',
+      ),
+      kind: "transactions_xlsx",
+    },
+    {
+      path: "xl/_rels/workbook.xml.rels",
+      contentType: "application/vnd.openxmlformats-package.relationships+xml",
+      bytes: textBytes(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+      ),
+      kind: "transactions_xlsx",
+    },
+    {
+      path: "xl/worksheets/sheet1.xml",
+      contentType: "application/xml",
+      bytes: textBytes(
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${sheetRows}</sheetData></worksheet>`,
+      ),
+      kind: "transactions_xlsx",
+    },
+  ]);
+}
+
+function xlsxCellRef(rowIndex: number, columnIndex: number) {
+  let column = "";
+  let next = columnIndex + 1;
+
+  while (next > 0) {
+    const remainder = (next - 1) % 26;
+    column = String.fromCharCode(65 + remainder) + column;
+    next = Math.floor((next - remainder) / 26);
+  }
+
+  return `${column}${rowIndex + 1}`;
+}
+
+function xmlText(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function moneyDecimal(money: Money) {
@@ -423,6 +586,7 @@ function manifestFiles(files: PacketFile[]): AccountantPacketManifestFile[] {
     kind: file.kind,
     contentType: file.contentType,
     byteSize: file.bytes.byteLength,
+    sha256: sha256Hex(file.bytes),
     sourceDocumentId: file.sourceDocumentId,
     sourceVersionId: file.sourceVersionId,
     transactionId: file.transactionId,
@@ -492,6 +656,10 @@ function textBytes(value: string) {
 
 function bytesFromBody(body: ArrayBuffer | Uint8Array) {
   return body instanceof Uint8Array ? body : new Uint8Array(body);
+}
+
+function sha256Hex(bytes: Uint8Array) {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function createStoredZip(files: PacketFile[]) {
