@@ -1,4 +1,5 @@
 import type {
+  Actor,
   Category,
   Counterparty,
   LedgerAccount,
@@ -172,6 +173,11 @@ export type CommitCsvTransactionImportCommand = PreviewCsvTransactionImportComma
   idempotencyKey: string;
 };
 
+export type CommitCsvTransactionImportOptions = {
+  payloadStorage?: TransactionImportPayloadStorage;
+  synchronousRowLimit?: number;
+};
+
 export type CsvTransactionImportPreviewRow = {
   rowNumber: number;
   values: Record<string, string>;
@@ -199,11 +205,45 @@ export type TransactionImportSession = {
   accountId: string;
   source: "csv";
   fileName: string | null;
-  status: "committed";
+  status: "queued" | "committed" | "failed";
   rowCount: number;
   importedCount: number;
   duplicateCount: number;
   invalidCount: number;
+};
+
+export type StoredTransactionImportPayload = {
+  body: string;
+  contentType: string;
+  byteSize: number;
+};
+
+export type TransactionImportPayloadStorage = {
+  put(input: { objectKey: string; body: string; contentType: string }): Promise<void>;
+  get(objectKey: string): Promise<StoredTransactionImportPayload | null>;
+  delete(objectKey: string): Promise<void>;
+};
+
+export type QueuedCsvTransactionImportPayload = {
+  schemaVersion: 1;
+  teamId: string;
+  accountId: string;
+  actor: Actor;
+  fileName: string | null;
+  csvText: string;
+  mapping: CsvTransactionImportMapping;
+};
+
+export type QueuedCsvTransactionImportJob = {
+  payloadObjectKey: string;
+};
+
+export type RunQueuedCsvTransactionImportCommand = {
+  teamId: string;
+  importSessionId: string;
+  payloadObjectKey: string;
+  sourceOutboxEventId: string;
+  idempotencyKey: string;
 };
 
 export type BankConnectionStatus = "connected" | "disconnected" | "error";
@@ -372,10 +412,12 @@ export type DisconnectBankConnectionResult = {
 };
 
 export type CommitCsvTransactionImportResult = {
+  mode: "committed" | "queued";
   importSession: TransactionImportSession;
   transactions: Transaction[];
   preview: CsvTransactionImportPreview;
   replayed: boolean;
+  queuedJob?: QueuedCsvTransactionImportJob;
 };
 
 export type BankingRepository = {
@@ -463,12 +505,15 @@ const createLedgerCounterpartyOperation = "ledger.counterparty.create";
 const createTransactionTagOperation = "ledger.transaction_tag.create";
 const createLedgerTransferPairOperation = "ledger.transfer_pair.create";
 const commitCsvTransactionImportOperation = "csv_transaction_import.commit";
+const runQueuedCsvTransactionImportOperation = "csv_transaction_import.queued_commit";
 const connectMockBankConnectionOperation = "banking.connection.mock.connect";
 const createBankConnectionSessionOperation = "banking.connection.session.create";
 const completeBankConnectionOperation = "banking.connection.complete";
 const syncBankConnectionOperation = "banking.connection.sync";
 const requestBankConnectionSyncFromWebhookOperation = "banking.connection.webhook.sync.request";
 const disconnectBankConnectionOperation = "banking.connection.disconnect";
+export const csvTransactionImportSynchronousRowLimit = 500;
+export const csvTransactionImportPayloadContentType = "application/json; charset=utf-8";
 
 export async function listTransactionReviewWorkspace(
   repository: TransactionReviewRepository,
@@ -2197,6 +2242,7 @@ export async function commitCsvTransactionImport(
   repository: TransactionReviewRepository,
   context: TransactionReviewContext,
   command: CommitCsvTransactionImportCommand,
+  options: CommitCsvTransactionImportOptions = {},
 ): Promise<CommitCsvTransactionImportResult> {
   return repository.withTransaction(async (transactionRepository) => {
     assertCommandTeamMatchesContext(context, command.teamId, "CSV import not found");
@@ -2227,25 +2273,7 @@ export async function commitCsvTransactionImport(
       return { ...(replayed.result as CommitCsvTransactionImportResult), replayed: true };
     }
 
-    const account = await transactionRepository.getLedgerAccountForTeam(
-      command.teamId,
-      command.accountId,
-    );
-
-    if (!account) {
-      throw new AppError("NOT_FOUND", "Ledger account not found");
-    }
-
-    if (command.mapping.categoryId) {
-      const category = await transactionRepository.getCategoryForTeam(
-        command.teamId,
-        command.mapping.categoryId,
-      );
-
-      if (!category) {
-        throw new AppError("NOT_FOUND", "Category not found");
-      }
-    }
+    const account = await validateCsvTransactionImportReferences(transactionRepository, command);
 
     const preview = await buildCsvImportPreview(transactionRepository, command, account);
     const readyRows = preview.rows.filter((row) => row.status === "ready" && row.draft);
@@ -2254,62 +2282,42 @@ export async function commitCsvTransactionImport(
       throw new AppError("CONFLICT", "CSV import has no rows ready to commit");
     }
 
-    const transactions: Transaction[] = [];
+    const synchronousRowLimit =
+      options.synchronousRowLimit ?? csvTransactionImportSynchronousRowLimit;
 
-    for (const row of readyRows) {
-      if (!row.draft || !row.duplicateKey) {
-        continue;
+    if (preview.totalRows > synchronousRowLimit) {
+      if (!options.payloadStorage) {
+        throw new AppError(
+          "CONFLICT",
+          "Large CSV imports require configured transaction import payload storage",
+        );
       }
 
-      transactions.push(
-        await transactionRepository.createLedgerTransactionForTeam({
-          draft: row.draft,
-          duplicateKey: row.duplicateKey,
-        }),
+      const result = await queueCsvTransactionImport(
+        transactionRepository,
+        context,
+        command,
+        preview,
+        options.payloadStorage,
       );
+
+      await transactionRepository.saveIdempotencyResult({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        operation: commitCsvTransactionImportOperation,
+        key: command.idempotencyKey,
+        fingerprint,
+        result,
+      });
+
+      return result;
     }
 
-    const importSession = await transactionRepository.createTransactionImportSession({
-      teamId: command.teamId,
-      accountId: command.accountId,
+    const result = await commitCsvTransactionImportPreviewRows(transactionRepository, context, {
+      command,
+      preview,
       actorId: context.actor.id,
-      fileName: command.fileName ?? null,
-      mapping: command.mapping,
-      rowCount: preview.totalRows,
-      importedCount: transactions.length,
-      duplicateCount: preview.duplicateCount,
-      invalidCount: preview.invalidCount,
     });
-
-    await transactionRepository.appendAuditEvent({
-      teamId: command.teamId,
-      actorId: context.actor.id,
-      requestId: context.requestId,
-      action: "transaction_import.committed",
-      entityType: "transaction_import",
-      entityId: importSession.id,
-      metadata: {
-        accountId: command.accountId,
-        importedCount: transactions.length,
-        duplicateCount: preview.duplicateCount,
-        invalidCount: preview.invalidCount,
-      },
-    });
-
-    await transactionRepository.appendOutboxEvent({
-      teamId: command.teamId,
-      actorId: context.actor.id,
-      requestId: context.requestId,
-      type: "transaction_import.committed",
-      version: 1,
-      payload: {
-        importSessionId: importSession.id,
-        transactionIds: transactions.map((transaction) => transaction.id),
-        accountId: command.accountId,
-      },
-    });
-
-    const result = { importSession, transactions, preview, replayed: false };
 
     await transactionRepository.saveIdempotencyResult({
       teamId: command.teamId,
@@ -2324,6 +2332,91 @@ export async function commitCsvTransactionImport(
   });
 }
 
+export async function runQueuedCsvTransactionImport(
+  repository: TransactionReviewRepository,
+  payloadStorage: TransactionImportPayloadStorage,
+  context: TransactionReviewContext,
+  command: RunQueuedCsvTransactionImportCommand,
+): Promise<CommitCsvTransactionImportResult> {
+  assertCommandTeamMatchesContext(context, command.teamId, "CSV import not found");
+
+  const fingerprint = queuedCsvTransactionImportFingerprint(command);
+  const replayed = await repository.getIdempotencyResult(
+    command.teamId,
+    context.actor.id,
+    runQueuedCsvTransactionImportOperation,
+    command.idempotencyKey,
+  );
+
+  if (replayed) {
+    if (replayed.fingerprint !== fingerprint) {
+      throw new AppError(
+        "CONFLICT",
+        "Idempotency key was already used for a different queued CSV import",
+      );
+    }
+
+    await payloadStorage.delete(command.payloadObjectKey);
+    return { ...(replayed.result as CommitCsvTransactionImportResult), replayed: true };
+  }
+
+  const storedPayload = await payloadStorage.get(command.payloadObjectKey);
+
+  if (!storedPayload) {
+    await markQueuedCsvTransactionImportFailed(repository, command);
+    throw new AppError("NOT_FOUND", "Queued CSV import payload not found");
+  }
+
+  const payload = parseQueuedCsvTransactionImportPayload(storedPayload.body);
+
+  if (
+    payload.teamId !== command.teamId ||
+    payloadObjectKeyForCsvTransactionImport(payload.teamId, command.importSessionId) !==
+      command.payloadObjectKey
+  ) {
+    await markQueuedCsvTransactionImportFailed(repository, command);
+    throw new AppError("CONFLICT", "Queued CSV import payload does not match this job");
+  }
+
+  const result = await repository.withTransaction(async (transactionRepository) => {
+    const account = await validateCsvTransactionImportReferences(transactionRepository, payload);
+    const preview = await buildCsvImportPreview(transactionRepository, payload, account);
+    const queuedResult = await commitCsvTransactionImportPreviewRows(
+      transactionRepository,
+      context,
+      {
+        command: {
+          teamId: payload.teamId,
+          accountId: payload.accountId,
+          csvText: payload.csvText,
+          fileName: payload.fileName,
+          mapping: payload.mapping,
+          idempotencyKey: command.idempotencyKey,
+        },
+        preview,
+        actorId: payload.actor.id,
+        existingImportSessionId: command.importSessionId,
+        allowEmptyCommit: true,
+      },
+    );
+
+    await transactionRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: runQueuedCsvTransactionImportOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result: queuedResult,
+    });
+
+    return queuedResult;
+  });
+
+  await payloadStorage.delete(command.payloadObjectKey);
+
+  return result;
+}
+
 export function csvTransactionImportFingerprint(command: CommitCsvTransactionImportCommand) {
   return JSON.stringify({
     teamId: command.teamId,
@@ -2332,6 +2425,304 @@ export function csvTransactionImportFingerprint(command: CommitCsvTransactionImp
     mapping: command.mapping,
     fileName: command.fileName ?? null,
   });
+}
+
+export function queuedCsvTransactionImportFingerprint(
+  command: RunQueuedCsvTransactionImportCommand,
+) {
+  return JSON.stringify({
+    teamId: command.teamId,
+    importSessionId: command.importSessionId,
+    payloadObjectKey: command.payloadObjectKey,
+    sourceOutboxEventId: command.sourceOutboxEventId,
+  });
+}
+
+async function validateCsvTransactionImportReferences(
+  repository: TransactionReviewRepository,
+  command: PreviewCsvTransactionImportCommand,
+) {
+  const account = await repository.getLedgerAccountForTeam(command.teamId, command.accountId);
+
+  if (!account) {
+    throw new AppError("NOT_FOUND", "Ledger account not found");
+  }
+
+  if (command.mapping.categoryId) {
+    const category = await repository.getCategoryForTeam(
+      command.teamId,
+      command.mapping.categoryId,
+    );
+
+    if (!category) {
+      throw new AppError("NOT_FOUND", "Category not found");
+    }
+  }
+
+  return account;
+}
+
+async function queueCsvTransactionImport(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+  command: CommitCsvTransactionImportCommand,
+  preview: CsvTransactionImportPreview,
+  payloadStorage: TransactionImportPayloadStorage,
+): Promise<CommitCsvTransactionImportResult> {
+  const importSession = await repository.createTransactionImportSession({
+    teamId: command.teamId,
+    accountId: command.accountId,
+    actorId: context.actor.id,
+    fileName: command.fileName ?? null,
+    mapping: command.mapping,
+    status: "queued",
+    rowCount: preview.totalRows,
+    importedCount: 0,
+    duplicateCount: preview.duplicateCount,
+    invalidCount: preview.invalidCount,
+  });
+  const payloadObjectKey = payloadObjectKeyForCsvTransactionImport(
+    command.teamId,
+    importSession.id,
+  );
+  const payload: QueuedCsvTransactionImportPayload = {
+    schemaVersion: 1,
+    teamId: command.teamId,
+    accountId: command.accountId,
+    actor: context.actor,
+    fileName: command.fileName ?? null,
+    csvText: command.csvText,
+    mapping: command.mapping,
+  };
+
+  await payloadStorage.put({
+    objectKey: payloadObjectKey,
+    body: JSON.stringify(payload),
+    contentType: csvTransactionImportPayloadContentType,
+  });
+
+  await repository.appendAuditEvent({
+    teamId: command.teamId,
+    actorId: context.actor.id,
+    requestId: context.requestId,
+    action: "transaction_import.queued",
+    entityType: "transaction_import",
+    entityId: importSession.id,
+    metadata: {
+      accountId: command.accountId,
+      rowCount: preview.totalRows,
+      readyCount: preview.readyCount,
+      duplicateCount: preview.duplicateCount,
+      invalidCount: preview.invalidCount,
+      payloadObjectKey,
+    },
+  });
+
+  await repository.appendOutboxEvent({
+    teamId: command.teamId,
+    actorId: context.actor.id,
+    requestId: context.requestId,
+    type: "transaction_import.queued",
+    version: 1,
+    payload: {
+      importSessionId: importSession.id,
+      payloadObjectKey,
+      actorId: context.actor.id,
+      accountId: command.accountId,
+      fileName: command.fileName ?? null,
+      rowCount: preview.totalRows,
+      readyCount: preview.readyCount,
+      duplicateCount: preview.duplicateCount,
+      invalidCount: preview.invalidCount,
+    },
+  });
+
+  return {
+    mode: "queued",
+    importSession,
+    transactions: [],
+    preview,
+    replayed: false,
+    queuedJob: { payloadObjectKey },
+  };
+}
+
+async function commitCsvTransactionImportPreviewRows(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+  input: {
+    command: CommitCsvTransactionImportCommand;
+    preview: CsvTransactionImportPreview;
+    actorId: string;
+    existingImportSessionId?: string;
+    allowEmptyCommit?: boolean;
+  },
+): Promise<CommitCsvTransactionImportResult> {
+  const readyRows = input.preview.rows.filter((row) => row.status === "ready" && row.draft);
+
+  if (readyRows.length === 0 && !input.allowEmptyCommit) {
+    throw new AppError("CONFLICT", "CSV import has no rows ready to commit");
+  }
+
+  const transactions: Transaction[] = [];
+
+  for (const row of readyRows) {
+    if (!row.draft || !row.duplicateKey) {
+      continue;
+    }
+
+    transactions.push(
+      await repository.createLedgerTransactionForTeam({
+        draft: row.draft,
+        duplicateKey: row.duplicateKey,
+      }),
+    );
+  }
+
+  const importSession = input.existingImportSessionId
+    ? await completeQueuedCsvTransactionImportSession(repository, {
+        teamId: input.command.teamId,
+        importSessionId: input.existingImportSessionId,
+        importedCount: transactions.length,
+        duplicateCount: input.preview.duplicateCount,
+        invalidCount: input.preview.invalidCount,
+      })
+    : await repository.createTransactionImportSession({
+        teamId: input.command.teamId,
+        accountId: input.command.accountId,
+        actorId: input.actorId,
+        fileName: input.command.fileName ?? null,
+        mapping: input.command.mapping,
+        status: "committed",
+        rowCount: input.preview.totalRows,
+        importedCount: transactions.length,
+        duplicateCount: input.preview.duplicateCount,
+        invalidCount: input.preview.invalidCount,
+      });
+
+  await repository.appendAuditEvent({
+    teamId: input.command.teamId,
+    actorId: input.actorId,
+    requestId: context.requestId,
+    action: "transaction_import.committed",
+    entityType: "transaction_import",
+    entityId: importSession.id,
+    metadata: {
+      accountId: input.command.accountId,
+      importedCount: transactions.length,
+      duplicateCount: input.preview.duplicateCount,
+      invalidCount: input.preview.invalidCount,
+    },
+  });
+
+  await repository.appendOutboxEvent({
+    teamId: input.command.teamId,
+    actorId: input.actorId,
+    requestId: context.requestId,
+    type: "transaction_import.committed",
+    version: 1,
+    payload: {
+      importSessionId: importSession.id,
+      transactionIds: transactions.map((transaction) => transaction.id),
+      accountId: input.command.accountId,
+    },
+  });
+
+  return {
+    mode: "committed",
+    importSession,
+    transactions,
+    preview: input.preview,
+    replayed: false,
+  };
+}
+
+async function markQueuedCsvTransactionImportFailed(
+  repository: TransactionReviewRepository,
+  command: RunQueuedCsvTransactionImportCommand,
+) {
+  await repository.withTransaction(async (transactionRepository) => {
+    if (!transactionRepository.failTransactionImportSession) {
+      throw new AppError("CONFLICT", "Transaction import repository cannot mark queued failures");
+    }
+
+    await transactionRepository.failTransactionImportSession({
+      teamId: command.teamId,
+      importSessionId: command.importSessionId,
+    });
+  });
+}
+
+async function completeQueuedCsvTransactionImportSession(
+  repository: TransactionReviewRepository,
+  input: {
+    teamId: string;
+    importSessionId: string;
+    importedCount: number;
+    duplicateCount: number;
+    invalidCount: number;
+  },
+) {
+  if (!repository.completeTransactionImportSession) {
+    throw new AppError("CONFLICT", "Transaction import repository cannot complete queued imports");
+  }
+
+  return repository.completeTransactionImportSession(input);
+}
+
+function parseQueuedCsvTransactionImportPayload(body: string): QueuedCsvTransactionImportPayload {
+  let value: unknown;
+
+  try {
+    value = JSON.parse(body);
+  } catch {
+    throw new AppError("CONFLICT", "Queued CSV import payload is invalid");
+  }
+
+  if (!isQueuedCsvTransactionImportPayload(value)) {
+    throw new AppError("CONFLICT", "Queued CSV import payload is invalid");
+  }
+
+  return value;
+}
+
+function isQueuedCsvTransactionImportPayload(
+  value: unknown,
+): value is QueuedCsvTransactionImportPayload {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  const actor = record.actor;
+
+  if (!actor || typeof actor !== "object") {
+    return false;
+  }
+
+  const actorRecord = actor as Record<string, unknown>;
+
+  return (
+    record.schemaVersion === 1 &&
+    typeof record.teamId === "string" &&
+    typeof record.accountId === "string" &&
+    typeof record.csvText === "string" &&
+    (typeof record.fileName === "string" || record.fileName === null) &&
+    typeof actorRecord.id === "string" &&
+    (actorRecord.type === "user" || actorRecord.type === "system") &&
+    Boolean(record.mapping) &&
+    typeof record.mapping === "object"
+  );
+}
+
+export function payloadObjectKeyForCsvTransactionImport(teamId: string, importSessionId: string) {
+  return `teams/${objectKeySegment(teamId)}/transaction-imports/${objectKeySegment(
+    importSessionId,
+  )}.json`;
+}
+
+function objectKeySegment(value: string) {
+  return value.replaceAll(/[^a-zA-Z0-9._-]/g, "_");
 }
 
 async function buildCsvImportPreview(

@@ -289,6 +289,7 @@ export class MemoryAppRepository implements LedgerRepository {
     accountId: string;
     actorId: string;
     fileName?: string | null;
+    status?: TransactionImportSession["status"];
     rowCount: number;
     importedCount: number;
     duplicateCount: number;
@@ -300,13 +301,56 @@ export class MemoryAppRepository implements LedgerRepository {
       accountId: input.accountId,
       source: "csv" as const,
       fileName: input.fileName ?? null,
-      status: "committed" as const,
+      status: input.status ?? ("committed" as const),
       rowCount: input.rowCount,
       importedCount: input.importedCount,
       duplicateCount: input.duplicateCount,
       invalidCount: input.invalidCount,
     };
     this.importSessions.push(importSession);
+    return importSession;
+  }
+
+  async completeTransactionImportSession(input: {
+    teamId: string;
+    importSessionId: string;
+    importedCount: number;
+    duplicateCount: number;
+    invalidCount: number;
+  }) {
+    const index = this.importSessions.findIndex(
+      (session) => session.id === input.importSessionId && session.teamId === input.teamId,
+    );
+
+    if (index === -1) {
+      throw new Error("missing import session");
+    }
+
+    const importSession = {
+      ...this.importSessions[index]!,
+      status: "committed" as const,
+      importedCount: input.importedCount,
+      duplicateCount: input.duplicateCount,
+      invalidCount: input.invalidCount,
+    };
+    this.importSessions[index] = importSession;
+    return importSession;
+  }
+
+  async failTransactionImportSession(input: { teamId: string; importSessionId: string }) {
+    const index = this.importSessions.findIndex(
+      (session) => session.id === input.importSessionId && session.teamId === input.teamId,
+    );
+
+    if (index === -1) {
+      throw new Error("missing import session");
+    }
+
+    const importSession = {
+      ...this.importSessions[index]!,
+      status: "failed" as const,
+    };
+    this.importSessions[index] = importSession;
     return importSession;
   }
 

@@ -3717,6 +3717,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     actorId: string;
     fileName?: string | null;
     mapping: CsvTransactionImportMapping;
+    status?: TransactionImportSession["status"];
     rowCount: number;
     importedCount: number;
     duplicateCount: number;
@@ -3730,7 +3731,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         accountId: input.accountId,
         source: "csv",
         fileName: input.fileName ?? null,
-        status: "committed",
+        status: input.status ?? "committed",
         createdByActorId: input.actorId,
         mapping: input.mapping as Record<string, unknown>,
         rowCount: input.rowCount,
@@ -3742,6 +3743,58 @@ export class DrizzleDawnRepository implements DrizzleRepository {
 
     if (!importSession) {
       throw new Error("Transaction import session was not created");
+    }
+
+    return mapTransactionImportSession(importSession);
+  }
+
+  async completeTransactionImportSession(input: {
+    teamId: string;
+    importSessionId: string;
+    importedCount: number;
+    duplicateCount: number;
+    invalidCount: number;
+  }) {
+    const [importSession] = await this.client
+      .update(schema.transactionImportSession)
+      .set({
+        status: "committed",
+        importedCount: input.importedCount,
+        duplicateCount: input.duplicateCount,
+        invalidCount: input.invalidCount,
+        committedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.transactionImportSession.id, input.importSessionId),
+          eq(schema.transactionImportSession.teamId, input.teamId),
+        ),
+      )
+      .returning();
+
+    if (!importSession) {
+      throw new Error("Transaction import session was not found");
+    }
+
+    return mapTransactionImportSession(importSession);
+  }
+
+  async failTransactionImportSession(input: { teamId: string; importSessionId: string }) {
+    const [importSession] = await this.client
+      .update(schema.transactionImportSession)
+      .set({
+        status: "failed",
+      })
+      .where(
+        and(
+          eq(schema.transactionImportSession.id, input.importSessionId),
+          eq(schema.transactionImportSession.teamId, input.teamId),
+        ),
+      )
+      .returning();
+
+    if (!importSession) {
+      throw new Error("Transaction import session was not found");
     }
 
     return mapTransactionImportSession(importSession);
@@ -4907,7 +4960,7 @@ function mapTransactionImportSession(
     accountId: importSession.accountId,
     source: "csv",
     fileName: importSession.fileName,
-    status: "committed",
+    status: importSession.status as TransactionImportSession["status"],
     rowCount: importSession.rowCount,
     importedCount: importSession.importedCount,
     duplicateCount: importSession.duplicateCount,

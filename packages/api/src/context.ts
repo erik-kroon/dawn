@@ -1,5 +1,9 @@
 import { auth } from "@dawn/auth";
-import { resolveSessionAppRequest, type ResolvedAppRequest } from "@dawn/app";
+import {
+  resolveSessionAppRequest,
+  type ResolvedAppRequest,
+  type TransactionImportPayloadStorage,
+} from "@dawn/app";
 import type { Context as HonoContext } from "hono";
 
 export type CreateContextOptions = {
@@ -17,6 +21,7 @@ export async function createContext({ context }: CreateContextOptions) {
       context.res.headers.get("x-request-id") ??
       crypto.randomUUID(),
     session,
+    transactionImportPayloadStorage: undefined as TransactionImportPayloadStorage | undefined,
   };
 }
 

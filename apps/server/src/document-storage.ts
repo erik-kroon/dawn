@@ -7,6 +7,7 @@ export type StoredDocumentObject = {
 export type DocumentObjectStorage = {
   put(input: { objectKey: string; body: ArrayBuffer; contentType: string }): Promise<void>;
   get(objectKey: string): Promise<StoredDocumentObject | null>;
+  delete(objectKey: string): Promise<void>;
 };
 
 export function createR2DocumentObjectStorage(bucket: R2Bucket): DocumentObjectStorage {
@@ -31,6 +32,9 @@ export function createR2DocumentObjectStorage(bucket: R2Bucket): DocumentObjectS
         byteSize: object.size,
       };
     },
+    async delete(objectKey) {
+      await bucket.delete(objectKey);
+    },
   };
 }
 
@@ -50,6 +54,9 @@ export function createMemoryDocumentObjectStorage(): DocumentObjectStorage & {
     },
     async get(objectKey) {
       return objects.get(objectKey) ?? null;
+    },
+    async delete(objectKey) {
+      objects.delete(objectKey);
     },
   };
 }

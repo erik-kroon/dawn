@@ -234,6 +234,33 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps queued transaction imports to commit jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "transaction_import.queued",
+        payload: {
+          importSessionId: "import_1",
+          payloadObjectKey: "teams/team_1/transaction-imports/import_1.json",
+          actorId: "user_1",
+          accountId: "acct_1",
+          rowCount: 501,
+          readyCount: 500,
+          duplicateCount: 1,
+          invalidCount: 0,
+        },
+      }),
+    ).toContainEqual({
+      type: "transaction_import.commit",
+      teamId: "team_1",
+      importSessionId: "import_1",
+      payloadObjectKey: "teams/team_1/transaction-imports/import_1.json",
+      actorId: "user_1",
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "transaction-import:commit:outbox_1:import_1",
+    });
+  });
+
   test("maps accountant status changes to transaction invalidation input", () => {
     expect(
       outboxEventToQueueMessages({
@@ -584,6 +611,7 @@ describe("job contracts", () => {
       "document.extract": record("document.extract"),
       "inbox.match_suggestions": record("inbox.match_suggestions"),
       "inbox.provider.sync": record("inbox.provider.sync"),
+      "transaction_import.commit": record("transaction_import.commit"),
       "transaction.match_pending_inbox": record("transaction.match_pending_inbox"),
       "invoice.recurring.generate": record("invoice.recurring.generate"),
       "insights.weekly.generate": record("insights.weekly.generate"),

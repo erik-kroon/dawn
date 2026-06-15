@@ -31,6 +31,7 @@ import {
   InboxConnector,
 } from "@dawn/integrations";
 
+import { processQueuedCsvTransactionImportJob } from "./csv-transaction-import";
 import { processTeamDataExportJob } from "./data-export";
 import { processDocumentExtractionJob } from "./document-extraction";
 import { createR2DocumentObjectStorage } from "./document-storage";
@@ -130,6 +131,13 @@ export function createDawnWorkerJobHandlers(env: DawnCloudflareBindings): DawnQu
           enforceCallerPermission: false,
         },
       );
+    },
+    "transaction_import.commit": async (message) => {
+      await processQueuedCsvTransactionImportJob({
+        repository: new DrizzleDawnRepository(),
+        storage: createR2DocumentObjectStorage(env.DAWN_DOCUMENTS),
+        message,
+      });
     },
     "inbox.match_suggestions": async (message) => {
       await generateInboxMatchSuggestions(

@@ -59,6 +59,7 @@ import { Hono, type Context as HonoContext } from "hono";
 import { cors } from "hono/cors";
 
 import { resolveCorsOrigin } from "./cors";
+import { createTransactionImportPayloadStorage } from "./csv-transaction-import";
 import { createR2DocumentObjectStorage } from "./document-storage";
 import { logServerError, requestIdFromHeaders } from "./observability";
 import { createCloudflareOutboxQueuePublisher } from "./outbox-queue";
@@ -1303,6 +1304,9 @@ app.post("/api/webhooks/banking/sandbox", async (c) => {
 
 app.use("/*", async (c, next) => {
   const context = await createContext({ context: c });
+  context.transactionImportPayloadStorage = createTransactionImportPayloadStorage(
+    createR2DocumentObjectStorage(c.env.DAWN_DOCUMENTS),
+  );
 
   const rpcResult = await rpcHandler.handle(c.req.raw, {
     prefix: "/rpc",

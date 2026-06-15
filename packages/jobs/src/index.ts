@@ -62,6 +62,16 @@ export const transactionPendingInboxMatchJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const transactionImportCommitJobSchema = z.object({
+  type: z.literal("transaction_import.commit"),
+  teamId: z.string().min(1),
+  importSessionId: z.string().min(1),
+  payloadObjectKey: z.string().min(1),
+  actorId: z.string().min(1),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const inboxMatchSuggestionsJobSchema = z.object({
   type: z.literal("inbox.match_suggestions"),
   teamId: z.string().min(1),
@@ -143,6 +153,7 @@ export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   syncInvalidationJobSchema,
   documentExtractionJobSchema,
   transactionPendingInboxMatchJobSchema,
+  transactionImportCommitJobSchema,
   inboxMatchSuggestionsJobSchema,
   inboxProviderSyncJobSchema,
   recurringInvoiceGenerationJobSchema,
@@ -158,6 +169,7 @@ export type OutboxDispatchJob = z.infer<typeof outboxDispatchJobSchema>;
 export type SyncInvalidationJob = z.infer<typeof syncInvalidationJobSchema>;
 export type DocumentExtractionJob = z.infer<typeof documentExtractionJobSchema>;
 export type TransactionPendingInboxMatchJob = z.infer<typeof transactionPendingInboxMatchJobSchema>;
+export type TransactionImportCommitJob = z.infer<typeof transactionImportCommitJobSchema>;
 export type InboxMatchSuggestionsJob = z.infer<typeof inboxMatchSuggestionsJobSchema>;
 export type InboxProviderSyncJob = z.infer<typeof inboxProviderSyncJobSchema>;
 export type RecurringInvoiceGenerationJob = z.infer<typeof recurringInvoiceGenerationJobSchema>;
@@ -211,6 +223,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const syncJob = createSyncInvalidationJob(event);
   const extractionJob = createDocumentExtractionJob(event);
   const transactionMatchJobs = createTransactionPendingInboxMatchJobs(event);
+  const transactionImportCommitJob = createTransactionImportCommitJob(event);
   const inboxMatchJob = createInboxMatchSuggestionsJob(event);
   const inboxProviderSyncJob = createInboxProviderSyncJob(event);
   const recurringInvoiceJob = createRecurringInvoiceGenerationJob(event);
@@ -226,6 +239,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
     syncJob,
     extractionJob,
     ...transactionMatchJobs,
+    transactionImportCommitJob,
     inboxMatchJob,
     inboxProviderSyncJob,
     recurringInvoiceJob,
@@ -352,6 +366,32 @@ function createTransactionPendingInboxMatchJobs(
     sourceOutboxEventId: event.id,
     idempotencyKey: `inbox:match-pending:${event.id}:${transactionId}`,
   }));
+}
+
+function createTransactionImportCommitJob(
+  event: OutboxEventForJob,
+): TransactionImportCommitJob | null {
+  if (event.type !== "transaction_import.queued") {
+    return null;
+  }
+
+  if (
+    typeof event.payload.importSessionId !== "string" ||
+    typeof event.payload.payloadObjectKey !== "string" ||
+    typeof event.payload.actorId !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    type: "transaction_import.commit",
+    teamId: event.teamId,
+    importSessionId: event.payload.importSessionId,
+    payloadObjectKey: event.payload.payloadObjectKey,
+    actorId: event.payload.actorId,
+    sourceOutboxEventId: event.id,
+    idempotencyKey: `transaction-import:commit:${event.id}:${event.payload.importSessionId}`,
+  };
 }
 
 function createInboxMatchSuggestionsJob(event: OutboxEventForJob): InboxMatchSuggestionsJob | null {

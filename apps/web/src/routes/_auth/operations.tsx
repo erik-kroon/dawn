@@ -1479,7 +1479,9 @@ function OperationsRoute() {
             ) : null}
             {csvCommitMutation.data ? (
               <p className="text-sm text-muted-foreground">
-                Imported {csvCommitMutation.data.importSession.importedCount} transactions.
+                {csvCommitMutation.data.mode === "queued"
+                  ? `Queued ${csvCommitMutation.data.preview.readyCount} ready rows for background import. Track the job in Operational trace.`
+                  : `Imported ${csvCommitMutation.data.importSession.importedCount} transactions.`}
               </p>
             ) : null}
             <ErrorText error={csvPreviewMutation.error} />

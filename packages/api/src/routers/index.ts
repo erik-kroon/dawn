@@ -84,6 +84,7 @@ import {
   type DocumentExtractionFields,
   type DocumentUrlSigner,
   type InvoicePdfRenderer,
+  type TransactionImportPayloadStorage,
   updateEmailInboxSettings,
   updateDraftInvoice,
   updateTeamMemberRole,
@@ -120,6 +121,7 @@ export type AppRouterDependencies = {
   emailInboxConnectors: readonly InboxConnector[];
   documentUrlSigner: DocumentUrlSigner;
   accountantPacketAttachmentResolver?: AccountantPacketAttachmentResolver;
+  transactionImportPayloadStorage?: TransactionImportPayloadStorage;
   invoicePdfRenderer: InvoicePdfRenderer;
   invoiceEmailDeliveryProvider: InvoiceEmailDeliveryProvider;
 };
@@ -775,6 +777,7 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     invoicePdfRenderer,
     dawnRepository,
     accountantPacketAttachmentResolver,
+    transactionImportPayloadStorage,
   } = dependencies;
   const bankingProviderRegistry = createBankingProviderRegistry(bankingProviders);
 
@@ -1924,6 +1927,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                   currency: input.mapping.currency ?? null,
                   categoryId: input.mapping.categoryId ?? null,
                 },
+              },
+              {
+                payloadStorage:
+                  context.transactionImportPayloadStorage ?? transactionImportPayloadStorage,
               },
             );
           } catch (error) {

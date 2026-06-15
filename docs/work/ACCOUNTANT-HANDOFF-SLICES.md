@@ -48,7 +48,7 @@ Live Gmail OAuth and email delivery should not block completion of local product
 | ------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 1. Accountant Packet Tracer                             | Completed   | Local tracer exports reviewed transactions to a ZIP with `transactions.csv`, `manifest.json`, optional resolved attachments, idempotency, audit, outbox, API, and transactions-page download wiring. Browser smoke reached `/login`; authenticated click smoke still needs a local test account/session.     |
 | 2. Midday-Parity Transaction Lifecycle And Review Queue | Completed   | Added accountant lifecycle status, derived receipt/export readiness, DB persistence, audited/idempotent status transitions, sync invalidation, ready-only export semantics, and transactions-page queue filters/actions. Browser smoke still needs a local test account/session for authenticated UI clicks. |
-| 3. CSV Import Wizard Parity Plus                        | In progress | Local import wizard sub-slice adds header auto-detection, mapped column selectors, sign inversion, richer preview metadata, duplicate visibility, and synchronous commit. Remaining: real large-file background import job with stored payload/worker execution.                                              |
+| 3. CSV Import Wizard Parity Plus                        | Completed   | Added header auto-detection, mapped column selectors, sign inversion, richer preview metadata, duplicate visibility, synchronous commit, queued large-import sessions, R2-backed payload handoff, worker execution, payload cleanup, and operations-page queued feedback.                                    |
 | 4. Gmail Connector Production Readiness                 | Not started | Live proof depends on Google OAuth credentials.                                                                                                                                                                                                                                                              |
 | 5. Receipt Matching Parity Plus                         | Not started | Bidirectional matching and feedback memory.                                                                                                                                                                                                                                                                  |
 | 6. Accountant Export Package Depth                      | Not started | ZIP/XLSX/email/status/history depth.                                                                                                                                                                                                                                                                         |
@@ -224,7 +224,7 @@ Status: Completed on 2026-06-15.
 
 Bring Dawn's CSV import UX and reliability up to Midday parity, then improve it with Dawn's existing domain/app boundaries.
 
-Status: In progress. Local wizard sub-slice completed on 2026-06-15; large background import execution remains.
+Status: Completed on 2026-06-15.
 
 ## Scope
 
@@ -253,19 +253,22 @@ Status: In progress. Local wizard sub-slice completed on 2026-06-15; large backg
 - [x] Common bank headers are auto-detected before the user confirms.
 - [x] The preview shows ready, duplicate, and invalid rows with useful reasons.
 - [x] The user can invert amount sign when the bank export needs it.
-- [ ] Small imports commit immediately; large imports create a trackable job.
+- [x] Small imports commit immediately; large imports create a trackable job.
 - [x] Re-importing the same file/rows does not create duplicate transactions.
 - [x] Import results update transaction review and matching queues.
 
 ## Verification
 
 - `bun test packages/domain/src/csv-import.test.ts packages/app/src/ledger.test.ts` passed: 19 tests.
-- `bun test packages/app` passed: 120 tests.
-- `bun test packages/jobs/src/index.test.ts` passed: 17 tests.
+- `bun test packages/app` passed: 122 tests.
+- `bun test packages/jobs/src/index.test.ts` passed: 18 tests.
+- `bun test packages/api/src/router.test.ts` passed: 30 tests.
+- `DATABASE_URL=postgres://test BETTER_AUTH_SECRET=0123456789abcdef0123456789abcdef BETTER_AUTH_URL=http://localhost:3000 CORS_ORIGIN=http://localhost:3001 bun test apps/server/src/csv-transaction-import.test.ts apps/server/src/worker-runtime.test.ts` passed: 5 tests.
 - `bun run check-types` passed, including the web production build.
-- `bun run check` passed; it runs `oxlint && oxfmt --write`.
-- Browser smoke opened `http://localhost:3001/operations`, which redirected to `http://localhost:3001/login`; authenticated CSV upload/preview/commit smoke remains blocked until a local test account/session is available.
-- Large import job verification is not complete because Dawn does not yet have a transaction import worker payload/storage contract.
+- `bunx oxlint` passed.
+- `bunx oxfmt --check` passed on this slice's touched files after targeted formatting of `packages/app/src/banking-ledger.ts` and `docs/work/ACCOUNTANT-HANDOFF-SLICES.md`. Full `bun run check` was not rerun because it writes across the repo and would collide with concurrent coss UI work in the shared worktree.
+- `git diff --check` passed.
+- Browser smoke opened `http://localhost:3001/operations`; the authenticated Operations page rendered with no console errors. Authenticated CSV upload/preview/commit click-through remains a future manual smoke.
 
 ## Dependencies
 

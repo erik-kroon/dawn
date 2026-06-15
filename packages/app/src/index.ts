@@ -350,10 +350,22 @@ export interface TransactionReviewRepository
     actorId: string;
     fileName?: string | null;
     mapping: CsvTransactionImportMapping;
+    status?: TransactionImportSession["status"];
     rowCount: number;
     importedCount: number;
     duplicateCount: number;
     invalidCount: number;
+  }): Promise<TransactionImportSession>;
+  completeTransactionImportSession?(input: {
+    teamId: string;
+    importSessionId: string;
+    importedCount: number;
+    duplicateCount: number;
+    invalidCount: number;
+  }): Promise<TransactionImportSession>;
+  failTransactionImportSession?(input: {
+    teamId: string;
+    importSessionId: string;
   }): Promise<TransactionImportSession>;
   getIdempotencyResult(
     teamId: string,

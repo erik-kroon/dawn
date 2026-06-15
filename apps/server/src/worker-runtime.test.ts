@@ -50,6 +50,7 @@ describe("Dawn worker runtime", () => {
       "team_data.delete",
       "team_data.export",
       "transaction.match_pending_inbox",
+      "transaction_import.commit",
       "webhook.deliver",
     ]);
   });

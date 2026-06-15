@@ -22,11 +22,35 @@ import {
   type IdempotencyResult,
   type LedgerRepository,
   type ReviewWorkspaceData,
+  type TransactionImportPayloadStorage,
   type TransactionImportSession,
   commitCsvTransactionImport,
   listLedgerSummary,
   previewCsvTransactionImport,
+  runQueuedCsvTransactionImport,
 } from "./index";
+
+class MemoryTransactionImportPayloadStorage implements TransactionImportPayloadStorage {
+  objects = new Map<string, { body: string; contentType: string; byteSize: number }>();
+  deletedKeys: string[] = [];
+
+  async put(input: { objectKey: string; body: string; contentType: string }) {
+    this.objects.set(input.objectKey, {
+      body: input.body,
+      contentType: input.contentType,
+      byteSize: new TextEncoder().encode(input.body).byteLength,
+    });
+  }
+
+  async get(objectKey: string) {
+    return this.objects.get(objectKey) ?? null;
+  }
+
+  async delete(objectKey: string) {
+    this.deletedKeys.push(objectKey);
+    this.objects.delete(objectKey);
+  }
+}
 
 class MemoryLedgerRepository implements LedgerRepository {
   accounts = new Map<string, LedgerAccount>();
@@ -213,6 +237,7 @@ class MemoryLedgerRepository implements LedgerRepository {
     accountId: string;
     actorId: string;
     fileName?: string | null;
+    status?: TransactionImportSession["status"];
     rowCount: number;
     importedCount: number;
     duplicateCount: number;
@@ -224,13 +249,56 @@ class MemoryLedgerRepository implements LedgerRepository {
       accountId: input.accountId,
       source: "csv" as const,
       fileName: input.fileName ?? null,
-      status: "committed" as const,
+      status: input.status ?? ("committed" as const),
       rowCount: input.rowCount,
       importedCount: input.importedCount,
       duplicateCount: input.duplicateCount,
       invalidCount: input.invalidCount,
     };
     this.importSessions.push(importSession);
+    return importSession;
+  }
+
+  async completeTransactionImportSession(input: {
+    teamId: string;
+    importSessionId: string;
+    importedCount: number;
+    duplicateCount: number;
+    invalidCount: number;
+  }) {
+    const index = this.importSessions.findIndex(
+      (session) => session.id === input.importSessionId && session.teamId === input.teamId,
+    );
+
+    if (index === -1) {
+      throw new Error("missing import session");
+    }
+
+    const importSession = {
+      ...this.importSessions[index]!,
+      status: "committed" as const,
+      importedCount: input.importedCount,
+      duplicateCount: input.duplicateCount,
+      invalidCount: input.invalidCount,
+    };
+    this.importSessions[index] = importSession;
+    return importSession;
+  }
+
+  async failTransactionImportSession(input: { teamId: string; importSessionId: string }) {
+    const index = this.importSessions.findIndex(
+      (session) => session.id === input.importSessionId && session.teamId === input.teamId,
+    );
+
+    if (index === -1) {
+      throw new Error("missing import session");
+    }
+
+    const importSession = {
+      ...this.importSessions[index]!,
+      status: "failed" as const,
+    };
+    this.importSessions[index] = importSession;
     return importSession;
   }
 
@@ -680,6 +748,108 @@ describe("CSV transaction import", () => {
 
     expect(result.transactions[0]?.money).toEqual({ amountMinor: -1234, currency: "USD" });
     expect(result.transactions[0]?.type).toBe("expense");
+  });
+
+  test("queues large CSV imports without committing rows inline", async () => {
+    const repository = seededRepository("owner");
+    const payloadStorage = new MemoryTransactionImportPayloadStorage();
+    const command = {
+      teamId: "team_1",
+      accountId: "acct_1",
+      fileName: "large-bank-export.csv",
+      csvText:
+        "Date,Description,Amount\n2026-06-14,Figma subscription,-12.00\n2026-06-15,Invoice,50.00\n2026-06-16,Office,-24.00\n",
+      mapping: {
+        postedAt: "Date",
+        description: "Description",
+        amount: "Amount",
+      },
+      idempotencyKey: "idem_large_import",
+    };
+
+    const result = await commitCsvTransactionImport(repository, context, command, {
+      payloadStorage,
+      synchronousRowLimit: 2,
+    });
+
+    expect(result.mode).toBe("queued");
+    expect(result.importSession).toMatchObject({
+      status: "queued",
+      rowCount: 3,
+      importedCount: 0,
+      duplicateCount: 0,
+      invalidCount: 0,
+    });
+    expect(result.transactions).toEqual([]);
+    expect(repository.transactions).toHaveLength(0);
+    expect(payloadStorage.objects.size).toBe(1);
+    expect([...payloadStorage.objects.values()][0]?.body).toContain("large-bank-export.csv");
+    expect(repository.auditEvents[0]).toMatchObject({ action: "transaction_import.queued" });
+    expect(repository.outboxEvents[0]).toMatchObject({
+      type: "transaction_import.queued",
+      payload: {
+        importSessionId: "import_1",
+        payloadObjectKey: expect.stringContaining("transaction-imports/import_1.json"),
+        readyCount: 3,
+      },
+    });
+  });
+
+  test("runs queued CSV imports through the committed import path and deletes payload", async () => {
+    const repository = seededRepository("owner");
+    const payloadStorage = new MemoryTransactionImportPayloadStorage();
+    const command = {
+      teamId: "team_1",
+      accountId: "acct_1",
+      fileName: "large-bank-export.csv",
+      csvText:
+        "Date,Description,Amount\n2026-06-14,Figma subscription,-12.00\n2026-06-15,Invoice,50.00\n2026-06-16,Office,-24.00\n",
+      mapping: {
+        postedAt: "Date",
+        description: "Description",
+        amount: "Amount",
+      },
+      idempotencyKey: "idem_large_import_execute",
+    };
+    const queued = await commitCsvTransactionImport(repository, context, command, {
+      payloadStorage,
+      synchronousRowLimit: 2,
+    });
+    const payloadObjectKey = queued.queuedJob?.payloadObjectKey;
+
+    if (!payloadObjectKey) {
+      throw new Error("Expected queued import payload object key");
+    }
+
+    const result = await runQueuedCsvTransactionImport(
+      repository,
+      payloadStorage,
+      {
+        actor: { id: "system:transaction-import", type: "system" },
+        requestId: "transaction-import:outbox_1",
+        teamId: "team_1",
+      },
+      {
+        teamId: "team_1",
+        importSessionId: queued.importSession.id,
+        payloadObjectKey,
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "transaction-import:commit:outbox_1",
+      },
+    );
+
+    expect(result.mode).toBe("committed");
+    expect(result.importSession).toMatchObject({ status: "committed", importedCount: 3 });
+    expect(result.transactions).toHaveLength(3);
+    expect(payloadStorage.deletedKeys).toEqual([payloadObjectKey]);
+    expect(payloadStorage.objects.size).toBe(0);
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "transaction_import.committed",
+      payload: {
+        importSessionId: "import_1",
+        transactionIds: ["txn_1", "txn_2", "txn_3"],
+      },
+    });
   });
 
   test("blocks viewers from CSV import", async () => {
