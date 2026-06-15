@@ -12,6 +12,7 @@ import { Input } from "@dawn/ui/components/input";
 import { Label } from "@dawn/ui/components/label";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
+import { DownloadIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 
 import { authClient } from "@/lib/auth-client";
@@ -193,6 +194,20 @@ function RouteComponent() {
     ...orpc.operations.list.queryOptions({ input: { teamId: currentTeamId, limit: 8 } }),
     enabled: canReadOperations && Boolean(currentTeamId),
   });
+  const requestDataExportMutation = useMutation(
+    orpc.operations.requestDataExport.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.operations.list.queryKey() });
+      },
+    }),
+  );
+  const requestDataDeletionMutation = useMutation(
+    orpc.operations.requestDataDeletion.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.operations.list.queryKey() });
+      },
+    }),
+  );
   const teamDirectory = useQuery({
     ...orpc.teams.directory.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: canManageTeam && Boolean(currentTeamId),
@@ -1413,12 +1428,68 @@ function RouteComponent() {
                           <span className="text-xs text-muted-foreground">{workflow.status}</span>
                         </div>
                         <p className="text-xs text-muted-foreground">{workflow.nextStep}</p>
+                        {workflow.type === "team_data_export" ? (
+                          <Button
+                            className="mt-1 w-fit"
+                            disabled={
+                              !currentTeamId ||
+                              workflow.status === "queued" ||
+                              requestDataExportMutation.isPending
+                            }
+                            onClick={() =>
+                              currentTeamId
+                                ? requestDataExportMutation.mutate({
+                                    teamId: currentTeamId,
+                                    idempotencyKey: crypto.randomUUID(),
+                                  })
+                                : undefined
+                            }
+                            size="sm"
+                          >
+                            <DownloadIcon className="size-3.5" />
+                            Queue export
+                          </Button>
+                        ) : null}
+                        {workflow.type === "team_data_deletion" ? (
+                          <Button
+                            className="mt-1 w-fit"
+                            disabled={
+                              !currentTeamId ||
+                              workflow.status === "queued" ||
+                              requestDataDeletionMutation.isPending
+                            }
+                            onClick={() =>
+                              currentTeamId
+                                ? requestDataDeletionMutation.mutate({
+                                    teamId: currentTeamId,
+                                    confirmTeamId: currentTeamId,
+                                    idempotencyKey: crypto.randomUUID(),
+                                  })
+                                : undefined
+                            }
+                            size="sm"
+                            variant="destructive"
+                          >
+                            <Trash2Icon className="size-3.5" />
+                            Queue deletion
+                          </Button>
+                        ) : null}
                       </div>
                     ))}
                   </div>
                 </div>
               </div>
 
+              {requestDataExportMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {errorMessage(requestDataExportMutation.error)}
+                </p>
+              ) : null}
+              {requestDataDeletionMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {errorMessage(requestDataDeletionMutation.error)}
+                </p>
+              ) : null}
               {operations.error ? (
                 <p className="text-sm text-destructive">{errorMessage(operations.error)}</p>
               ) : null}

@@ -225,6 +225,72 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps team data workflow requests to queued jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "team_data.export_requested",
+        payload: { workflowType: "team_data_export", format: "json" },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "team_data.export_requested",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "team_data.export",
+        teamId: "team_1",
+        format: "json",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "team-data:export:outbox_1",
+      },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "team_data.export_requested",
+        idempotencyKey: "automation:run:outbox_1",
+      },
+      webhookDeliveryJob("team_data.export_requested"),
+    ]);
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "team_data.deletion_requested",
+        payload: { workflowType: "team_data_deletion" },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "team_data.deletion_requested",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "team_data.delete",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "team-data:delete:outbox_1",
+      },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "team_data.deletion_requested",
+        idempotencyKey: "automation:run:outbox_1",
+      },
+      webhookDeliveryJob("team_data.deletion_requested"),
+    ]);
+  });
+
   test("calculates capped exponential retry delays", () => {
     const now = new Date("2026-06-15T10:00:00.000Z");
 

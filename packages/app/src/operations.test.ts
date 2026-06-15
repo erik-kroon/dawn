@@ -5,8 +5,11 @@ import {
   listOperationsWorkspace,
   redactOperationalText,
   redactOperationalValue,
+  requestTeamDataDeletion,
+  requestTeamDataExport,
   type AuditLogEntry,
   type DawnRepository,
+  type IdempotencyResult,
   type JobRun,
   type OutboxEvent,
   type ProviderSyncRun,
@@ -28,6 +31,11 @@ class MemoryOperationsRepository {
   integrationSyncRuns: IntegrationSyncRun[] = [];
   automationRuns: AutomationRun[] = [];
   webhookDeliveries: WebhookDelivery[] = [];
+  idempotency = new Map<string, IdempotencyResult<unknown>>();
+
+  async withTransaction<T>(callback: (repository: DawnRepository) => Promise<T>) {
+    return callback(this as unknown as DawnRepository);
+  }
 
   async ensureDefaultWorkspace() {
     return { teamId: "team_1" };
@@ -77,6 +85,61 @@ class MemoryOperationsRepository {
 
   async listWebhookDeliveries(teamId: string, limit: number) {
     return this.webhookDeliveries.filter((delivery) => delivery.teamId === teamId).slice(0, limit);
+  }
+
+  async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
+    return this.idempotency.get(`${teamId}:${actorId}:${operation}:${key}`) ?? null;
+  }
+
+  async saveIdempotencyResult(input: {
+    teamId: string;
+    actorId: string;
+    operation: string;
+    key: string;
+    fingerprint: string;
+    result: unknown;
+  }) {
+    this.idempotency.set(`${input.teamId}:${input.actorId}:${input.operation}:${input.key}`, {
+      fingerprint: input.fingerprint,
+      result: input.result,
+    });
+  }
+
+  async appendAuditEvent(input: {
+    teamId: string;
+    actorId: string;
+    requestId: string;
+    action: string;
+    entityType: string;
+    entityId: string;
+    metadata: Record<string, unknown>;
+  }) {
+    this.auditEvents.unshift({
+      id: `audit_${this.auditEvents.length + 1}`,
+      occurredAt: new Date("2026-06-15T00:00:00.000Z").toISOString(),
+      ...input,
+    });
+  }
+
+  async appendOutboxEvent(input: {
+    teamId: string;
+    type: string;
+    version: number;
+    payload: Record<string, unknown>;
+  }) {
+    this.outboxEvents.unshift({
+      id: `outbox_${this.outboxEvents.length + 1}`,
+      teamId: input.teamId,
+      type: input.type,
+      version: input.version,
+      payload: input.payload,
+      status: "pending",
+      dispatchAttempts: 0,
+      lastError: null,
+      nextAttemptAt: null,
+      occurredAt: new Date("2026-06-15T00:00:00.000Z").toISOString(),
+      processedAt: null,
+    });
   }
 }
 
@@ -214,6 +277,91 @@ describe("operations workspace", () => {
       "team_data_export",
       "team_data_deletion",
     ]);
+    expect(workspace.dataWorkflows.map((workflow) => workflow.status)).toEqual([
+      "available",
+      "staged",
+    ]);
+  });
+
+  test("queues audited team data export requests idempotently", async () => {
+    const repository = new MemoryOperationsRepository();
+    repository.memberships.set("user_1:team_1", "admin");
+
+    const result = await requestTeamDataExport(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      idempotencyKey: "export_1",
+    });
+    const replay = await requestTeamDataExport(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      idempotencyKey: "export_1",
+    });
+    const workspace = await listOperationsWorkspace(repository as unknown as DawnRepository, {
+      ...context,
+      requestId: "request_2",
+    });
+
+    expect(result.workflow).toMatchObject({ type: "team_data_export", status: "queued" });
+    expect(replay.replayed).toBe(true);
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.auditEvents[0]).toMatchObject({
+      action: "team_data.export_requested",
+      entityType: "team",
+      entityId: "team_1",
+    });
+    expect(repository.outboxEvents).toHaveLength(1);
+    expect(repository.outboxEvents[0]).toMatchObject({
+      type: "team_data.export_requested",
+      payload: { workflowType: "team_data_export", format: "json" },
+    });
+    expect(workspace.dataWorkflows[0]).toMatchObject({
+      type: "team_data_export",
+      status: "queued",
+    });
+  });
+
+  test("requires owner confirmation for tenant deletion requests", async () => {
+    const repository = new MemoryOperationsRepository();
+    repository.memberships.set("user_1:team_1", "admin");
+
+    await expect(
+      requestTeamDataDeletion(repository as unknown as DawnRepository, context, {
+        teamId: "team_1",
+        confirmTeamId: "team_1",
+        idempotencyKey: "delete_1",
+      }),
+    ).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: "Only team owners can request tenant deletion",
+    });
+
+    repository.memberships.set("user_1:team_1", "owner");
+    await expect(
+      requestTeamDataDeletion(repository as unknown as DawnRepository, context, {
+        teamId: "team_1",
+        confirmTeamId: "wrong_team",
+        idempotencyKey: "delete_2",
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: "Confirm the team ID before requesting deletion",
+    });
+
+    const result = await requestTeamDataDeletion(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      confirmTeamId: "team_1",
+      reason: "customer requested closure",
+      idempotencyKey: "delete_3",
+    });
+
+    expect(result.workflow).toMatchObject({ type: "team_data_deletion", status: "queued" });
+    expect(repository.auditEvents[0]).toMatchObject({
+      action: "team_data.deletion_requested",
+      metadata: { reason: "customer requested closure" },
+    });
+    expect(repository.outboxEvents[0]).toMatchObject({
+      type: "team_data.deletion_requested",
+      payload: { workflowType: "team_data_deletion", reason: "customer requested closure" },
+    });
   });
 
   test("requires operations read permission", async () => {

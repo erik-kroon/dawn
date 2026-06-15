@@ -1076,7 +1076,7 @@ Make production behavior visible and recoverable.
 - [ ] Job failures and dead letters are visible.
 - [ ] Audit logs can be searched by team/resource/action.
 - [ ] Provider sync failures are actionable.
-- [ ] Data export/deletion workflows exist or are explicitly staged.
+- [x] Data export/deletion workflows exist or are explicitly staged.
 
 ## Verification
 

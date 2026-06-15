@@ -88,6 +88,21 @@ export const webhookDeliveryJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const teamDataExportJobSchema = z.object({
+  type: z.literal("team_data.export"),
+  teamId: z.string().min(1),
+  format: z.literal("json"),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+export const teamDataDeletionJobSchema = z.object({
+  type: z.literal("team_data.delete"),
+  teamId: z.string().min(1),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   outboxDispatchJobSchema,
   syncInvalidationJobSchema,
@@ -96,6 +111,8 @@ export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   weeklyInsightGenerationJobSchema,
   automationRunJobSchema,
   webhookDeliveryJobSchema,
+  teamDataExportJobSchema,
+  teamDataDeletionJobSchema,
 ]);
 
 export type OutboxDispatchJob = z.infer<typeof outboxDispatchJobSchema>;
@@ -105,6 +122,8 @@ export type RecurringInvoiceGenerationJob = z.infer<typeof recurringInvoiceGener
 export type WeeklyInsightGenerationJob = z.infer<typeof weeklyInsightGenerationJobSchema>;
 export type AutomationRunJob = z.infer<typeof automationRunJobSchema>;
 export type WebhookDeliveryJob = z.infer<typeof webhookDeliveryJobSchema>;
+export type TeamDataExportJob = z.infer<typeof teamDataExportJobSchema>;
+export type TeamDataDeletionJob = z.infer<typeof teamDataDeletionJobSchema>;
 export type DawnQueueMessage = z.infer<typeof dawnQueueMessageSchema>;
 
 export function createOutboxDispatchJob(event: OutboxEventForJob): OutboxDispatchJob {
@@ -130,6 +149,8 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const weeklyInsightJob = createWeeklyInsightGenerationJob(event);
   const automationJob = createAutomationRunJob(event);
   const webhookJob = createWebhookDeliveryJob(event);
+  const exportJob = createTeamDataExportJob(event);
+  const deletionJob = createTeamDataDeletionJob(event);
 
   return [
     dispatchJob,
@@ -137,6 +158,8 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
     extractionJob,
     recurringInvoiceJob,
     weeklyInsightJob,
+    exportJob,
+    deletionJob,
     automationJob,
     webhookJob,
   ].filter((message): message is DawnQueueMessage => Boolean(message));
@@ -277,6 +300,33 @@ function createWebhookDeliveryJob(event: OutboxEventForJob): WebhookDeliveryJob 
     sourceOutboxEventId: event.id,
     eventType: event.type,
     idempotencyKey: `webhook:deliver:${event.id}`,
+  };
+}
+
+function createTeamDataExportJob(event: OutboxEventForJob): TeamDataExportJob | null {
+  if (event.type !== "team_data.export_requested") {
+    return null;
+  }
+
+  return {
+    type: "team_data.export",
+    teamId: event.teamId,
+    format: "json",
+    sourceOutboxEventId: event.id,
+    idempotencyKey: `team-data:export:${event.id}`,
+  };
+}
+
+function createTeamDataDeletionJob(event: OutboxEventForJob): TeamDataDeletionJob | null {
+  if (event.type !== "team_data.deletion_requested") {
+    return null;
+  }
+
+  return {
+    type: "team_data.delete",
+    teamId: event.teamId,
+    sourceOutboxEventId: event.id,
+    idempotencyKey: `team-data:delete:${event.id}`,
   };
 }
 

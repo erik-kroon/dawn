@@ -986,9 +986,29 @@ export type OperationsMetricSnapshot = {
 
 export type DataWorkflowStatus = {
   type: "team_data_export" | "team_data_deletion";
-  status: "available" | "staged";
+  status: "available" | "queued" | "staged";
   description: string;
   nextStep: string;
+};
+
+export type RequestTeamDataExportCommand = {
+  teamId: string;
+  format?: "json";
+  idempotencyKey: string;
+};
+
+export type RequestTeamDataDeletionCommand = {
+  teamId: string;
+  confirmTeamId: string;
+  reason?: string | null;
+  idempotencyKey: string;
+};
+
+export type DataWorkflowRequestResult = {
+  teamId: string;
+  workflow: DataWorkflowStatus;
+  requestedAt: string;
+  replayed?: boolean;
 };
 
 export type OperationsWorkspace = {
@@ -1832,6 +1852,8 @@ const createWebhookSubscriptionOperation = "webhook_subscription.create";
 const connectIntegrationOperation = "integration.connect";
 const syncIntegrationOperation = "integration.sync";
 const disableIntegrationOperation = "integration.disable";
+const requestTeamDataExportOperation = "team_data.export.request";
+const requestTeamDataDeletionOperation = "team_data.deletion.request";
 
 export async function dispatchOutboxEvents(
   repository: OutboxDispatchRepository,
@@ -2545,25 +2567,231 @@ export async function listOperationsWorkspace(
     recentAutomationRuns: redactedAutomationRuns,
     recentWebhookDeliveries: redactedWebhookDeliveries,
     auditEvents: auditEvents.map(redactAuditLogEntry),
-    dataWorkflows: [
-      {
-        type: "team_data_export",
-        status: "available",
-        description:
-          "Team data export is staged through app-layer read models for audit, outbox, jobs, documents, ledger, billing, projects, assistant, automation, integration, and developer records.",
-        nextStep:
-          "Add an asynchronous export job that writes a signed archive to R2 when product-ready export delivery is needed.",
-      },
-      {
-        type: "team_data_deletion",
-        status: "staged",
-        description:
-          "Tenant deletion requires owner confirmation, retention checks, provider revocation, R2 object cleanup, search/vector projection cleanup, and audit-safe tombstones.",
-        nextStep:
-          "Implement a confirmation-gated deletion workflow backed by queue jobs and retention policy once compliance requirements are finalized.",
-      },
-    ],
+    dataWorkflows: dataWorkflowStatuses(outboxEvents),
   };
+}
+
+export async function requestTeamDataExport(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: RequestTeamDataExportCommand,
+): Promise<DataWorkflowRequestResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const operationsRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Team data export not found");
+
+    await resolveTeamAccess(
+      operationsRepository,
+      { ...context, teamId: command.teamId },
+      "operations.read",
+      "You cannot request data exports for this team",
+    );
+
+    const normalized = {
+      teamId: command.teamId,
+      format: command.format ?? "json",
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await operationsRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      requestTeamDataExportOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different data export request",
+        );
+      }
+
+      return { ...(replayed.result as DataWorkflowRequestResult), replayed: true };
+    }
+
+    const requestedAt = new Date().toISOString();
+    const result: DataWorkflowRequestResult = {
+      teamId: command.teamId,
+      workflow: queuedDataWorkflowStatus("team_data_export", requestedAt),
+      requestedAt,
+      replayed: false,
+    };
+
+    await operationsRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "team_data.export_requested",
+      entityType: "team",
+      entityId: command.teamId,
+      metadata: { format: normalized.format },
+    });
+    await operationsRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "team_data.export_requested",
+      version: 1,
+      payload: {
+        workflowType: "team_data_export",
+        format: normalized.format,
+        requestedAt,
+      },
+    });
+    await operationsRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: requestTeamDataExportOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function requestTeamDataDeletion(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: RequestTeamDataDeletionCommand,
+): Promise<DataWorkflowRequestResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const operationsRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Team data deletion not found");
+
+    if (command.confirmTeamId !== command.teamId) {
+      throw new AppError("CONFLICT", "Confirm the team ID before requesting deletion");
+    }
+
+    const access = await resolveTeamAccess(
+      operationsRepository,
+      { ...context, teamId: command.teamId },
+      "team.manage",
+      "You cannot request deletion for this team",
+    );
+
+    if (access.role !== "owner") {
+      throw new AppError("FORBIDDEN", "Only team owners can request tenant deletion");
+    }
+
+    const normalized = {
+      teamId: command.teamId,
+      confirmTeamId: command.confirmTeamId,
+      reason: command.reason?.trim() || null,
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await operationsRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      requestTeamDataDeletionOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different data deletion request",
+        );
+      }
+
+      return { ...(replayed.result as DataWorkflowRequestResult), replayed: true };
+    }
+
+    const requestedAt = new Date().toISOString();
+    const result: DataWorkflowRequestResult = {
+      teamId: command.teamId,
+      workflow: queuedDataWorkflowStatus("team_data_deletion", requestedAt),
+      requestedAt,
+      replayed: false,
+    };
+
+    await operationsRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "team_data.deletion_requested",
+      entityType: "team",
+      entityId: command.teamId,
+      metadata: { reason: normalized.reason },
+    });
+    await operationsRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "team_data.deletion_requested",
+      version: 1,
+      payload: {
+        workflowType: "team_data_deletion",
+        requestedAt,
+        reason: normalized.reason,
+      },
+    });
+    await operationsRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: requestTeamDataDeletionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+function dataWorkflowStatuses(outboxEvents: OutboxEvent[]): DataWorkflowStatus[] {
+  return [
+    queuedDataWorkflowStatus(
+      "team_data_export",
+      latestWorkflowRequestAt(outboxEvents, "team_data.export_requested"),
+    ),
+    queuedDataWorkflowStatus(
+      "team_data_deletion",
+      latestWorkflowRequestAt(outboxEvents, "team_data.deletion_requested"),
+    ),
+  ];
+}
+
+function queuedDataWorkflowStatus(
+  type: DataWorkflowStatus["type"],
+  requestedAt?: string | null,
+): DataWorkflowStatus {
+  if (type === "team_data_export") {
+    return {
+      type,
+      status: requestedAt ? "queued" : "available",
+      description:
+        "Team data export gathers team-owned audit, outbox, jobs, documents, ledger, billing, projects, assistant, automation, integration, and developer records.",
+      nextStep: requestedAt
+        ? `Export request queued ${requestedAt}. Worker delivery will write a signed archive to R2.`
+        : "Request an export to queue an audited archive job.",
+    };
+  }
+
+  return {
+    type,
+    status: requestedAt ? "queued" : "staged",
+    description:
+      "Tenant deletion requires owner confirmation, retention checks, provider revocation, R2 object cleanup, search/vector projection cleanup, and audit-safe tombstones.",
+    nextStep: requestedAt
+      ? `Deletion request queued ${requestedAt}. Execution remains gated by retention and provider cleanup.`
+      : "Confirm the team ID to queue an audited deletion request.",
+  };
+}
+
+function latestWorkflowRequestAt(outboxEvents: OutboxEvent[], eventType: string) {
+  return (
+    outboxEvents
+      .filter((event) => event.type === eventType)
+      .map((event) => event.occurredAt)
+      .sort()
+      .at(-1) ?? null
+  );
 }
 
 export async function createApiKey(

@@ -3543,4 +3543,67 @@ describe("appRouter", () => {
       "Bearer [redacted-token] failed for [redacted-email]",
     );
   });
+
+  test("queues data workflow requests through protected operations routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "owner");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "owner@example.com" }) };
+
+    const exportRequest = await call(
+      router.operations.requestDataExport,
+      {
+        teamId: "team_1",
+        idempotencyKey: "export_1",
+      },
+      context,
+    );
+    const deletionRequest = await call(
+      router.operations.requestDataDeletion,
+      {
+        teamId: "team_1",
+        confirmTeamId: "team_1",
+        reason: "closing workspace",
+        idempotencyKey: "delete_1",
+      },
+      context,
+    );
+
+    expect(exportRequest.workflow).toMatchObject({ type: "team_data_export", status: "queued" });
+    expect(deletionRequest.workflow).toMatchObject({
+      type: "team_data_deletion",
+      status: "queued",
+    });
+    expect(repository.auditEvents.map((event) => event.action)).toEqual([
+      "team_data.export_requested",
+      "team_data.deletion_requested",
+    ]);
+    expect(repository.outboxEvents).toMatchObject([
+      { type: "team_data.export_requested" },
+      { type: "team_data.deletion_requested" },
+    ]);
+  });
+
+  test("rejects tenant deletion requests from non-owners", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    const router = await createTestRouter(repository);
+
+    await expect(
+      call(
+        router.operations.requestDataDeletion,
+        {
+          teamId: "team_1",
+          confirmTeamId: "team_1",
+          idempotencyKey: "delete_1",
+        },
+        { context: testContext({ id: "user_1", email: "admin@example.com" }) },
+      ),
+    ).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: "Only team owners can request tenant deletion",
+    });
+  });
 });

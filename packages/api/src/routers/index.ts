@@ -50,6 +50,8 @@ import {
   rejectAssistantAction,
   recordInvoicePayment,
   reviewTransaction,
+  requestTeamDataDeletion,
+  requestTeamDataExport,
   runAutomationsForOutboxEvent,
   sendInvoice,
   sendAssistantMessage,
@@ -206,6 +208,19 @@ const operationsWorkspaceInput = z
       .optional(),
   })
   .optional();
+
+const requestTeamDataExportInput = z.object({
+  teamId: z.string().min(1),
+  format: z.literal("json").optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const requestTeamDataDeletionInput = z.object({
+  teamId: z.string().min(1),
+  confirmTeamId: z.string().min(1),
+  reason: z.string().trim().max(500).nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
 
 const createApiKeyInput = z.object({
   teamId: z.string().min(1),
@@ -986,6 +1001,40 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 limit: input?.limit,
                 audit: input?.audit,
               },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      requestDataExport: protectedProcedure
+        .input(requestTeamDataExportInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await requestTeamDataExport(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      requestDataDeletion: protectedProcedure
+        .input(requestTeamDataDeletionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await requestTeamDataDeletion(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
             );
           } catch (error) {
             mapAppError(error);

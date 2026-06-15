@@ -35,6 +35,7 @@ import { evlog, type EvlogVariables } from "evlog/hono";
 import { Hono, type Context as HonoContext } from "hono";
 import { cors } from "hono/cors";
 
+import { resolveCorsOrigin } from "./cors";
 import { processDocumentExtractionJob } from "./document-extraction";
 import { createR2DocumentObjectStorage } from "./document-storage";
 import { logServerError, requestIdFromHeaders } from "./observability";
@@ -75,7 +76,7 @@ app.use("*", async (c, next) => {
 app.use(
   "/*",
   cors({
-    origin: env.CORS_ORIGIN,
+    origin: (origin) => resolveCorsOrigin({ origin, configuredOrigin: env.CORS_ORIGIN }),
     allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization", "x-request-id"],
     credentials: true,
@@ -599,6 +600,37 @@ async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnC
     if (result.failed > 0) {
       throw new Error(`${result.failed} webhook deliveries failed`);
     }
+  }
+
+  if (message.body.type === "team_data.export") {
+    await new DrizzleTransactionReviewRepository().appendAuditEvent({
+      teamId: message.body.teamId,
+      actorId: "system:data-workflow",
+      requestId: message.body.idempotencyKey,
+      action: "team_data.export_job_staged",
+      entityType: "team",
+      entityId: message.body.teamId,
+      metadata: {
+        format: message.body.format,
+        sourceOutboxEventId: message.body.sourceOutboxEventId,
+        nextStep: "write_signed_r2_archive",
+      },
+    });
+  }
+
+  if (message.body.type === "team_data.delete") {
+    await new DrizzleTransactionReviewRepository().appendAuditEvent({
+      teamId: message.body.teamId,
+      actorId: "system:data-workflow",
+      requestId: message.body.idempotencyKey,
+      action: "team_data.deletion_job_gated",
+      entityType: "team",
+      entityId: message.body.teamId,
+      metadata: {
+        sourceOutboxEventId: message.body.sourceOutboxEventId,
+        nextStep: "retention_provider_r2_cleanup_confirmation",
+      },
+    });
   }
 }
 
