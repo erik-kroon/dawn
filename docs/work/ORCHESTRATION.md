@@ -186,23 +186,24 @@ pass, and the implementing agent has inspected the diff.
 
 ## Commit Log
 
-| Commit    | Slice or task                        | Notes                                                                                                                      |
-| --------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| `89c76a3` | Goal contract and package path       | Switched Dawn goal from orchestration to implementor mode.                                                                 |
-| `5f81d86` | Transaction review tracer foundation | Hardened exact money formatting, domain review transition, tenant-scoped repository access, and command-aware idempotency. |
-| `71bee81` | Team permission foundation           | Added PRD-shaped role permissions, team access resolution, persisted invites, invite API/UI, and invite verification.      |
-| `152fa2d` | Team membership lifecycle            | Added invite acceptance, membership creation, managed role updates, lifecycle guards, API routes, and persistence methods. |
-| `b89a73f` | Team directory management            | Added team member/pending-invite directory query, manager-only access checks, API route, and dashboard role controls.      |
-| `5587580` | Team API contract verification       | Added injectable API router factory and oRPC tests for auth, forbidden, directory data, and not-found error mapping.       |
-| `350c577` | Money and ledger core foundation     | Added exact money arithmetic, ledger drafts, duplicate keys, report totals, app/API use cases, DB schema, and migration.   |
-| `dc2b2d5` | CSV transaction import foundation    | Added CSV parsing, preview/commit use cases, import sessions, API routes, dashboard upload UI, and verification.           |
-| `6d7d4f3` | Transaction sync collection          | Added the sync package, cursor-scoped transaction endpoint, TanStack DB collection hook, and optimistic dashboard review.  |
-| `55adf24` | Cloudflare runtime baseline          | Added stage-aware Alchemy resources, Worker bindings, typed runtime helpers, infra contract tests, and environment docs.   |
-| `f926ce5` | Outbox dispatcher queue bridge       | Added job contracts, app dispatcher, outbox retry metadata, persisted job runs, Cloudflare queue publisher, and trigger.   |
-| `0a83b5c` | Tenant realtime fanout               | Added transaction realtime protocol, TenantCoordinator fanout, queue invalidation bridge, and web subscription refetch.    |
-| `28d9e47` | Mock banking provider sync           | Added provider adapter package, mock bank sync use cases, persistence, API routes, dashboard status, and migration.        |
-| `c2ef645` | Documents and R2 storage             | Added document metadata/versioning, signed R2 upload/download flow, protected API routes, dashboard panel, and migration.  |
-| `26ea3b7` | Inbox document extraction            | Added inbox sources/items, extraction jobs, deterministic worker processing, correction UI/API, and migration.             |
+| Commit    | Slice or task                        | Notes                                                                                                                         |
+| --------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `89c76a3` | Goal contract and package path       | Switched Dawn goal from orchestration to implementor mode.                                                                    |
+| `5f81d86` | Transaction review tracer foundation | Hardened exact money formatting, domain review transition, tenant-scoped repository access, and command-aware idempotency.    |
+| `71bee81` | Team permission foundation           | Added PRD-shaped role permissions, team access resolution, persisted invites, invite API/UI, and invite verification.         |
+| `152fa2d` | Team membership lifecycle            | Added invite acceptance, membership creation, managed role updates, lifecycle guards, API routes, and persistence methods.    |
+| `b89a73f` | Team directory management            | Added team member/pending-invite directory query, manager-only access checks, API route, and dashboard role controls.         |
+| `5587580` | Team API contract verification       | Added injectable API router factory and oRPC tests for auth, forbidden, directory data, and not-found error mapping.          |
+| `350c577` | Money and ledger core foundation     | Added exact money arithmetic, ledger drafts, duplicate keys, report totals, app/API use cases, DB schema, and migration.      |
+| `dc2b2d5` | CSV transaction import foundation    | Added CSV parsing, preview/commit use cases, import sessions, API routes, dashboard upload UI, and verification.              |
+| `6d7d4f3` | Transaction sync collection          | Added the sync package, cursor-scoped transaction endpoint, TanStack DB collection hook, and optimistic dashboard review.     |
+| `55adf24` | Cloudflare runtime baseline          | Added stage-aware Alchemy resources, Worker bindings, typed runtime helpers, infra contract tests, and environment docs.      |
+| `f926ce5` | Outbox dispatcher queue bridge       | Added job contracts, app dispatcher, outbox retry metadata, persisted job runs, Cloudflare queue publisher, and trigger.      |
+| `0a83b5c` | Tenant realtime fanout               | Added transaction realtime protocol, TenantCoordinator fanout, queue invalidation bridge, and web subscription refetch.       |
+| `28d9e47` | Mock banking provider sync           | Added provider adapter package, mock bank sync use cases, persistence, API routes, dashboard status, and migration.           |
+| `c2ef645` | Documents and R2 storage             | Added document metadata/versioning, signed R2 upload/download flow, protected API routes, dashboard panel, and migration.     |
+| `26ea3b7` | Inbox document extraction            | Added inbox sources/items, extraction jobs, deterministic worker processing, correction UI/API, and migration.                |
+| `7171264` | Inbox transaction matching           | Added deterministic match scoring, suggestion persistence, accept/reject flows, hard-negative memory, and dashboard controls. |
 
 ## Implementation Notes
 
