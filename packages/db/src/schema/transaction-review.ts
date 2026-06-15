@@ -666,6 +666,142 @@ export const hardNegativeMatch = pgTable(
   ],
 );
 
+export const customer = pgTable(
+  "customer",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    email: text("email"),
+    billingAddress: text("billing_address"),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("customer_team_name_idx").on(table.teamId, table.name),
+    index("customer_team_updated_idx").on(table.teamId, table.updatedAt),
+  ],
+);
+
+export const customerContact = pgTable(
+  "customer_contact",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    customerId: text("customer_id")
+      .notNull()
+      .references(() => customer.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    email: text("email").notNull(),
+    role: text("role"),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("customer_contact_customer_email_idx").on(table.customerId, table.email),
+    index("customer_contact_team_customer_idx").on(table.teamId, table.customerId),
+  ],
+);
+
+export const product = pgTable(
+  "product",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    type: text("type").notNull(),
+    description: text("description"),
+    unitPriceMinor: integer("unit_price_minor").notNull(),
+    currency: text("currency").notNull(),
+    defaultTaxRateBasisPoints: integer("default_tax_rate_basis_points").default(0).notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("product_team_name_idx").on(table.teamId, table.name),
+    index("product_team_updated_idx").on(table.teamId, table.updatedAt),
+  ],
+);
+
+export const invoice = pgTable(
+  "invoice",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    customerId: text("customer_id")
+      .notNull()
+      .references(() => customer.id, { onDelete: "restrict" }),
+    invoiceNumber: text("invoice_number").notNull(),
+    status: text("status").default("draft").notNull(),
+    issueDate: timestamp("issue_date").notNull(),
+    dueDate: timestamp("due_date"),
+    currency: text("currency").notNull(),
+    discountBasisPoints: integer("discount_basis_points").default(0).notNull(),
+    subtotalMinor: integer("subtotal_minor").notNull(),
+    discountMinor: integer("discount_minor").notNull(),
+    taxMinor: integer("tax_minor").notNull(),
+    totalMinor: integer("total_minor").notNull(),
+    notes: text("notes"),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("invoice_team_number_idx").on(table.teamId, table.invoiceNumber),
+    index("invoice_team_status_idx").on(table.teamId, table.status),
+    index("invoice_customer_idx").on(table.customerId, table.updatedAt),
+  ],
+);
+
+export const invoiceLine = pgTable(
+  "invoice_line",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    invoiceId: text("invoice_id")
+      .notNull()
+      .references(() => invoice.id, { onDelete: "cascade" }),
+    productId: text("product_id").references(() => product.id, { onDelete: "set null" }),
+    description: text("description").notNull(),
+    quantityMilli: integer("quantity_milli").notNull(),
+    unitPriceMinor: integer("unit_price_minor").notNull(),
+    currency: text("currency").notNull(),
+    discountBasisPoints: integer("discount_basis_points").default(0).notNull(),
+    taxRateBasisPoints: integer("tax_rate_basis_points").default(0).notNull(),
+    subtotalMinor: integer("subtotal_minor").notNull(),
+    discountMinor: integer("discount_minor").notNull(),
+    taxMinor: integer("tax_minor").notNull(),
+    totalMinor: integer("total_minor").notNull(),
+    sortOrder: integer("sort_order").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("invoice_line_invoice_idx").on(table.invoiceId, table.sortOrder),
+    index("invoice_line_product_idx").on(table.productId),
+  ],
+);
+
 export const idempotencyKey = pgTable(
   "idempotency_key",
   {
@@ -710,6 +846,11 @@ export const teamRelations = relations(team, ({ many }) => ({
   inboxSources: many(inboxSource),
   inboxItems: many(inboxItem),
   documentExtractions: many(documentExtraction),
+  customers: many(customer),
+  customerContacts: many(customerContact),
+  products: many(product),
+  invoices: many(invoice),
+  invoiceLines: many(invoiceLine),
 }));
 
 export const teamMembershipRelations = relations(teamMembership, ({ one }) => ({

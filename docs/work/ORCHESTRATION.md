@@ -56,7 +56,7 @@ pass, and the implementing agent has inspected the diff.
 | 12  | Documents And R2 Storage                                     | Verified foundation, manual upload/download blocked      | Slices 3, 7, 8           | Metadata/permission tests; R2 mock/local test; web/server smoke.                                                         |
 | 13  | Inbox And Document Extraction Pipeline                       | Verified foundation, manual inbox review blocked         | Slice 12                 | Extraction/job/app/API/server tests; migration; web/server smoke.                                                        |
 | 14  | Inbox-To-Transaction Matching                                | Verified foundation, manual matching review blocked      | Slices 4, 13             | Matching domain/app/API tests; migration; typecheck/check.                                                               |
-| 15  | Customers And Invoice Drafts                                 | Not started                                              | Slices 3, 4              | Invoice totals/state tests; customer/draft tests; manual draft.                                                          |
+| 15  | Customers And Invoice Drafts                                 | Verified foundation, manual draft review blocked         | Slices 3, 4              | Invoice domain/app/API tests; migration; typecheck/check.                                                                |
 | 16  | Invoice Delivery, PDF, Payments, And Recurrence              | Not started                                              | Slices 15, 8             | Lifecycle tests; send/payment tests; sandbox/dev email manual flow.                                                      |
 | 17  | Projects And Time Tracking                                   | Not started                                              | Slice 15                 | Time totals/conversion tests; manual project/time/invoice flow.                                                          |
 | 18  | Reporting And Weekly Insights                                | Not started                                              | Slices 4, 14, 16, 17     | Report fixture tests; mocked insight tests; manual dashboard.                                                            |
@@ -183,6 +183,11 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 14     | `bun test packages/domain/src/matching.test.ts packages/app/src/inbox-matching.test.ts packages/api/src/router.test.ts`                                                                                                                                                                                                      | Pass    | 20 tests passed for deterministic scoring, sender support, hard-negative suppression, accept/reject use cases, and protected match routes.       |
 | 2026-06-15 slice 14     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 232 files.                                                                                         |
 | 2026-06-15 slice 14     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                           |
+| 2026-06-15 slice 15     | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0010_odd_pyro.sql` for customers, contacts, products, invoices, and invoice lines.                         |
+| 2026-06-15 slice 15     | `bun test packages/domain/src/invoice.test.ts packages/app/src/billing.test.ts packages/api/src/router.test.ts`                                                                                                                                                                                                              | Pass    | 21 tests passed for invoice totals/state rules, customer/product/draft use cases, and protected billing routes.                                  |
+| 2026-06-15 slice 15     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 235 files.                                                                                         |
+| 2026-06-15 slice 15     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                           |
+| 2026-06-15 slice 15     | `bun run dev:web` + `env SKIP_ENV_VALIDATION=true POLAR_ACCESS_TOKEN=dummy bun run dev:server` + browser open `http://localhost:3001/` and `/dashboard`                                                                                                                                                                      | Partial | Web shell and unauthenticated redirect loaded with no console errors; authenticated billing draft workflow remains blocked.                      |
 
 ## Commit Log
 
@@ -328,6 +333,16 @@ negatives so they are not suggested again. The dashboard inbox panel can find,
 accept, and reject matches, but low-confidence suggestions are never
 auto-applied.
 
+Slice 15 foundation added the first billing records and draft workflow. The
+domain layer owns exact invoice totals with milli-quantities, basis-point
+discounts, tax calculation, and draft-only edit rules. Postgres now stores
+`customer`, `customer_contact`, `product`, `invoice`, and `invoice_line`
+records. The app exposes idempotent customer, product/service, draft invoice
+create, and draft invoice update use cases behind invoice permissions with
+audit/outbox events. The API exposes a protected billing router, and the
+dashboard has a compact billing panel for creating customers, products/services,
+and creating or updating one-line draft invoices.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -380,3 +395,7 @@ auto-applied.
   local or preview database with sample receipts and transactions. Current
   verification covers deterministic scoring, app use cases, API routes,
   migration generation, and dashboard build/type contracts.
+- Slice 15 still needs authenticated manual draft-invoice review against a
+  migrated local or preview database. Current verification covers invoice domain
+  math/state rules, app use cases, API routes, migration generation, and
+  dashboard build/type contracts plus unauthenticated web-shell smoke.

@@ -28,15 +28,20 @@ import type {
 import type {
   Actor,
   Category,
+  Customer,
+  CustomerContact,
+  InvoiceDraft,
+  InvoiceLineDraft,
   LedgerAccount,
   LedgerTransactionDraft,
+  Product,
   TeamInvite,
   TeamMember,
   TeamMembership,
   TeamRole,
   Transaction,
 } from "@dawn/domain";
-import { ledgerDuplicateKey } from "@dawn/domain";
+import { calculateInvoiceTotals, ledgerDuplicateKey } from "@dawn/domain";
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 
 import { db } from "./index";
@@ -1306,6 +1311,323 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     );
   }
 
+  async listCustomers(teamId: string): Promise<Customer[]> {
+    const customers = await this.client
+      .select()
+      .from(schema.customer)
+      .where(eq(schema.customer.teamId, teamId))
+      .orderBy(desc(schema.customer.updatedAt));
+
+    return customers.map(mapCustomer);
+  }
+
+  async listCustomerContacts(teamId: string): Promise<CustomerContact[]> {
+    const contacts = await this.client
+      .select()
+      .from(schema.customerContact)
+      .where(eq(schema.customerContact.teamId, teamId))
+      .orderBy(asc(schema.customerContact.name));
+
+    return contacts.map(mapCustomerContact);
+  }
+
+  async listProducts(teamId: string): Promise<Product[]> {
+    const products = await this.client
+      .select()
+      .from(schema.product)
+      .where(eq(schema.product.teamId, teamId))
+      .orderBy(asc(schema.product.name));
+
+    return products.map(mapProduct);
+  }
+
+  async listDraftInvoices(teamId: string): Promise<InvoiceDraft[]> {
+    const [invoices, lines] = await Promise.all([
+      this.client
+        .select()
+        .from(schema.invoice)
+        .where(and(eq(schema.invoice.teamId, teamId), eq(schema.invoice.status, "draft")))
+        .orderBy(desc(schema.invoice.updatedAt)),
+      this.client.select().from(schema.invoiceLine).where(eq(schema.invoiceLine.teamId, teamId)),
+    ]);
+
+    return invoices.map((invoice) =>
+      mapInvoiceDraft(
+        invoice,
+        lines
+          .filter((line) => line.invoiceId === invoice.id)
+          .sort((left, right) => left.sortOrder - right.sortOrder),
+      ),
+    );
+  }
+
+  async getCustomerForTeam(teamId: string, customerId: string) {
+    const [customer] = await this.client
+      .select()
+      .from(schema.customer)
+      .where(and(eq(schema.customer.teamId, teamId), eq(schema.customer.id, customerId)))
+      .limit(1);
+
+    return customer ? mapCustomer(customer) : null;
+  }
+
+  async getProductForTeam(teamId: string, productId: string) {
+    const [product] = await this.client
+      .select()
+      .from(schema.product)
+      .where(and(eq(schema.product.teamId, teamId), eq(schema.product.id, productId)))
+      .limit(1);
+
+    return product ? mapProduct(product) : null;
+  }
+
+  async getInvoiceForTeam(teamId: string, invoiceId: string) {
+    const [invoice] = await this.client
+      .select()
+      .from(schema.invoice)
+      .where(and(eq(schema.invoice.teamId, teamId), eq(schema.invoice.id, invoiceId)))
+      .limit(1);
+
+    if (!invoice) {
+      return null;
+    }
+
+    const lines = await this.client
+      .select()
+      .from(schema.invoiceLine)
+      .where(eq(schema.invoiceLine.invoiceId, invoice.id))
+      .orderBy(asc(schema.invoiceLine.sortOrder));
+
+    return mapInvoiceDraft(invoice, lines);
+  }
+
+  async createCustomer(input: {
+    customerId: string;
+    contactId?: string | null;
+    teamId: string;
+    name: string;
+    email?: string | null;
+    billingAddress?: string | null;
+    contactName?: string | null;
+    contactEmail?: string | null;
+    contactRole?: string | null;
+    createdByActorId: string;
+  }): Promise<{ customer: Customer; contact?: CustomerContact | null }> {
+    const [customer] = await this.client
+      .insert(schema.customer)
+      .values({
+        id: input.customerId,
+        teamId: input.teamId,
+        name: input.name,
+        email: input.email ?? null,
+        billingAddress: input.billingAddress ?? null,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!customer) {
+      throw new Error("Customer was not created");
+    }
+
+    let contact: typeof schema.customerContact.$inferSelect | null = null;
+
+    if (input.contactId && input.contactName && input.contactEmail) {
+      const [createdContact] = await this.client
+        .insert(schema.customerContact)
+        .values({
+          id: input.contactId,
+          teamId: input.teamId,
+          customerId: input.customerId,
+          name: input.contactName,
+          email: input.contactEmail,
+          role: input.contactRole ?? null,
+          createdByActorId: input.createdByActorId,
+        })
+        .returning();
+      contact = createdContact ?? null;
+    }
+
+    return {
+      customer: mapCustomer(customer),
+      contact: contact ? mapCustomerContact(contact) : null,
+    };
+  }
+
+  async createProduct(input: {
+    productId: string;
+    teamId: string;
+    name: string;
+    type: Product["type"];
+    description?: string | null;
+    unitPrice: Product["unitPrice"];
+    defaultTaxRateBasisPoints: number;
+    createdByActorId: string;
+  }): Promise<Product> {
+    const [product] = await this.client
+      .insert(schema.product)
+      .values({
+        id: input.productId,
+        teamId: input.teamId,
+        name: input.name,
+        type: input.type,
+        description: input.description ?? null,
+        unitPriceMinor: input.unitPrice.amountMinor,
+        currency: input.unitPrice.currency,
+        defaultTaxRateBasisPoints: input.defaultTaxRateBasisPoints,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!product) {
+      throw new Error("Product was not created");
+    }
+
+    return mapProduct(product);
+  }
+
+  async createDraftInvoice(input: {
+    invoiceId: string;
+    teamId: string;
+    customerId: string;
+    invoiceNumber: string;
+    issueDate: string;
+    dueDate?: string | null;
+    currency: string;
+    discountBasisPoints: number;
+    notes?: string | null;
+    lines: InvoiceLineDraft[];
+    createdByActorId: string;
+  }): Promise<InvoiceDraft> {
+    const calculated = calculateInvoiceTotals({
+      currency: input.currency,
+      discountBasisPoints: input.discountBasisPoints,
+      lines: input.lines,
+    });
+    const [invoice] = await this.client
+      .insert(schema.invoice)
+      .values({
+        id: input.invoiceId,
+        teamId: input.teamId,
+        customerId: input.customerId,
+        invoiceNumber: input.invoiceNumber,
+        status: "draft",
+        issueDate: new Date(input.issueDate),
+        dueDate: input.dueDate ? new Date(input.dueDate) : null,
+        currency: input.currency,
+        discountBasisPoints: input.discountBasisPoints,
+        subtotalMinor: calculated.totals.subtotal.amountMinor,
+        discountMinor: calculated.totals.discount.amountMinor,
+        taxMinor: calculated.totals.tax.amountMinor,
+        totalMinor: calculated.totals.total.amountMinor,
+        notes: input.notes ?? null,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!invoice) {
+      throw new Error("Invoice was not created");
+    }
+
+    await this.insertInvoiceLines({
+      teamId: input.teamId,
+      invoiceId: input.invoiceId,
+      lines: input.lines,
+      calculatedLines: calculated.lines,
+    });
+
+    return (
+      (await this.getInvoiceForTeam(input.teamId, input.invoiceId)) ?? mapInvoiceDraft(invoice, [])
+    );
+  }
+
+  async updateDraftInvoice(input: {
+    teamId: string;
+    invoiceId: string;
+    customerId: string;
+    invoiceNumber: string;
+    issueDate: string;
+    dueDate?: string | null;
+    currency: string;
+    discountBasisPoints: number;
+    notes?: string | null;
+    lines: InvoiceLineDraft[];
+  }): Promise<InvoiceDraft> {
+    const calculated = calculateInvoiceTotals({
+      currency: input.currency,
+      discountBasisPoints: input.discountBasisPoints,
+      lines: input.lines,
+    });
+    const [invoice] = await this.client
+      .update(schema.invoice)
+      .set({
+        customerId: input.customerId,
+        invoiceNumber: input.invoiceNumber,
+        issueDate: new Date(input.issueDate),
+        dueDate: input.dueDate ? new Date(input.dueDate) : null,
+        currency: input.currency,
+        discountBasisPoints: input.discountBasisPoints,
+        subtotalMinor: calculated.totals.subtotal.amountMinor,
+        discountMinor: calculated.totals.discount.amountMinor,
+        taxMinor: calculated.totals.tax.amountMinor,
+        totalMinor: calculated.totals.total.amountMinor,
+        notes: input.notes ?? null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.invoice.teamId, input.teamId),
+          eq(schema.invoice.id, input.invoiceId),
+          eq(schema.invoice.status, "draft"),
+        ),
+      )
+      .returning();
+
+    if (!invoice) {
+      throw new Error("Invoice draft was not updated");
+    }
+
+    await this.client
+      .delete(schema.invoiceLine)
+      .where(eq(schema.invoiceLine.invoiceId, input.invoiceId));
+    await this.insertInvoiceLines({
+      teamId: input.teamId,
+      invoiceId: input.invoiceId,
+      lines: input.lines,
+      calculatedLines: calculated.lines,
+    });
+
+    return (
+      (await this.getInvoiceForTeam(input.teamId, input.invoiceId)) ?? mapInvoiceDraft(invoice, [])
+    );
+  }
+
+  private async insertInvoiceLines(input: {
+    teamId: string;
+    invoiceId: string;
+    lines: InvoiceLineDraft[];
+    calculatedLines: ReturnType<typeof calculateInvoiceTotals>["lines"];
+  }) {
+    await this.client.insert(schema.invoiceLine).values(
+      input.lines.map((line, index) => ({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        invoiceId: input.invoiceId,
+        productId: line.productId ?? null,
+        description: line.description,
+        quantityMilli: line.quantityMilli,
+        unitPriceMinor: line.unitPrice.amountMinor,
+        currency: line.unitPrice.currency,
+        discountBasisPoints: line.discountBasisPoints ?? 0,
+        taxRateBasisPoints: line.taxRateBasisPoints ?? 0,
+        subtotalMinor: input.calculatedLines[index]?.subtotal.amountMinor ?? 0,
+        discountMinor: input.calculatedLines[index]?.discount.amountMinor ?? 0,
+        taxMinor: input.calculatedLines[index]?.tax.amountMinor ?? 0,
+        totalMinor: input.calculatedLines[index]?.total.amountMinor ?? 0,
+        sortOrder: index,
+      })),
+    );
+  }
+
   private async nextDocumentExtractionVersion(inboxItemId: string) {
     const [latest] = await this.client
       .select({ extractionVersion: schema.documentExtraction.extractionVersion })
@@ -1991,6 +2313,100 @@ function mapHardNegativeMatch(
     transactionId: match.transactionId,
     reason: match.reason,
     createdAt: match.createdAt.toISOString(),
+  };
+}
+
+function mapCustomer(customer: typeof schema.customer.$inferSelect): Customer {
+  return {
+    id: customer.id,
+    teamId: customer.teamId,
+    name: customer.name,
+    email: customer.email,
+    billingAddress: customer.billingAddress,
+    createdAt: customer.createdAt.toISOString(),
+    updatedAt: customer.updatedAt.toISOString(),
+  };
+}
+
+function mapCustomerContact(contact: typeof schema.customerContact.$inferSelect): CustomerContact {
+  return {
+    id: contact.id,
+    teamId: contact.teamId,
+    customerId: contact.customerId,
+    name: contact.name,
+    email: contact.email,
+    role: contact.role,
+    createdAt: contact.createdAt.toISOString(),
+  };
+}
+
+function mapProduct(product: typeof schema.product.$inferSelect): Product {
+  return {
+    id: product.id,
+    teamId: product.teamId,
+    name: product.name,
+    type: product.type as Product["type"],
+    description: product.description,
+    unitPrice: {
+      amountMinor: product.unitPriceMinor,
+      currency: product.currency,
+    },
+    defaultTaxRateBasisPoints: product.defaultTaxRateBasisPoints,
+    createdAt: product.createdAt.toISOString(),
+    updatedAt: product.updatedAt.toISOString(),
+  };
+}
+
+function mapInvoiceDraft(
+  invoice: typeof schema.invoice.$inferSelect,
+  lines: (typeof schema.invoiceLine.$inferSelect)[],
+): InvoiceDraft {
+  return {
+    id: invoice.id,
+    teamId: invoice.teamId,
+    customerId: invoice.customerId,
+    invoiceNumber: invoice.invoiceNumber,
+    status: invoice.status as InvoiceDraft["status"],
+    issueDate: invoice.issueDate.toISOString(),
+    dueDate: invoice.dueDate?.toISOString() ?? null,
+    currency: invoice.currency,
+    discountBasisPoints: invoice.discountBasisPoints,
+    notes: invoice.notes,
+    lines: lines.map(mapInvoiceLine),
+    totals: {
+      subtotal: { amountMinor: invoice.subtotalMinor, currency: invoice.currency },
+      discount: { amountMinor: invoice.discountMinor, currency: invoice.currency },
+      tax: { amountMinor: invoice.taxMinor, currency: invoice.currency },
+      total: { amountMinor: invoice.totalMinor, currency: invoice.currency },
+    },
+    createdByActorId: invoice.createdByActorId,
+    createdAt: invoice.createdAt.toISOString(),
+    updatedAt: invoice.updatedAt.toISOString(),
+  };
+}
+
+function mapInvoiceLine(
+  line: typeof schema.invoiceLine.$inferSelect,
+): InvoiceDraft["lines"][number] {
+  return {
+    id: line.id,
+    invoiceId: line.invoiceId,
+    productId: line.productId,
+    description: line.description,
+    quantityMilli: line.quantityMilli,
+    unitPrice: {
+      amountMinor: line.unitPriceMinor,
+      currency: line.currency,
+    },
+    discountBasisPoints: line.discountBasisPoints,
+    taxRateBasisPoints: line.taxRateBasisPoints,
+    sortOrder: line.sortOrder,
+    totals: {
+      subtotal: { amountMinor: line.subtotalMinor, currency: line.currency },
+      discount: { amountMinor: line.discountMinor, currency: line.currency },
+      tax: { amountMinor: line.taxMinor, currency: line.currency },
+      total: { amountMinor: line.totalMinor, currency: line.currency },
+    },
   };
 }
 

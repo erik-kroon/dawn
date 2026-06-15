@@ -45,6 +45,28 @@ function RouteComponent() {
   const [extractionCorrections, setExtractionCorrections] = useState<
     Record<string, ExtractionCorrectionState>
   >({});
+  const [customerDraft, setCustomerDraft] = useState({
+    name: "",
+    email: "",
+    contactName: "",
+    contactEmail: "",
+  });
+  const [productDraft, setProductDraft] = useState({
+    name: "",
+    type: "service" as "product" | "service",
+    unitPrice: "",
+    currency: "USD",
+    taxRate: "0",
+  });
+  const [invoiceDraft, setInvoiceDraft] = useState({
+    invoiceId: "",
+    customerId: "",
+    invoiceNumber: "",
+    dueDate: "",
+    productId: "",
+    quantity: "1",
+    discountRate: "0",
+  });
   const [syncReviewError, setSyncReviewError] = useState<string | null>(null);
   const [syncReviewingId, setSyncReviewingId] = useState<string | null>(null);
 
@@ -85,6 +107,10 @@ function RouteComponent() {
   });
   const inbox = useQuery({
     ...orpc.inbox.list.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
+  const billing = useQuery({
+    ...orpc.billing.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
   const teamDirectory = useQuery({
@@ -215,6 +241,60 @@ function RouteComponent() {
     orpc.inbox.rejectMatch.mutationOptions({
       onSuccess: async () => {
         await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
+      },
+    }),
+  );
+  const createCustomerMutation = useMutation(
+    orpc.billing.createCustomer.mutationOptions({
+      onSuccess: async () => {
+        setCustomerDraft({ name: "", email: "", contactName: "", contactEmail: "" });
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
+      },
+    }),
+  );
+  const createProductMutation = useMutation(
+    orpc.billing.createProduct.mutationOptions({
+      onSuccess: async () => {
+        setProductDraft({
+          name: "",
+          type: "service",
+          unitPrice: "",
+          currency: "USD",
+          taxRate: "0",
+        });
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
+      },
+    }),
+  );
+  const createDraftInvoiceMutation = useMutation(
+    orpc.billing.createDraftInvoice.mutationOptions({
+      onSuccess: async () => {
+        setInvoiceDraft({
+          invoiceId: "",
+          customerId: "",
+          invoiceNumber: "",
+          dueDate: "",
+          productId: "",
+          quantity: "1",
+          discountRate: "0",
+        });
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
+      },
+    }),
+  );
+  const updateDraftInvoiceMutation = useMutation(
+    orpc.billing.updateDraftInvoice.mutationOptions({
+      onSuccess: async () => {
+        setInvoiceDraft({
+          invoiceId: "",
+          customerId: "",
+          invoiceNumber: "",
+          dueDate: "",
+          productId: "",
+          quantity: "1",
+          discountRate: "0",
+        });
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
       },
     }),
   );
@@ -833,6 +913,336 @@ function RouteComponent() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Billing drafts</CardTitle>
+          <CardDescription>
+            Create customers, reusable products or services, and draft invoices before delivery.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {transactionReview.data ? (
+            <div className="grid gap-4">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-2 border p-3">
+                  <p className="text-sm font-medium">Customer</p>
+                  <Input
+                    onChange={(event) =>
+                      setCustomerDraft((draft) => ({ ...draft, name: event.target.value }))
+                    }
+                    placeholder="Customer name"
+                    value={customerDraft.name}
+                  />
+                  <Input
+                    onChange={(event) =>
+                      setCustomerDraft((draft) => ({ ...draft, email: event.target.value }))
+                    }
+                    placeholder="Billing email"
+                    value={customerDraft.email}
+                  />
+                  <Input
+                    onChange={(event) =>
+                      setCustomerDraft((draft) => ({ ...draft, contactName: event.target.value }))
+                    }
+                    placeholder="Contact name"
+                    value={customerDraft.contactName}
+                  />
+                  <Input
+                    onChange={(event) =>
+                      setCustomerDraft((draft) => ({ ...draft, contactEmail: event.target.value }))
+                    }
+                    placeholder="Contact email"
+                    value={customerDraft.contactEmail}
+                  />
+                  <Button
+                    disabled={
+                      createCustomerMutation.isPending ||
+                      !transactionReview.data.teamId ||
+                      !customerDraft.name.trim()
+                    }
+                    onClick={() =>
+                      createCustomerMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        name: customerDraft.name,
+                        email: customerDraft.email || null,
+                        contactName: customerDraft.contactName || null,
+                        contactEmail: customerDraft.contactEmail || null,
+                        idempotencyKey: crypto.randomUUID(),
+                      })
+                    }
+                    size="sm"
+                  >
+                    Create customer
+                  </Button>
+                </div>
+
+                <div className="grid gap-2 border p-3">
+                  <p className="text-sm font-medium">Product or service</p>
+                  <Input
+                    onChange={(event) =>
+                      setProductDraft((draft) => ({ ...draft, name: event.target.value }))
+                    }
+                    placeholder="Name"
+                    value={productDraft.name}
+                  />
+                  <select
+                    className="h-9 rounded-none border bg-background px-2 text-sm"
+                    onChange={(event) =>
+                      setProductDraft((draft) => ({
+                        ...draft,
+                        type: event.target.value as "product" | "service",
+                      }))
+                    }
+                    value={productDraft.type}
+                  >
+                    <option value="service">Service</option>
+                    <option value="product">Product</option>
+                  </select>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <Input
+                      onChange={(event) =>
+                        setProductDraft((draft) => ({ ...draft, unitPrice: event.target.value }))
+                      }
+                      placeholder="Price"
+                      value={productDraft.unitPrice}
+                    />
+                    <Input
+                      onChange={(event) =>
+                        setProductDraft((draft) => ({
+                          ...draft,
+                          currency: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="USD"
+                      value={productDraft.currency}
+                    />
+                    <Input
+                      onChange={(event) =>
+                        setProductDraft((draft) => ({ ...draft, taxRate: event.target.value }))
+                      }
+                      placeholder="Tax %"
+                      value={productDraft.taxRate}
+                    />
+                  </div>
+                  <Button
+                    disabled={
+                      createProductMutation.isPending ||
+                      !transactionReview.data.teamId ||
+                      !productDraft.name.trim() ||
+                      !productDraft.unitPrice.trim()
+                    }
+                    onClick={() =>
+                      createProductMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        name: productDraft.name,
+                        type: productDraft.type,
+                        unitPrice: {
+                          amountMinor: parseMoneyInputToMinor(productDraft.unitPrice),
+                          currency: productDraft.currency.trim().toUpperCase(),
+                        },
+                        defaultTaxRateBasisPoints: parsePercentToBasisPoints(productDraft.taxRate),
+                        idempotencyKey: crypto.randomUUID(),
+                      })
+                    }
+                    size="sm"
+                  >
+                    Create item
+                  </Button>
+                </div>
+
+                <div className="grid gap-2 border p-3">
+                  <p className="text-sm font-medium">Draft invoice</p>
+                  <select
+                    className="h-9 rounded-none border bg-background px-2 text-sm"
+                    onChange={(event) => {
+                      const invoice = billing.data?.draftInvoices.find(
+                        (draft) => draft.id === event.target.value,
+                      );
+
+                      if (!invoice) {
+                        setInvoiceDraft({
+                          invoiceId: "",
+                          customerId: billing.data?.customers[0]?.id ?? "",
+                          invoiceNumber: "",
+                          dueDate: "",
+                          productId: billing.data?.products[0]?.id ?? "",
+                          quantity: "1",
+                          discountRate: "0",
+                        });
+                        return;
+                      }
+
+                      setInvoiceDraft({
+                        invoiceId: invoice.id,
+                        customerId: invoice.customerId,
+                        invoiceNumber: invoice.invoiceNumber,
+                        dueDate: invoice.dueDate ? invoice.dueDate.slice(0, 10) : "",
+                        productId: invoice.lines[0]?.productId ?? "",
+                        quantity: formatQuantityMilli(invoice.lines[0]?.quantityMilli ?? 1_000),
+                        discountRate: formatBasisPoints(invoice.discountBasisPoints),
+                      });
+                    }}
+                    value={invoiceDraft.invoiceId}
+                  >
+                    <option value="">New draft</option>
+                    {billing.data?.draftInvoices.map((invoice) => (
+                      <option key={invoice.id} value={invoice.id}>
+                        {invoice.invoiceNumber} · {formatMoney(invoice.totals.total)}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    className="h-9 rounded-none border bg-background px-2 text-sm"
+                    onChange={(event) =>
+                      setInvoiceDraft((draft) => ({ ...draft, customerId: event.target.value }))
+                    }
+                    value={invoiceDraft.customerId}
+                  >
+                    <option value="">Select customer</option>
+                    {billing.data?.customers.map((customer) => (
+                      <option key={customer.id} value={customer.id}>
+                        {customer.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Input
+                    onChange={(event) =>
+                      setInvoiceDraft((draft) => ({ ...draft, invoiceNumber: event.target.value }))
+                    }
+                    placeholder="Invoice number"
+                    value={invoiceDraft.invoiceNumber}
+                  />
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <Input
+                      onChange={(event) =>
+                        setInvoiceDraft((draft) => ({ ...draft, dueDate: event.target.value }))
+                      }
+                      type="date"
+                      value={invoiceDraft.dueDate}
+                    />
+                    <Input
+                      onChange={(event) =>
+                        setInvoiceDraft((draft) => ({ ...draft, quantity: event.target.value }))
+                      }
+                      placeholder="Qty"
+                      value={invoiceDraft.quantity}
+                    />
+                    <Input
+                      onChange={(event) =>
+                        setInvoiceDraft((draft) => ({
+                          ...draft,
+                          discountRate: event.target.value,
+                        }))
+                      }
+                      placeholder="Discount %"
+                      value={invoiceDraft.discountRate}
+                    />
+                  </div>
+                  <select
+                    className="h-9 rounded-none border bg-background px-2 text-sm"
+                    onChange={(event) =>
+                      setInvoiceDraft((draft) => ({ ...draft, productId: event.target.value }))
+                    }
+                    value={invoiceDraft.productId}
+                  >
+                    <option value="">Select product/service</option>
+                    {billing.data?.products.map((product) => (
+                      <option key={product.id} value={product.id}>
+                        {product.name} · {formatMoney(product.unitPrice)}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    disabled={
+                      createDraftInvoiceMutation.isPending ||
+                      updateDraftInvoiceMutation.isPending ||
+                      !transactionReview.data.teamId ||
+                      !invoiceDraft.customerId ||
+                      !invoiceDraft.invoiceNumber.trim() ||
+                      !invoiceDraft.productId
+                    }
+                    onClick={() => {
+                      const product = billing.data?.products.find(
+                        (item) => item.id === invoiceDraft.productId,
+                      );
+
+                      if (!product) {
+                        return;
+                      }
+
+                      const payload = {
+                        teamId: transactionReview.data.teamId,
+                        customerId: invoiceDraft.customerId,
+                        invoiceNumber: invoiceDraft.invoiceNumber,
+                        issueDate: new Date().toISOString(),
+                        dueDate: invoiceDraft.dueDate
+                          ? new Date(`${invoiceDraft.dueDate}T00:00:00.000Z`).toISOString()
+                          : null,
+                        currency: product.unitPrice.currency,
+                        discountBasisPoints: parsePercentToBasisPoints(invoiceDraft.discountRate),
+                        lines: [
+                          {
+                            productId: product.id,
+                            description: product.name,
+                            quantityMilli: parseQuantityToMilli(invoiceDraft.quantity),
+                            unitPrice: product.unitPrice,
+                            taxRateBasisPoints: product.defaultTaxRateBasisPoints,
+                          },
+                        ],
+                        idempotencyKey: crypto.randomUUID(),
+                      };
+
+                      if (invoiceDraft.invoiceId) {
+                        updateDraftInvoiceMutation.mutate({
+                          ...payload,
+                          invoiceId: invoiceDraft.invoiceId,
+                        });
+                      } else {
+                        createDraftInvoiceMutation.mutate(payload);
+                      }
+                    }}
+                    size="sm"
+                  >
+                    {invoiceDraft.invoiceId ? "Update draft" : "Create draft"}
+                  </Button>
+                </div>
+              </div>
+
+              <div className="grid gap-3 text-sm md:grid-cols-3">
+                <p>
+                  <span className="font-medium">{billing.data?.customers.length ?? 0}</span>{" "}
+                  customers
+                </p>
+                <p>
+                  <span className="font-medium">{billing.data?.products.length ?? 0}</span>{" "}
+                  products/services
+                </p>
+                <p>
+                  <span className="font-medium">{billing.data?.draftInvoices.length ?? 0}</span>{" "}
+                  draft invoices
+                </p>
+              </div>
+              {createCustomerMutation.error ? (
+                <p className="text-sm text-destructive">{createCustomerMutation.error.message}</p>
+              ) : null}
+              {createProductMutation.error ? (
+                <p className="text-sm text-destructive">{createProductMutation.error.message}</p>
+              ) : null}
+              {createDraftInvoiceMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {createDraftInvoiceMutation.error.message}
+                </p>
+              ) : null}
+              {updateDraftInvoiceMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {updateDraftInvoiceMutation.error.message}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>CSV transaction import</CardTitle>
           <CardDescription>
             Imported rows use the same ledger normalization, duplicate detection, audit, and outbox
@@ -1333,6 +1743,62 @@ function isTransactionSyncRecord(transaction: {
 
 function formatMatchScore(score: number) {
   return `${Math.round(score * 100)}%`;
+}
+
+function parseMoneyInputToMinor(value: string) {
+  const normalized = value.trim();
+  const match = /^(\d+)(?:\.(\d{0,2}))?$/.exec(normalized);
+
+  if (!match) {
+    throw new Error("Money amount is invalid");
+  }
+
+  return (
+    Number.parseInt(match[1] ?? "0", 10) * 100 +
+    Number.parseInt((match[2] ?? "").padEnd(2, "0"), 10)
+  );
+}
+
+function parseQuantityToMilli(value: string) {
+  const normalized = value.trim();
+  const match = /^(\d+)(?:\.(\d{0,3}))?$/.exec(normalized);
+
+  if (!match) {
+    throw new Error("Quantity is invalid");
+  }
+
+  return (
+    Number.parseInt(match[1] ?? "0", 10) * 1_000 +
+    Number.parseInt((match[2] ?? "").padEnd(3, "0"), 10)
+  );
+}
+
+function parsePercentToBasisPoints(value: string) {
+  const normalized = value.trim() || "0";
+  const match = /^(\d+)(?:\.(\d{0,2}))?$/.exec(normalized);
+
+  if (!match) {
+    throw new Error("Percentage is invalid");
+  }
+
+  return (
+    Number.parseInt(match[1] ?? "0", 10) * 100 +
+    Number.parseInt((match[2] ?? "").padEnd(2, "0"), 10)
+  );
+}
+
+function formatQuantityMilli(quantityMilli: number) {
+  const whole = Math.trunc(quantityMilli / 1_000);
+  const fraction = `${quantityMilli % 1_000}`.padStart(3, "0").replace(/0+$/, "");
+
+  return fraction ? `${whole}.${fraction}` : `${whole}`;
+}
+
+function formatBasisPoints(basisPoints: number) {
+  const whole = Math.trunc(basisPoints / 100);
+  const fraction = `${basisPoints % 100}`.padStart(2, "0").replace(/0+$/, "");
+
+  return fraction ? `${whole}.${fraction}` : `${whole}`;
 }
 
 function errorMessage(error: unknown) {

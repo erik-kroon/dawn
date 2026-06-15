@@ -3,8 +3,13 @@ import { call } from "@orpc/server";
 import type {
   Actor,
   Category,
+  Customer,
+  CustomerContact,
+  InvoiceDraft,
+  InvoiceLineDraft,
   LedgerAccount,
   LedgerTransactionDraft,
+  Product,
   TeamInvite,
   TeamMember,
   TeamMembership,
@@ -41,6 +46,8 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   bankAccounts = new Map<string, BankAccount>();
   bankConnections = new Map<string, BankConnection>();
   categories = new Map<string, Category>();
+  customers = new Map<string, Customer>();
+  customerContacts = new Map<string, CustomerContact>();
   documents = new Map<string, BusinessDocument>();
   documentVersions = new Map<string, BusinessDocumentVersion>();
   extractions = new Map<string, DocumentExtraction>();
@@ -51,6 +58,8 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   importSessions: TransactionImportSession[] = [];
   invites = new Map<string, TeamInvite>();
   matchSuggestions = new Map<string, InboxTransactionMatchSuggestion>();
+  products = new Map<string, Product>();
+  invoices = new Map<string, InvoiceDraft>();
   aliases: TeamAlias[] = [];
   hardNegatives: HardNegativeTransactionMatch[] = [];
   attachments: { transactionId: string; documentId: string }[] = [];
@@ -807,6 +816,198 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return rejected;
   }
 
+  async listCustomers(teamId: string) {
+    return [...this.customers.values()].filter((customer) => customer.teamId === teamId);
+  }
+
+  async listCustomerContacts(teamId: string) {
+    return [...this.customerContacts.values()].filter((contact) => contact.teamId === teamId);
+  }
+
+  async listProducts(teamId: string) {
+    return [...this.products.values()].filter((product) => product.teamId === teamId);
+  }
+
+  async listDraftInvoices(teamId: string) {
+    return [...this.invoices.values()].filter(
+      (invoice) => invoice.teamId === teamId && invoice.status === "draft",
+    );
+  }
+
+  async getCustomerForTeam(teamId: string, customerId: string) {
+    const customer = this.customers.get(customerId);
+    return customer?.teamId === teamId ? customer : null;
+  }
+
+  async getProductForTeam(teamId: string, productId: string) {
+    const product = this.products.get(productId);
+    return product?.teamId === teamId ? product : null;
+  }
+
+  async getInvoiceForTeam(teamId: string, invoiceId: string) {
+    const invoice = this.invoices.get(invoiceId);
+    return invoice?.teamId === teamId ? invoice : null;
+  }
+
+  async createCustomer(input: {
+    customerId: string;
+    contactId?: string | null;
+    teamId: string;
+    name: string;
+    email?: string | null;
+    billingAddress?: string | null;
+    contactName?: string | null;
+    contactEmail?: string | null;
+    contactRole?: string | null;
+    createdByActorId: string;
+  }) {
+    const now = "2026-06-15T10:00:00.000Z";
+    const customer: Customer = {
+      id: input.customerId,
+      teamId: input.teamId,
+      name: input.name,
+      email: input.email ?? null,
+      billingAddress: input.billingAddress ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const contact =
+      input.contactId && input.contactName && input.contactEmail
+        ? {
+            id: input.contactId,
+            teamId: input.teamId,
+            customerId: input.customerId,
+            name: input.contactName,
+            email: input.contactEmail,
+            role: input.contactRole ?? null,
+            createdAt: now,
+          }
+        : null;
+    this.customers.set(customer.id, customer);
+
+    if (contact) {
+      this.customerContacts.set(contact.id, contact);
+    }
+
+    return { customer, contact };
+  }
+
+  async createProduct(input: {
+    productId: string;
+    teamId: string;
+    name: string;
+    type: Product["type"];
+    description?: string | null;
+    unitPrice: Product["unitPrice"];
+    defaultTaxRateBasisPoints: number;
+  }) {
+    const now = "2026-06-15T10:00:00.000Z";
+    const product: Product = {
+      id: input.productId,
+      teamId: input.teamId,
+      name: input.name,
+      type: input.type,
+      description: input.description ?? null,
+      unitPrice: input.unitPrice,
+      defaultTaxRateBasisPoints: input.defaultTaxRateBasisPoints,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.products.set(product.id, product);
+    return product;
+  }
+
+  async createDraftInvoice(input: {
+    invoiceId: string;
+    teamId: string;
+    customerId: string;
+    invoiceNumber: string;
+    issueDate: string;
+    dueDate?: string | null;
+    currency: string;
+    discountBasisPoints: number;
+    notes?: string | null;
+    lines: InvoiceLineDraft[];
+    createdByActorId: string;
+  }) {
+    const invoice = this.invoiceFromInput(input.invoiceId, input, input.createdByActorId);
+    this.invoices.set(invoice.id, invoice);
+    return invoice;
+  }
+
+  async updateDraftInvoice(input: {
+    teamId: string;
+    invoiceId: string;
+    customerId: string;
+    invoiceNumber: string;
+    issueDate: string;
+    dueDate?: string | null;
+    currency: string;
+    discountBasisPoints: number;
+    notes?: string | null;
+    lines: InvoiceLineDraft[];
+  }) {
+    const existing = this.invoices.get(input.invoiceId);
+    const invoice = this.invoiceFromInput(
+      input.invoiceId,
+      input,
+      existing?.createdByActorId ?? "user_1",
+    );
+    this.invoices.set(invoice.id, invoice);
+    return invoice;
+  }
+
+  private invoiceFromInput(
+    invoiceId: string,
+    input: {
+      teamId: string;
+      customerId: string;
+      invoiceNumber: string;
+      issueDate: string;
+      dueDate?: string | null;
+      currency: string;
+      discountBasisPoints: number;
+      notes?: string | null;
+      lines: InvoiceLineDraft[];
+    },
+    createdByActorId: string,
+  ): InvoiceDraft {
+    const calculated = calculateFixtureInvoiceTotals({
+      currency: input.currency,
+      discountBasisPoints: input.discountBasisPoints,
+      lines: input.lines,
+    });
+
+    return {
+      id: invoiceId,
+      teamId: input.teamId,
+      customerId: input.customerId,
+      invoiceNumber: input.invoiceNumber,
+      status: "draft",
+      issueDate: input.issueDate,
+      dueDate: input.dueDate ?? null,
+      currency: input.currency,
+      discountBasisPoints: input.discountBasisPoints,
+      notes: input.notes ?? null,
+      lines: input.lines.map((line, index) => ({
+        id: `line_${index + 1}`,
+        invoiceId,
+        productId: line.productId ?? null,
+        description: line.description,
+        quantityMilli: line.quantityMilli,
+        unitPrice: line.unitPrice,
+        discountBasisPoints: line.discountBasisPoints ?? 0,
+        taxRateBasisPoints: line.taxRateBasisPoints ?? 0,
+        sortOrder: index,
+        totals: calculated.lines[index]!,
+      })),
+      totals: calculated.totals,
+      createdByActorId,
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+    };
+  }
+
   async createTeamInvite(input: {
     teamId: string;
     email: string;
@@ -893,6 +1094,53 @@ class MemoryTransactionReviewRepository implements DawnRepository {
       role: input.role,
     };
   }
+}
+
+function calculateFixtureInvoiceTotals(input: {
+  currency: string;
+  discountBasisPoints: number;
+  lines: InvoiceLineDraft[];
+}) {
+  const lineSubtotals = input.lines.map((line) =>
+    Math.round((line.unitPrice.amountMinor * line.quantityMilli) / 1_000),
+  );
+  const subtotalMinor = lineSubtotals.reduce((total, value) => total + value, 0);
+  const invoiceDiscountMinor = Math.round((subtotalMinor * input.discountBasisPoints) / 10_000);
+  let allocatedDiscount = 0;
+  const lines = input.lines.map((line, index) => {
+    const subtotal = lineSubtotals[index] ?? 0;
+    const discount =
+      index === input.lines.length - 1
+        ? invoiceDiscountMinor - allocatedDiscount
+        : subtotalMinor === 0
+          ? 0
+          : Math.round((subtotal * invoiceDiscountMinor) / subtotalMinor);
+    allocatedDiscount += discount;
+    const taxable = subtotal - discount;
+    const tax = Math.round((taxable * (line.taxRateBasisPoints ?? 0)) / 10_000);
+
+    return {
+      subtotal: { amountMinor: subtotal, currency: input.currency },
+      discount: { amountMinor: discount, currency: input.currency },
+      tax: { amountMinor: tax, currency: input.currency },
+      total: { amountMinor: taxable + tax, currency: input.currency },
+    };
+  });
+  const discountMinor = lines.reduce((total, line) => total + line.discount.amountMinor, 0);
+  const taxMinor = lines.reduce((total, line) => total + line.tax.amountMinor, 0);
+
+  return {
+    lines,
+    totals: {
+      subtotal: { amountMinor: subtotalMinor, currency: input.currency },
+      discount: { amountMinor: discountMinor, currency: input.currency },
+      tax: { amountMinor: taxMinor, currency: input.currency },
+      total: {
+        amountMinor: subtotalMinor - discountMinor + taxMinor,
+        currency: input.currency,
+      },
+    },
+  };
 }
 
 function testContext(user?: { id: string; email: string }) {
@@ -1208,6 +1456,97 @@ describe("appRouter", () => {
     expect(repository.importSessions).toHaveLength(1);
     expect(repository.auditEvents).toHaveLength(1);
     expect(repository.outboxEvents).toHaveLength(1);
+  });
+
+  test("creates customers, products, and draft invoices through protected billing routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+
+    const customer = await call(
+      router.billing.createCustomer,
+      {
+        teamId: "team_1",
+        name: "Acme Co",
+        email: "billing@acme.test",
+        contactName: "Ada Buyer",
+        contactEmail: "ada@acme.test",
+        idempotencyKey: "customer_1",
+      },
+      context,
+    );
+    const product = await call(
+      router.billing.createProduct,
+      {
+        teamId: "team_1",
+        name: "Implementation",
+        type: "service",
+        unitPrice: { amountMinor: 50_00, currency: "USD" },
+        defaultTaxRateBasisPoints: 2_500,
+        idempotencyKey: "product_1",
+      },
+      context,
+    );
+    const invoice = await call(
+      router.billing.createDraftInvoice,
+      {
+        teamId: "team_1",
+        customerId: customer.customer.id,
+        invoiceNumber: "INV-001",
+        issueDate: "2026-06-15T00:00:00.000Z",
+        dueDate: "2026-07-15T00:00:00.000Z",
+        currency: "USD",
+        discountBasisPoints: 0,
+        lines: [
+          {
+            productId: product.product.id,
+            description: "Implementation",
+            quantityMilli: 2_000,
+            unitPrice: { amountMinor: 50_00, currency: "USD" },
+            taxRateBasisPoints: 2_500,
+          },
+        ],
+        idempotencyKey: "invoice_1",
+      },
+      context,
+    );
+    const updated = await call(
+      router.billing.updateDraftInvoice,
+      {
+        teamId: "team_1",
+        invoiceId: invoice.invoice.id,
+        customerId: customer.customer.id,
+        invoiceNumber: "INV-001",
+        issueDate: "2026-06-15T00:00:00.000Z",
+        dueDate: "2026-07-15T00:00:00.000Z",
+        currency: "USD",
+        discountBasisPoints: 1_000,
+        lines: [
+          {
+            productId: product.product.id,
+            description: "Implementation",
+            quantityMilli: 2_000,
+            unitPrice: { amountMinor: 50_00, currency: "USD" },
+            taxRateBasisPoints: 2_500,
+          },
+        ],
+        idempotencyKey: "invoice_update_1",
+      },
+      context,
+    );
+    const list = await call(router.billing.list, { teamId: "team_1" }, context);
+
+    expect(customer.contact).toMatchObject({ email: "ada@acme.test" });
+    expect(product.product.defaultTaxRateBasisPoints).toBe(2_500);
+    expect(invoice.invoice.totals.total).toEqual({ amountMinor: 125_00, currency: "USD" });
+    expect(updated.invoice.totals.total).toEqual({ amountMinor: 112_50, currency: "USD" });
+    expect(list.customers).toHaveLength(1);
+    expect(list.products).toHaveLength(1);
+    expect(list.draftInvoices).toHaveLength(1);
+    expect(repository.auditEvents).toHaveLength(4);
+    expect(repository.outboxEvents).toHaveLength(4);
   });
 
   test("creates and signs document uploads and downloads through protected routes", async () => {

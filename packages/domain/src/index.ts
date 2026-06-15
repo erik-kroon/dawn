@@ -185,6 +185,102 @@ export type TransactionReviewChange = {
   };
 };
 
+export type Customer = {
+  id: string;
+  teamId: string;
+  name: string;
+  email?: string | null;
+  billingAddress?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+export type CustomerContact = {
+  id: string;
+  teamId: string;
+  customerId: string;
+  name: string;
+  email: string;
+  role?: string | null;
+  createdAt?: string | null;
+};
+
+export type ProductType = "product" | "service";
+
+export type Product = {
+  id: string;
+  teamId: string;
+  name: string;
+  type: ProductType;
+  description?: string | null;
+  unitPrice: Money;
+  defaultTaxRateBasisPoints: number;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+export type InvoiceStatus = "draft" | "scheduled" | "sent" | "viewed" | "paid" | "overdue" | "void";
+
+export type InvoiceLineDraft = {
+  productId?: string | null;
+  description: string;
+  quantityMilli: number;
+  unitPrice: Money;
+  discountBasisPoints?: number | null;
+  taxRateBasisPoints?: number | null;
+};
+
+export type InvoiceLine = InvoiceLineDraft & {
+  id: string;
+  invoiceId: string;
+  sortOrder: number;
+  totals: InvoiceLineTotals;
+};
+
+export type InvoiceLineTotals = {
+  subtotal: Money;
+  discount: Money;
+  tax: Money;
+  total: Money;
+};
+
+export type InvoiceTotals = {
+  subtotal: Money;
+  discount: Money;
+  tax: Money;
+  total: Money;
+};
+
+export type InvoiceDraft = {
+  id: string;
+  teamId: string;
+  customerId: string;
+  invoiceNumber: string;
+  status: InvoiceStatus;
+  issueDate: string;
+  dueDate?: string | null;
+  currency: string;
+  discountBasisPoints: number;
+  notes?: string | null;
+  lines: InvoiceLine[];
+  totals: InvoiceTotals;
+  createdByActorId: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+export type InvoiceDraftInput = {
+  teamId: string;
+  customerId: string;
+  invoiceNumber: string;
+  issueDate: string;
+  dueDate?: string | null;
+  currency: string;
+  discountBasisPoints?: number | null;
+  notes?: string | null;
+  lines: readonly InvoiceLineDraft[];
+};
+
 export type InboxMatchInput = {
   inboxItemId: string;
   documentId: string;
@@ -338,6 +434,199 @@ export function applyTransactionReview(
       nextReviewState,
     },
   };
+}
+
+export function calculateInvoiceTotals(input: {
+  currency: string;
+  discountBasisPoints?: number | null;
+  lines: readonly InvoiceLineDraft[];
+}): { lines: InvoiceLineTotals[]; totals: InvoiceTotals } {
+  assertCurrencyCode(input.currency);
+  assertBasisPoints(input.discountBasisPoints ?? 0, "Invoice discount");
+
+  if (input.lines.length === 0) {
+    throw new Error("Invoice requires at least one line");
+  }
+
+  const normalizedLines = input.lines.map((line) =>
+    normalizeInvoiceLineDraft(line, input.currency),
+  );
+  const subtotalMinor = normalizedLines.reduce(
+    (total, line) =>
+      total + multiplyMinorByQuantity(line.unitPrice.amountMinor, line.quantityMilli),
+    0,
+  );
+  const lineDiscountMinor = normalizedLines.reduce(
+    (total, line) =>
+      total +
+      roundBasisPoints(
+        multiplyMinorByQuantity(line.unitPrice.amountMinor, line.quantityMilli),
+        line.discountBasisPoints ?? 0,
+      ),
+    0,
+  );
+  const subtotalAfterLineDiscount = subtotalMinor - lineDiscountMinor;
+  const invoiceDiscountMinor = roundBasisPoints(
+    subtotalAfterLineDiscount,
+    input.discountBasisPoints ?? 0,
+  );
+  let allocatedInvoiceDiscountMinor = 0;
+
+  const lineTotals = normalizedLines.map((line, index) => {
+    const lineSubtotalMinor = multiplyMinorByQuantity(
+      line.unitPrice.amountMinor,
+      line.quantityMilli,
+    );
+    const lineDiscountMinor = roundBasisPoints(lineSubtotalMinor, line.discountBasisPoints ?? 0);
+    const lineNetMinor = lineSubtotalMinor - lineDiscountMinor;
+    const invoiceDiscountShareMinor =
+      index === normalizedLines.length - 1
+        ? invoiceDiscountMinor - allocatedInvoiceDiscountMinor
+        : subtotalAfterLineDiscount === 0
+          ? 0
+          : roundRatio(lineNetMinor, invoiceDiscountMinor, subtotalAfterLineDiscount);
+    allocatedInvoiceDiscountMinor += invoiceDiscountShareMinor;
+    const taxableBaseMinor = lineNetMinor - invoiceDiscountShareMinor;
+    const taxMinor = roundBasisPoints(taxableBaseMinor, line.taxRateBasisPoints ?? 0);
+    const discountMinor = lineDiscountMinor + invoiceDiscountShareMinor;
+
+    return {
+      subtotal: { amountMinor: lineSubtotalMinor, currency: input.currency },
+      discount: { amountMinor: discountMinor, currency: input.currency },
+      tax: { amountMinor: taxMinor, currency: input.currency },
+      total: {
+        amountMinor: taxableBaseMinor + taxMinor,
+        currency: input.currency,
+      },
+    };
+  });
+  const discountMinor = lineDiscountMinor + invoiceDiscountMinor;
+  const taxMinor = lineTotals.reduce((total, line) => total + line.tax.amountMinor, 0);
+  const totalMinor = subtotalMinor - discountMinor + taxMinor;
+
+  return {
+    lines: lineTotals,
+    totals: {
+      subtotal: { amountMinor: subtotalMinor, currency: input.currency },
+      discount: { amountMinor: discountMinor, currency: input.currency },
+      tax: { amountMinor: taxMinor, currency: input.currency },
+      total: { amountMinor: totalMinor, currency: input.currency },
+    },
+  };
+}
+
+export function assertInvoiceDraftInput(input: InvoiceDraftInput): void {
+  if (!input.teamId.trim()) {
+    throw new Error("Invoice team is required");
+  }
+
+  if (!input.customerId.trim()) {
+    throw new Error("Invoice customer is required");
+  }
+
+  if (!input.invoiceNumber.trim()) {
+    throw new Error("Invoice number is required");
+  }
+
+  const issueDate = new Date(input.issueDate);
+
+  if (Number.isNaN(issueDate.getTime())) {
+    throw new Error("Invoice issue date is invalid");
+  }
+
+  if (input.dueDate) {
+    const dueDate = new Date(input.dueDate);
+
+    if (Number.isNaN(dueDate.getTime())) {
+      throw new Error("Invoice due date is invalid");
+    }
+
+    if (dueDate.getTime() < issueDate.getTime()) {
+      throw new Error("Invoice due date cannot be before issue date");
+    }
+  }
+
+  calculateInvoiceTotals({
+    currency: input.currency,
+    discountBasisPoints: input.discountBasisPoints ?? 0,
+    lines: input.lines,
+  });
+}
+
+export function assertCanEditInvoiceDraft(invoice: { status: InvoiceStatus }): void {
+  if (invoice.status !== "draft") {
+    throw new Error("Only draft invoices can be edited");
+  }
+}
+
+function normalizeInvoiceLineDraft(
+  line: InvoiceLineDraft,
+  currency: string,
+): Required<InvoiceLineDraft> {
+  if (!line.description.trim()) {
+    throw new Error("Invoice line description is required");
+  }
+
+  if (!Number.isInteger(line.quantityMilli) || line.quantityMilli <= 0) {
+    throw new Error("Invoice line quantity must be positive");
+  }
+
+  assertValidMoney(line.unitPrice);
+
+  if (line.unitPrice.amountMinor < 0) {
+    throw new Error("Invoice line unit price cannot be negative");
+  }
+
+  if (line.unitPrice.currency !== currency) {
+    throw new Error("Invoice line currency must match invoice currency");
+  }
+
+  assertBasisPoints(line.discountBasisPoints ?? 0, "Invoice line discount");
+  assertBasisPoints(line.taxRateBasisPoints ?? 0, "Invoice line tax rate");
+
+  return {
+    productId: line.productId ?? null,
+    description: line.description.trim(),
+    quantityMilli: line.quantityMilli,
+    unitPrice: line.unitPrice,
+    discountBasisPoints: line.discountBasisPoints ?? 0,
+    taxRateBasisPoints: line.taxRateBasisPoints ?? 0,
+  };
+}
+
+function multiplyMinorByQuantity(amountMinor: number, quantityMilli: number) {
+  const product = BigInt(amountMinor) * BigInt(quantityMilli);
+  const quotient = product / 1_000n;
+  const remainder = product % 1_000n;
+  const rounded = quotient + (remainder >= 500n ? 1n : 0n);
+
+  return Number(rounded);
+}
+
+function roundBasisPoints(amountMinor: number, basisPoints: number) {
+  return roundRatio(amountMinor, basisPoints, 10_000);
+}
+
+function roundRatio(amountMinor: number, numerator: number, denominator: number) {
+  const product = BigInt(amountMinor) * BigInt(numerator);
+  const divisor = BigInt(denominator);
+  const quotient = product / divisor;
+  const remainder = product % divisor;
+  const rounded = quotient + (remainder * 2n >= divisor ? 1n : 0n);
+
+  return Number(rounded);
+}
+
+function assertBasisPoints(value: number, label: string) {
+  if (!Number.isInteger(value) || value < 0 || value > 10_000) {
+    throw new Error(`${label} basis points must be between 0 and 10000`);
+  }
+}
+
+function assertCurrencyCode(currency: string) {
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    throw new Error("Invoice currency must be an ISO 4217 code");
+  }
 }
 
 export function suggestInboxTransactionMatches(

@@ -2,6 +2,11 @@ import type {
   Actor,
   Category,
   CsvTransactionColumnMapping,
+  Customer,
+  CustomerContact,
+  InvoiceDraft,
+  InvoiceDraftInput,
+  InvoiceLineDraft,
   LedgerAccount,
   LedgerTransactionDraft,
   Money,
@@ -14,6 +19,8 @@ import type {
   TeamMembership,
   TeamRole,
   Transaction,
+  Product,
+  ProductType,
   InboxMatchConfidence,
   InboxMatchSuggestion,
 } from "@dawn/domain";
@@ -28,6 +35,8 @@ import type { DawnQueueMessage, OutboxEventForJob } from "@dawn/jobs";
 import type { TransactionSyncResponse } from "@dawn/sync";
 import {
   applyTransactionReview,
+  assertCanEditInvoiceDraft,
+  assertInvoiceDraftInput,
   assertLedgerTransactionDraft,
   createReportTotals,
   csvRowToLedgerDraft,
@@ -474,6 +483,70 @@ export type SyncBankConnectionResult = {
   replayed: boolean;
 };
 
+export type BillingWorkspace = {
+  teamId: string;
+  customers: Customer[];
+  contacts: CustomerContact[];
+  products: Product[];
+  draftInvoices: InvoiceDraft[];
+};
+
+export type CreateCustomerCommand = {
+  teamId: string;
+  name: string;
+  email?: string | null;
+  billingAddress?: string | null;
+  contactName?: string | null;
+  contactEmail?: string | null;
+  contactRole?: string | null;
+  idempotencyKey: string;
+};
+
+export type CreateCustomerResult = {
+  customer: Customer;
+  contact?: CustomerContact | null;
+  replayed: boolean;
+};
+
+export type CreateProductCommand = {
+  teamId: string;
+  name: string;
+  type: ProductType;
+  description?: string | null;
+  unitPrice: Money;
+  defaultTaxRateBasisPoints?: number | null;
+  idempotencyKey: string;
+};
+
+export type CreateProductResult = {
+  product: Product;
+  replayed: boolean;
+};
+
+export type CreateDraftInvoiceCommand = InvoiceDraftInput & {
+  idempotencyKey: string;
+};
+
+export type CreateDraftInvoiceResult = {
+  invoice: InvoiceDraft;
+  replayed: boolean;
+};
+
+export type UpdateDraftInvoiceCommand = InvoiceDraftInput & {
+  invoiceId: string;
+  idempotencyKey: string;
+};
+
+export type UpdateDraftInvoiceResult = {
+  invoice: InvoiceDraft;
+  replayed: boolean;
+};
+
+type NormalizedInvoiceDraftInput = Omit<InvoiceDraftInput, "discountBasisPoints" | "lines"> & {
+  discountBasisPoints: number;
+  lines: InvoiceLineDraft[];
+};
+
 export type CreateDocumentUploadCommand = {
   teamId: string;
   fileName: string;
@@ -733,7 +806,67 @@ export type InboxRepository = {
   }): Promise<InboxTransactionMatchSuggestion>;
 };
 
-export type DawnRepository = BankingUseCaseRepository & DocumentRepository & InboxRepository;
+export type BillingRepository = {
+  listCustomers(teamId: string): Promise<Customer[]>;
+  listCustomerContacts(teamId: string): Promise<CustomerContact[]>;
+  listProducts(teamId: string): Promise<Product[]>;
+  listDraftInvoices(teamId: string): Promise<InvoiceDraft[]>;
+  getCustomerForTeam(teamId: string, customerId: string): Promise<Customer | null>;
+  getProductForTeam(teamId: string, productId: string): Promise<Product | null>;
+  getInvoiceForTeam(teamId: string, invoiceId: string): Promise<InvoiceDraft | null>;
+  createCustomer(input: {
+    customerId: string;
+    contactId?: string | null;
+    teamId: string;
+    name: string;
+    email?: string | null;
+    billingAddress?: string | null;
+    contactName?: string | null;
+    contactEmail?: string | null;
+    contactRole?: string | null;
+    createdByActorId: string;
+  }): Promise<{ customer: Customer; contact?: CustomerContact | null }>;
+  createProduct(input: {
+    productId: string;
+    teamId: string;
+    name: string;
+    type: ProductType;
+    description?: string | null;
+    unitPrice: Money;
+    defaultTaxRateBasisPoints: number;
+    createdByActorId: string;
+  }): Promise<Product>;
+  createDraftInvoice(input: {
+    invoiceId: string;
+    teamId: string;
+    customerId: string;
+    invoiceNumber: string;
+    issueDate: string;
+    dueDate?: string | null;
+    currency: string;
+    discountBasisPoints: number;
+    notes?: string | null;
+    lines: InvoiceLineDraft[];
+    createdByActorId: string;
+  }): Promise<InvoiceDraft>;
+  updateDraftInvoice(input: {
+    teamId: string;
+    invoiceId: string;
+    customerId: string;
+    invoiceNumber: string;
+    issueDate: string;
+    dueDate?: string | null;
+    currency: string;
+    discountBasisPoints: number;
+    notes?: string | null;
+    lines: InvoiceLineDraft[];
+  }): Promise<InvoiceDraft>;
+};
+
+export type DawnRepository = BankingUseCaseRepository &
+  DocumentRepository &
+  InboxRepository &
+  BillingRepository;
 
 export type OutboxDispatchRepository = {
   withTransaction<T>(callback: (repository: OutboxDispatchRepository) => Promise<T>): Promise<T>;
@@ -885,6 +1018,10 @@ const runDocumentExtractionOperation = "document.extraction.run";
 const correctDocumentExtractionOperation = "document.extraction.correct";
 const acceptInboxMatchOperation = "inbox.match.accept";
 const rejectInboxMatchOperation = "inbox.match.reject";
+const createCustomerOperation = "customer.create";
+const createProductOperation = "product.create";
+const createDraftInvoiceOperation = "invoice.draft.create";
+const updateDraftInvoiceOperation = "invoice.draft.update";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
@@ -2301,6 +2438,529 @@ export async function rejectInboxMatch(
 
     return finalResult;
   });
+}
+
+export async function listBillingWorkspace(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  input: { teamId?: string } = {},
+): Promise<BillingWorkspace> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: input.teamId ?? context.teamId },
+    "invoices.read",
+    "You cannot read billing data for this team",
+  );
+  const [customers, contacts, products, draftInvoices] = await Promise.all([
+    repository.listCustomers(access.teamId),
+    repository.listCustomerContacts(access.teamId),
+    repository.listProducts(access.teamId),
+    repository.listDraftInvoices(access.teamId),
+  ]);
+
+  return {
+    teamId: access.teamId,
+    customers,
+    contacts,
+    products,
+    draftInvoices,
+  };
+}
+
+export async function createCustomer(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: CreateCustomerCommand,
+): Promise<CreateCustomerResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const billingRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Customer not found");
+
+    await resolveTeamAccess(
+      billingRepository,
+      { ...context, teamId: command.teamId },
+      "invoices.write",
+      "You cannot create customers for this team",
+    );
+
+    const normalized = normalizeCreateCustomerCommand(command);
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await billingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createCustomerOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError("CONFLICT", "Idempotency key was already used for a different customer");
+      }
+
+      return { ...(replayed.result as CreateCustomerResult), replayed: true };
+    }
+
+    const result = await billingRepository.createCustomer({
+      customerId: crypto.randomUUID(),
+      contactId: normalized.contactEmail ? crypto.randomUUID() : null,
+      ...normalized,
+      createdByActorId: context.actor.id,
+    });
+
+    await billingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "customer.created",
+      entityType: "customer",
+      entityId: result.customer.id,
+      metadata: {
+        contactId: result.contact?.id ?? null,
+      },
+    });
+
+    await billingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "customer.created",
+      version: 1,
+      payload: {
+        customerId: result.customer.id,
+        contactId: result.contact?.id ?? null,
+      },
+    });
+
+    const finalResult = { ...result, replayed: false };
+
+    await billingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createCustomerOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result: finalResult,
+    });
+
+    return finalResult;
+  });
+}
+
+export async function createProduct(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: CreateProductCommand,
+): Promise<CreateProductResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const billingRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Product not found");
+
+    await resolveTeamAccess(
+      billingRepository,
+      { ...context, teamId: command.teamId },
+      "invoices.write",
+      "You cannot create products for this team",
+    );
+
+    const normalized = normalizeCreateProductCommand(command);
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await billingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createProductOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError("CONFLICT", "Idempotency key was already used for a different product");
+      }
+
+      return { ...(replayed.result as CreateProductResult), replayed: true };
+    }
+
+    const product = await billingRepository.createProduct({
+      productId: crypto.randomUUID(),
+      ...normalized,
+      createdByActorId: context.actor.id,
+    });
+
+    await billingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "product.created",
+      entityType: "product",
+      entityId: product.id,
+      metadata: {
+        type: product.type,
+        unitPrice: product.unitPrice,
+      },
+    });
+
+    await billingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "product.created",
+      version: 1,
+      payload: {
+        productId: product.id,
+      },
+    });
+
+    const result = { product, replayed: false };
+
+    await billingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createProductOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function createDraftInvoice(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: CreateDraftInvoiceCommand,
+): Promise<CreateDraftInvoiceResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const billingRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Invoice not found");
+
+    await resolveTeamAccess(
+      billingRepository,
+      { ...context, teamId: command.teamId },
+      "invoices.write",
+      "You cannot create invoice drafts for this team",
+    );
+
+    const normalized = normalizeInvoiceDraftInput(command);
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await billingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createDraftInvoiceOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different invoice draft",
+        );
+      }
+
+      return { ...(replayed.result as CreateDraftInvoiceResult), replayed: true };
+    }
+
+    await assertInvoiceReferencesExist(billingRepository, normalized);
+    assertInvoiceDraftInput(normalized);
+
+    const invoice = await billingRepository.createDraftInvoice({
+      invoiceId: crypto.randomUUID(),
+      ...normalized,
+      createdByActorId: context.actor.id,
+    });
+
+    await billingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "invoice_draft.created",
+      entityType: "invoice",
+      entityId: invoice.id,
+      metadata: {
+        customerId: invoice.customerId,
+        invoiceNumber: invoice.invoiceNumber,
+        total: invoice.totals.total,
+      },
+    });
+
+    await billingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "invoice_draft.created",
+      version: 1,
+      payload: {
+        invoiceId: invoice.id,
+        customerId: invoice.customerId,
+        total: invoice.totals.total,
+      },
+    });
+
+    const result = { invoice, replayed: false };
+
+    await billingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createDraftInvoiceOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function updateDraftInvoice(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: UpdateDraftInvoiceCommand,
+): Promise<UpdateDraftInvoiceResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const billingRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Invoice not found");
+
+    await resolveTeamAccess(
+      billingRepository,
+      { ...context, teamId: command.teamId },
+      "invoices.write",
+      "You cannot edit invoice drafts for this team",
+    );
+
+    const normalized = normalizeInvoiceDraftInput(command);
+    const fingerprint = JSON.stringify({
+      invoiceId: command.invoiceId,
+      ...normalized,
+    });
+    const replayed = await billingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      updateDraftInvoiceOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different invoice draft update",
+        );
+      }
+
+      return { ...(replayed.result as UpdateDraftInvoiceResult), replayed: true };
+    }
+
+    const existing = await billingRepository.getInvoiceForTeam(command.teamId, command.invoiceId);
+
+    if (!existing) {
+      throw new AppError("NOT_FOUND", "Invoice not found");
+    }
+
+    try {
+      assertCanEditInvoiceDraft(existing);
+    } catch (error) {
+      throw new AppError("CONFLICT", errorMessage(error));
+    }
+
+    await assertInvoiceReferencesExist(billingRepository, normalized);
+    assertInvoiceDraftInput(normalized);
+
+    const invoice = await billingRepository.updateDraftInvoice({
+      invoiceId: command.invoiceId,
+      ...normalized,
+    });
+
+    await billingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "invoice_draft.updated",
+      entityType: "invoice",
+      entityId: invoice.id,
+      metadata: {
+        customerId: invoice.customerId,
+        invoiceNumber: invoice.invoiceNumber,
+        total: invoice.totals.total,
+      },
+    });
+
+    await billingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "invoice_draft.updated",
+      version: 1,
+      payload: {
+        invoiceId: invoice.id,
+        customerId: invoice.customerId,
+        total: invoice.totals.total,
+      },
+    });
+
+    const result = { invoice, replayed: false };
+
+    await billingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: updateDraftInvoiceOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+function normalizeCreateCustomerCommand(command: CreateCustomerCommand) {
+  const name = command.name.trim();
+  const email = normalizeOptionalEmail(command.email);
+  const billingAddress = command.billingAddress?.trim() || null;
+  const contactName = command.contactName?.trim() || null;
+  const contactEmail = normalizeOptionalEmail(command.contactEmail);
+  const contactRole = command.contactRole?.trim() || null;
+
+  if (!name) {
+    throw new AppError("CONFLICT", "Customer name is required");
+  }
+
+  if ((contactName && !contactEmail) || (contactEmail && !contactName)) {
+    throw new AppError("CONFLICT", "Customer contact requires both name and email");
+  }
+
+  return {
+    teamId: command.teamId,
+    name,
+    email,
+    billingAddress,
+    contactName,
+    contactEmail,
+    contactRole,
+  };
+}
+
+function normalizeCreateProductCommand(command: CreateProductCommand) {
+  const name = command.name.trim();
+  const description = command.description?.trim() || null;
+  const defaultTaxRateBasisPoints = command.defaultTaxRateBasisPoints ?? 0;
+  const unitPrice = {
+    amountMinor: command.unitPrice.amountMinor,
+    currency: command.unitPrice.currency.trim().toUpperCase(),
+  };
+
+  if (!name) {
+    throw new AppError("CONFLICT", "Product name is required");
+  }
+
+  if (!["product", "service"].includes(command.type)) {
+    throw new AppError("CONFLICT", "Product type is invalid");
+  }
+
+  try {
+    assertInvoiceDraftInput({
+      teamId: command.teamId,
+      customerId: "customer_validation",
+      invoiceNumber: "validation",
+      issueDate: new Date(0).toISOString(),
+      currency: unitPrice.currency,
+      lines: [
+        {
+          description: name,
+          quantityMilli: 1_000,
+          unitPrice,
+          taxRateBasisPoints: defaultTaxRateBasisPoints,
+        },
+      ],
+    });
+  } catch (error) {
+    throw new AppError("CONFLICT", errorMessage(error));
+  }
+
+  return {
+    teamId: command.teamId,
+    name,
+    type: command.type,
+    description,
+    unitPrice,
+    defaultTaxRateBasisPoints,
+  };
+}
+
+function normalizeInvoiceDraftInput(
+  command: CreateDraftInvoiceCommand | UpdateDraftInvoiceCommand,
+): NormalizedInvoiceDraftInput {
+  const currency = command.currency.trim().toUpperCase();
+  const lines = command.lines.map((line) => ({
+    productId: line.productId?.trim() || null,
+    description: line.description.trim(),
+    quantityMilli: line.quantityMilli,
+    unitPrice: {
+      amountMinor: line.unitPrice.amountMinor,
+      currency: line.unitPrice.currency.trim().toUpperCase(),
+    },
+    discountBasisPoints: line.discountBasisPoints ?? 0,
+    taxRateBasisPoints: line.taxRateBasisPoints ?? 0,
+  }));
+  const normalized = {
+    teamId: command.teamId,
+    customerId: command.customerId.trim(),
+    invoiceNumber: command.invoiceNumber.trim(),
+    issueDate: new Date(command.issueDate).toISOString(),
+    dueDate: command.dueDate ? new Date(command.dueDate).toISOString() : null,
+    currency,
+    discountBasisPoints: command.discountBasisPoints ?? 0,
+    notes: command.notes?.trim() || null,
+    lines,
+  };
+
+  try {
+    assertInvoiceDraftInput(normalized);
+  } catch (error) {
+    throw new AppError("CONFLICT", errorMessage(error));
+  }
+
+  return normalized;
+}
+
+async function assertInvoiceReferencesExist(
+  repository: DawnRepository,
+  input: InvoiceDraftInput,
+): Promise<void> {
+  const customer = await repository.getCustomerForTeam(input.teamId, input.customerId);
+
+  if (!customer) {
+    throw new AppError("NOT_FOUND", "Customer not found");
+  }
+
+  for (const line of input.lines) {
+    if (!line.productId) {
+      continue;
+    }
+
+    const product = await repository.getProductForTeam(input.teamId, line.productId);
+
+    if (!product) {
+      throw new AppError("NOT_FOUND", "Product not found");
+    }
+  }
+}
+
+function normalizeOptionalEmail(email: string | null | undefined) {
+  const normalized = email?.trim().toLowerCase() || null;
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    throw new AppError("CONFLICT", "Email is invalid");
+  }
+
+  return normalized;
 }
 
 async function importProviderTransaction(input: {

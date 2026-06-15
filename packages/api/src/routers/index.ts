@@ -6,14 +6,18 @@ import {
   acceptTeamInvite,
   commitCsvTransactionImport,
   connectMockBankConnection,
+  createCustomer,
   createDocumentDownload,
   createDocumentUpload,
+  createDraftInvoice,
   createLedgerTransaction,
+  createProduct,
   createTeam,
   generateInboxMatchSuggestions,
   inviteTeamMember,
   correctDocumentExtraction,
   listBankConnections,
+  listBillingWorkspace,
   listDocuments,
   listInboxItems,
   listLedgerSummary,
@@ -28,6 +32,7 @@ import {
   type DawnRepository,
   type DocumentExtractionFields,
   type DocumentUrlSigner,
+  updateDraftInvoice,
   updateTeamMemberRole,
 } from "@dawn/app";
 import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
@@ -136,6 +141,53 @@ const rejectInboxMatchInput = z.object({
   suggestionId: z.string().min(1),
   reason: z.string().nullable().optional(),
   idempotencyKey: z.string().min(1),
+});
+
+const createCustomerInput = z.object({
+  teamId: z.string().min(1),
+  name: z.string().min(1),
+  email: z.string().nullable().optional(),
+  billingAddress: z.string().nullable().optional(),
+  contactName: z.string().nullable().optional(),
+  contactEmail: z.string().nullable().optional(),
+  contactRole: z.string().nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const createProductInput = z.object({
+  teamId: z.string().min(1),
+  name: z.string().min(1),
+  type: z.enum(["product", "service"]),
+  description: z.string().nullable().optional(),
+  unitPrice: moneyInput,
+  defaultTaxRateBasisPoints: z.number().int().min(0).max(10_000).nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const invoiceLineInput = z.object({
+  productId: z.string().min(1).nullable().optional(),
+  description: z.string().min(1),
+  quantityMilli: z.number().int().positive(),
+  unitPrice: moneyInput,
+  discountBasisPoints: z.number().int().min(0).max(10_000).nullable().optional(),
+  taxRateBasisPoints: z.number().int().min(0).max(10_000).nullable().optional(),
+});
+
+const createDraftInvoiceInput = z.object({
+  teamId: z.string().min(1),
+  customerId: z.string().min(1),
+  invoiceNumber: z.string().min(1),
+  issueDate: z.iso.datetime(),
+  dueDate: z.iso.datetime().nullable().optional(),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  discountBasisPoints: z.number().int().min(0).max(10_000).nullable().optional(),
+  notes: z.string().nullable().optional(),
+  lines: z.array(invoiceLineInput).min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const updateDraftInvoiceInput = createDraftInvoiceInput.extend({
+  invoiceId: z.string().min(1),
 });
 
 const createLedgerTransactionInput = z.object({
@@ -486,6 +538,120 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 teamId: input.teamId,
               },
               input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    billing: {
+      list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
+        try {
+          return await listBillingWorkspace(transactionReviewRepository, {
+            actor: { id: context.session.user.id, type: "user" },
+            requestId: context.requestId,
+            teamId: input?.teamId,
+          });
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+      createCustomer: protectedProcedure
+        .input(createCustomerInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createCustomer(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                email: input.email ?? null,
+                billingAddress: input.billingAddress ?? null,
+                contactName: input.contactName ?? null,
+                contactEmail: input.contactEmail ?? null,
+                contactRole: input.contactRole ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createProduct: protectedProcedure
+        .input(createProductInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createProduct(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                description: input.description ?? null,
+                defaultTaxRateBasisPoints: input.defaultTaxRateBasisPoints ?? 0,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createDraftInvoice: protectedProcedure
+        .input(createDraftInvoiceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createDraftInvoice(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                dueDate: input.dueDate ?? null,
+                discountBasisPoints: input.discountBasisPoints ?? 0,
+                notes: input.notes ?? null,
+                lines: input.lines.map((line) => ({
+                  ...line,
+                  productId: line.productId ?? null,
+                  discountBasisPoints: line.discountBasisPoints ?? 0,
+                  taxRateBasisPoints: line.taxRateBasisPoints ?? 0,
+                })),
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      updateDraftInvoice: protectedProcedure
+        .input(updateDraftInvoiceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await updateDraftInvoice(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                dueDate: input.dueDate ?? null,
+                discountBasisPoints: input.discountBasisPoints ?? 0,
+                notes: input.notes ?? null,
+                lines: input.lines.map((line) => ({
+                  ...line,
+                  productId: line.productId ?? null,
+                  discountBasisPoints: line.discountBasisPoints ?? 0,
+                  taxRateBasisPoints: line.taxRateBasisPoints ?? 0,
+                })),
+              },
             );
           } catch (error) {
             mapAppError(error);
