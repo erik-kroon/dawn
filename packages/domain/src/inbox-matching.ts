@@ -1,11 +1,23 @@
 import type { Transaction } from "./transactions";
 
 export type DocumentMatchFields = {
+  documentType?:
+    | "receipt"
+    | "invoice_received"
+    | "invoice_sent"
+    | "bank_statement"
+    | "contract"
+    | "tax_document"
+    | "other"
+    | null;
   merchantName?: string | null;
+  customerName?: string | null;
   issuedAt?: string | null;
+  dueAt?: string | null;
   invoiceNumber?: string | null;
   totalAmountMinor?: number | null;
   currency?: string | null;
+  taxAmountMinor?: number | null;
 };
 
 export type DocumentMatchSubject = {
@@ -40,6 +52,7 @@ export type MatchSignals = {
   documentText?: MatchSignal;
   alias?: MatchSignal;
   hardNegative?: MatchSignal;
+  risk?: MatchSignal;
 };
 
 export type MatchPolicy = {
@@ -107,6 +120,7 @@ export type InboxMatchSignalScores = {
   documentText?: number;
   alias?: number;
   hardNegative?: number;
+  risk?: number;
 };
 
 export type InboxMatchSuggestion = {
@@ -214,7 +228,9 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
   );
   const documentText = normalizeSearchText(candidate.document.documentText ?? "");
   const sender = normalizeSearchText(candidate.document.sender ?? "");
-  const senderDomain = normalizeSearchText(extractDomain(candidate.document.sender));
+  const extractedSenderDomain = extractDomain(candidate.document.sender);
+  const senderDomain = normalizeSearchText(extractedSenderDomain);
+  const senderDomainStem = normalizeSearchText(extractedSenderDomain.split(".")[0] ?? "");
   const merchantName = normalizeSearchText(candidate.document.fields.merchantName ?? "");
   const invoiceNumber = normalizeSearchText(candidate.document.fields.invoiceNumber ?? "");
   const inputCurrency = candidate.document.fields.currency?.trim().toUpperCase() ?? "";
@@ -223,22 +239,15 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
   const currencyMismatches =
     inputCurrency.length > 0 && transaction.money.currency.toUpperCase() !== inputCurrency;
 
-  if (candidate.document.fields.totalAmountMinor != null) {
-    if (
-      !currencyMismatches &&
-      Math.abs(transaction.money.amountMinor) ===
-        Math.abs(candidate.document.fields.totalAmountMinor)
-    ) {
-      addSignal(signals, explanation, "amount", {
-        score: 0.35,
-        matched: true,
-        reason: "Amount matches exactly",
-        evidence: {
-          documentAmountMinor: candidate.document.fields.totalAmountMinor,
-          transactionAmountMinor: transaction.money.amountMinor,
-        },
-      });
-    }
+  const amountSignal = amountMatchSignal({
+    documentAmountMinor: candidate.document.fields.totalAmountMinor,
+    documentTaxAmountMinor: candidate.document.fields.taxAmountMinor,
+    transactionAmountMinor: transaction.money.amountMinor,
+    currencyMismatches,
+  });
+
+  if (amountSignal) {
+    addSignal(signals, explanation, "amount", amountSignal);
   }
 
   if (currencyMatches) {
@@ -262,26 +271,26 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
     });
   }
 
-  const dateScore = dateProximityScore(candidate.document.fields.issuedAt, transaction.postedAt);
-  if (dateScore > 0) {
-    addSignal(signals, explanation, "date", {
-      score: dateScore,
-      matched: true,
-      reason: dateScore >= 0.2 ? "Transaction date is the same day" : "Transaction date is close",
-      evidence: {
-        documentDate: candidate.document.fields.issuedAt ?? null,
-        transactionDate: transaction.postedAt,
-      },
-    });
+  const dateSignal = dateMatchSignal(candidate.document.fields, transaction.postedAt);
+  if (dateSignal) {
+    addSignal(signals, explanation, "date", dateSignal);
   }
 
-  if (merchantName && searchTextIncludesTerm(searchText, merchantName)) {
+  const nameScore = nameSimilarityScore(candidate.document.fields.merchantName, [
+    transaction.description,
+    candidate.transaction.counterpartyName,
+    candidate.transaction.providerReference,
+    transaction.providerTransactionId,
+  ]);
+
+  if (nameScore > 0) {
     addSignal(signals, explanation, "name", {
-      score: 0.2,
+      score: clampMatchScore(nameScore * 0.2),
       matched: true,
       reason: "Counterparty text matches merchant",
       evidence: {
         merchantName,
+        nameScore,
       },
     });
   }
@@ -306,7 +315,11 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
         sender,
       },
     });
-  } else if (senderDomain && searchTextIncludesTerm(searchText, senderDomain)) {
+  } else if (
+    senderDomain &&
+    (searchTextIncludesTerm(searchText, senderDomain) ||
+      (senderDomainStem && searchTextIncludesTerm(searchText, senderDomainStem)))
+  ) {
     addSignal(signals, explanation, "senderDomain", {
       score: 0.05,
       matched: true,
@@ -356,6 +369,8 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
       },
     });
   }
+
+  addConservativeRiskSignals(signals, explanation, candidate.document.fields);
 
   const score = clampMatchScore(
     Object.values(signals).reduce((total, signal) => total + signal.score, 0),
@@ -409,6 +424,7 @@ function legacySignalScores(signals: MatchSignals): InboxMatchSignalScores {
     documentText: signals.documentText?.score,
     alias: signals.alias?.score,
     hardNegative: signals.hardNegative?.score,
+    risk: signals.risk?.score,
   };
 }
 
@@ -451,37 +467,347 @@ function confidenceForScore(score: number, policy: MatchPolicy): InboxMatchConfi
   return "low";
 }
 
-function dateProximityScore(left?: string | null, right?: string | null) {
-  if (!left || !right) {
+const commonVatRates = [0.05, 0.06, 0.07, 0.075, 0.08, 0.1, 0.12, 0.19, 0.2, 0.21, 0.25];
+const companySuffixes = new Set([
+  "ab",
+  "ag",
+  "as",
+  "bv",
+  "co",
+  "corp",
+  "corporation",
+  "gmbh",
+  "inc",
+  "incorporated",
+  "kg",
+  "limited",
+  "llc",
+  "ltd",
+  "nv",
+  "oy",
+  "plc",
+  "pty",
+  "sa",
+  "sarl",
+  "se",
+  "srl",
+  "ug",
+]);
+
+function amountMatchSignal(input: {
+  documentAmountMinor?: number | null;
+  documentTaxAmountMinor?: number | null;
+  transactionAmountMinor: number;
+  currencyMismatches: boolean;
+}): MatchSignal | null {
+  if (input.documentAmountMinor == null || input.currencyMismatches) {
+    return null;
+  }
+
+  const documentAmount = Math.abs(input.documentAmountMinor);
+  const transactionAmount = Math.abs(input.transactionAmountMinor);
+  const difference = Math.abs(documentAmount - transactionAmount);
+  const maxAmount = Math.max(documentAmount, transactionAmount);
+  const percentageDifference = maxAmount > 0 ? difference / maxAmount : 0;
+  const evidence = {
+    documentAmountMinor: input.documentAmountMinor,
+    transactionAmountMinor: input.transactionAmountMinor,
+  };
+
+  if (difference === 0) {
+    return {
+      score: 0.35,
+      matched: true,
+      reason: "Amount matches exactly",
+      evidence,
+    };
+  }
+
+  if (difference <= 1) {
+    return {
+      score: 0.33,
+      matched: true,
+      reason: "Amount is within rounding tolerance",
+      evidence: { ...evidence, differenceMinor: difference },
+    };
+  }
+
+  if (percentageDifference <= 0.01) {
+    return {
+      score: 0.31,
+      matched: true,
+      reason: "Amount is within 1 percent",
+      evidence: { ...evidence, percentageDifference },
+    };
+  }
+
+  if (percentageDifference <= 0.02) {
+    return {
+      score: 0.28,
+      matched: true,
+      reason: "Amount is close",
+      evidence: { ...evidence, percentageDifference },
+    };
+  }
+
+  if (input.documentTaxAmountMinor != null) {
+    const documentSubtotal = Math.abs(input.documentAmountMinor - input.documentTaxAmountMinor);
+
+    if (documentSubtotal === transactionAmount) {
+      return {
+        score: 0.25,
+        matched: true,
+        reason: "Transaction amount matches subtotal before tax",
+        evidence: {
+          ...evidence,
+          documentTaxAmountMinor: input.documentTaxAmountMinor,
+          documentSubtotalMinor: documentSubtotal,
+        },
+      };
+    }
+  }
+
+  const smallerAmount = Math.max(Math.min(documentAmount, transactionAmount), 1);
+  const vatLikeRate = maxAmount / smallerAmount - 1;
+  const vatRate = commonVatRates.find((rate) => Math.abs(vatLikeRate - rate) <= 0.015);
+
+  if (vatRate) {
+    return {
+      score: 0.24,
+      matched: true,
+      reason: "Amount aligns after tax/VAT adjustment",
+      evidence: { ...evidence, vatRate },
+    };
+  }
+
+  if (percentageDifference <= 0.05) {
+    return {
+      score: 0.18,
+      matched: true,
+      reason: "Amount is within broad tolerance",
+      evidence: { ...evidence, percentageDifference },
+    };
+  }
+
+  return null;
+}
+
+function dateMatchSignal(fields: DocumentMatchFields, transactionDate: string): MatchSignal | null {
+  if (!fields.issuedAt || !transactionDate) {
+    return null;
+  }
+
+  const documentDate = new Date(fields.issuedAt);
+  const postedDate = new Date(transactionDate);
+
+  if (Number.isNaN(documentDate.getTime()) || Number.isNaN(postedDate.getTime())) {
+    return null;
+  }
+
+  const signedDays = signedUtcDays(documentDate, postedDate);
+  const absoluteDays = Math.abs(signedDays);
+  const evidence = {
+    documentDate: fields.issuedAt,
+    transactionDate,
+  };
+
+  if (absoluteDays === 0) {
+    return {
+      score: 0.2,
+      matched: true,
+      reason: "Transaction date is the same day",
+      evidence,
+    };
+  }
+
+  if (isInvoiceDocument(fields.documentType)) {
+    const invoiceTerm = commonInvoiceTermDays(signedDays);
+
+    if (invoiceTerm != null) {
+      return {
+        score: invoiceTerm === 0 ? 0.18 : 0.18,
+        matched: true,
+        reason: "Invoice payment timing matches common terms",
+        evidence: {
+          ...evidence,
+          paymentTermDays: invoiceTerm,
+          signedDays,
+        },
+      };
+    }
+
+    if (signedDays >= -3 && signedDays <= 7) {
+      return {
+        score: 0.12,
+        matched: true,
+        reason: "Transaction date is close",
+        evidence: { ...evidence, signedDays },
+      };
+    }
+  } else if (signedDays >= 0 && signedDays <= 10) {
+    return {
+      score: signedDays <= 3 ? 0.12 : 0.06,
+      matched: true,
+      reason:
+        signedDays <= 3
+          ? "Transaction date is close"
+          : "Receipt date is before bank posting",
+      evidence: { ...evidence, signedDays },
+    };
+  }
+
+  if (absoluteDays <= 3) {
+    return {
+      score: 0.12,
+      matched: true,
+      reason: "Transaction date is close",
+      evidence: { ...evidence, signedDays },
+    };
+  }
+
+  if (absoluteDays <= 7) {
+    return {
+      score: 0.06,
+      matched: true,
+      reason: "Transaction date is close",
+      evidence: { ...evidence, signedDays },
+    };
+  }
+
+  return null;
+}
+
+function commonInvoiceTermDays(signedDays: number) {
+  if (signedDays < 0) {
+    return null;
+  }
+
+  const terms = [0, 7, 15, 30, 60, 90];
+  return (
+    terms.find((term) => {
+      const tolerance = term === 0 ? 3 : 5;
+      return Math.abs(signedDays - term) <= tolerance;
+    }) ?? null
+  );
+}
+
+function isInvoiceDocument(documentType: DocumentMatchFields["documentType"]) {
+  return documentType === "invoice_received" || documentType === "invoice_sent";
+}
+
+function signedUtcDays(left: Date, right: Date) {
+  const leftUtc = Date.UTC(left.getUTCFullYear(), left.getUTCMonth(), left.getUTCDate());
+  const rightUtc = Date.UTC(right.getUTCFullYear(), right.getUTCMonth(), right.getUTCDate());
+  return (rightUtc - leftUtc) / 86_400_000;
+}
+
+function nameSimilarityScore(sourceName: string | null | undefined, compareNames: unknown[]) {
+  const sourceTokens = normalizeNameTokens(sourceName);
+
+  if (sourceTokens.length === 0) {
     return 0;
   }
 
-  const leftDate = new Date(left);
-  const rightDate = new Date(right);
+  const scores: number[] = [];
 
-  if (Number.isNaN(leftDate.getTime()) || Number.isNaN(rightDate.getTime())) {
-    return 0;
+  for (const compareName of compareNames) {
+    if (typeof compareName !== "string") {
+      continue;
+    }
+
+    const compareTokens = normalizeNameTokens(compareName);
+
+    if (compareTokens.length === 0) {
+      continue;
+    }
+
+    const sourceSet = new Set(sourceTokens);
+    const compareSet = new Set(compareTokens);
+    const intersectionSize = [...sourceSet].filter((token) => compareSet.has(token)).length;
+    const unionSize = new Set([...sourceSet, ...compareSet]).size;
+
+    if (unionSize > 0) {
+      scores.push(intersectionSize / unionSize);
+    }
+
+    if (sourceTokens.every((token) => compareSet.has(token))) {
+      scores.push(1);
+    }
+
+    const sourceJoined = sourceTokens.join(" ");
+    const compareJoined = compareTokens.join(" ");
+
+    if (
+      sourceJoined.length >= 3 &&
+      compareJoined.length >= 3 &&
+      (sourceJoined.includes(compareJoined) || compareJoined.includes(sourceJoined))
+    ) {
+      scores.push(0.85);
+    }
+
+    if (
+      sourceTokens[0] &&
+      compareTokens[0] &&
+      sourceTokens[0].length >= 3 &&
+      sourceTokens[0] === compareTokens[0]
+    ) {
+      scores.push(0.6);
+    }
+
+    const sourceConcatenated = sourceTokens.join("");
+    const compareConcatenated = compareTokens.join("");
+
+    if (
+      sourceConcatenated.length >= 4 &&
+      compareConcatenated.length >= 4 &&
+      (sourceConcatenated === compareConcatenated ||
+        sourceConcatenated.includes(compareConcatenated) ||
+        compareConcatenated.includes(sourceConcatenated))
+    ) {
+      scores.push(sourceConcatenated === compareConcatenated ? 0.95 : 0.8);
+    }
   }
 
-  const days =
-    Math.abs(
-      Date.UTC(leftDate.getUTCFullYear(), leftDate.getUTCMonth(), leftDate.getUTCDate()) -
-        Date.UTC(rightDate.getUTCFullYear(), rightDate.getUTCMonth(), rightDate.getUTCDate()),
-    ) / 86_400_000;
+  return scores.length > 0 ? Math.max(...scores) : 0;
+}
 
-  if (days === 0) {
-    return 0.2;
+function normalizeNameTokens(value: string | null | undefined) {
+  return normalizeSearchText(value)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0 && !companySuffixes.has(token));
+}
+
+function addConservativeRiskSignals(
+  signals: MatchSignals,
+  explanation: string[],
+  fields: DocumentMatchFields,
+) {
+  const hasNameLikeEvidence = Boolean(
+    signals.name ||
+      signals.reference ||
+      signals.sender ||
+      signals.senderDomain ||
+      signals.documentText ||
+      signals.alias,
+  );
+
+  if (signals.amount && !hasNameLikeEvidence && !signals.date) {
+    addSignal(signals, explanation, "risk", {
+      score: -0.1,
+      matched: true,
+      reason: "Amount-only evidence is weak",
+    });
+    return;
   }
 
-  if (days <= 3) {
-    return 0.12;
+  if (fields.issuedAt && !signals.date && !hasNameLikeEvidence) {
+    addSignal(signals, explanation, "risk", {
+      score: -0.08,
+      matched: true,
+      reason: "Document date is stale",
+    });
   }
-
-  if (days <= 7) {
-    return 0.06;
-  }
-
-  return 0;
 }
 
 function searchTextIncludesTerm(text: string, term: string) {

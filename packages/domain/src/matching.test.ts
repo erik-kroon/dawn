@@ -60,10 +60,10 @@ describe("inbox transaction matching", () => {
       matched: true,
     });
     expect(suggestions[0]?.signalDetails.name).toMatchObject({
-      score: 0.2,
       matched: true,
     });
-    expect(suggestions[0]?.signals.counterparty).toBe(0.2);
+    expect(suggestions[0]?.signalDetails.name?.score ?? 0).toBeGreaterThanOrEqual(0.17);
+    expect(suggestions[0]?.signals.counterparty ?? 0).toBeGreaterThanOrEqual(0.17);
     expect(suggestions.find((suggestion) => suggestion.transactionId === "txn_weak")).toBeDefined();
   });
 
@@ -103,6 +103,162 @@ describe("inbox transaction matching", () => {
 
     expect(suggestions[0]?.signals.sender).toBe(0.05);
     expect(suggestions[0]?.explanation).toContain("Sender matches transaction details");
+  });
+
+  test("scores delayed bank posting for receipts as plausible", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        fields: { ...baseInput.fields, documentType: "receipt" },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_delayed",
+            postedAt: "2026-06-17T10:20:00.000Z",
+          }),
+          counterpartyName: "Figma Inc",
+        },
+      ],
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_delayed");
+    expect(suggestions[0]?.confidence).toBe("high");
+    expect(suggestions[0]?.signalDetails.date?.matched).toBe(true);
+  });
+
+  test("supports common invoice payment windows", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        documentText: "Acme Consulting invoice INV-30 total 1000.00 USD",
+        fields: {
+          documentType: "invoice_received",
+          merchantName: "Acme Consulting LLC",
+          issuedAt: "2026-06-01T00:00:00.000Z",
+          invoiceNumber: "INV-30",
+          totalAmountMinor: 100000,
+          currency: "USD",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_net_30",
+            description: "ACME CONSULTING PAYMENT INV-30",
+            postedAt: "2026-07-01T00:00:00.000Z",
+            money: { amountMinor: -100000, currency: "USD" },
+          }),
+          counterpartyName: "Acme Consulting",
+        },
+      ],
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_net_30");
+    expect(suggestions[0]?.confidence).toBe("high");
+    expect(suggestions[0]?.explanation).toContain("Invoice payment timing matches common terms");
+  });
+
+  test("lets invoice numbers lift otherwise weak merchant text", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        fields: {
+          ...baseInput.fields,
+          merchantName: null,
+          invoiceNumber: "INV-900",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_reference",
+            description: "Card payment",
+            providerTransactionId: "INV-900",
+          }),
+          providerReference: "INV-900",
+        },
+      ],
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_reference");
+    expect(suggestions[0]?.confidence).toBe("high");
+    expect(suggestions[0]?.signals.reference).toBe(0.1);
+  });
+
+  test("uses sender domain hints when merchant text is unavailable", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        sender: "billing@vercel.com",
+        fields: { ...baseInput.fields, merchantName: null, invoiceNumber: null },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_domain",
+            description: "Vercel subscription",
+          }),
+        },
+      ],
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_domain");
+    expect(suggestions[0]?.signals.senderDomain).toBe(0.05);
+    expect(suggestions[0]?.explanation).toContain("Sender domain matches transaction details");
+  });
+
+  test("keeps amount-only false positives below safe thresholds", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        documentText: null,
+        fields: {
+          totalAmountMinor: 1200,
+          currency: "USD",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_amount_only",
+            description: "Unknown merchant",
+            postedAt: "2026-07-14T00:00:00.000Z",
+          }),
+        },
+      ],
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_amount_only");
+    expect(suggestions[0]?.score ?? 0).toBeLessThan(0.75);
+    expect(suggestions[0]?.confidence).not.toBe("high");
+    expect(suggestions[0]?.signals.risk).toBeLessThan(0);
+  });
+
+  test("keeps name-only false positives below safe thresholds", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        documentText: null,
+        fields: {
+          merchantName: "Figma Inc",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_name_only",
+            description: "Figma annual plan",
+            money: { amountMinor: -99900, currency: "USD" },
+            postedAt: "2026-07-14T00:00:00.000Z",
+          }),
+        },
+      ],
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_name_only");
+    expect(suggestions[0]?.score ?? 0).toBeLessThan(0.75);
+    expect(suggestions[0]?.confidence).toBe("low");
   });
 
   test("suppresses hard-negative matches before scoring", () => {

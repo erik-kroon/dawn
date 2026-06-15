@@ -2,7 +2,7 @@
 
 Triage: ready-for-agent
 Publication: Local repo artifact. No project issue tracker or remote is assumed.
-Status: Slice 3 implemented; Slice 4 next
+Status: Slice 4 implemented; Slice 5 next
 Date: 2026-06-15
 Source material: `docs/PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, Dawn matching code, and Midday reference matching docs/code under `ref/midday`.
 
@@ -244,18 +244,27 @@ Bring Dawn's scoring up to Midday-level capability while keeping policy in pure 
 
 ## Acceptance Criteria
 
-- [ ] Same amount/currency/date/name matches rank high.
-- [ ] Receipt-before-transaction timing is scored as plausible.
-- [ ] Invoice payment timing supports common payment windows such as immediate, net 7, net 15, net 30, net 60, and net 90.
-- [ ] Invoice number or domain can lift otherwise weak merchant text.
-- [ ] Name-only and amount-only matches stay below safe thresholds unless supported by other signals.
-- [ ] Scores include enough signal detail to explain why a suggestion exists.
+- [x] Same amount/currency/date/name matches rank high.
+- [x] Receipt-before-transaction timing is scored as plausible.
+- [x] Invoice payment timing supports common payment windows such as immediate, net 7, net 15, net 30, net 60, and net 90.
+- [x] Invoice number or domain can lift otherwise weak merchant text.
+- [x] Name-only and amount-only matches stay below safe thresholds unless supported by other signals.
+- [x] Scores include enough signal detail to explain why a suggestion exists.
+
+## Implementation Notes
+
+- Added name token normalization with company suffix removal, token overlap, containment, prefix matching, and concatenated-token matching.
+- Added amount tolerance scoring for exact, near, percentage, subtotal-before-tax, and VAT-like differences while preserving exact minor-unit arithmetic.
+- Added document-type-aware date scoring for receipts and invoice payment windows.
+- Added sender-domain stem support and conservative risk penalties for weak amount-only or stale-date evidence.
+- Added focused domain tests for delayed receipt posting, net-30 invoice timing, invoice-number lift, domain lift, amount-only false positives, and name-only false positives.
 
 ## Verification
 
-- Golden domain tests for exact receipt match, delayed bank posting, invoice payment terms, invoice-number hint, domain hint, amount-only false positive, and name-only false positive.
-- `bun test packages/domain/src/matching.test.ts`
-- `bun run check-types`
+- [x] Golden domain tests for exact receipt match, delayed bank posting, invoice payment terms, invoice-number hint, domain hint, amount-only false positive, and name-only false positive.
+- [x] `bun test packages/domain/src/matching.test.ts packages/domain/src/golden-datasets.test.ts`
+- [x] `bun test packages/app/src/inbox-matching.test.ts`
+- [x] `bun run check-types`
 
 ## Dependencies
 
