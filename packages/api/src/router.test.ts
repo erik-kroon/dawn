@@ -41,6 +41,7 @@ import type {
 } from "@dawn/domain";
 import type {
   ActorTeam,
+  AuditLogEntry,
   BankAccount,
   BankConnection,
   BusinessDocument,
@@ -56,6 +57,7 @@ import type {
   InboxTransactionMatchSuggestion,
   InboxSource,
   InboxSourceType,
+  JobRun,
   OutboxEvent,
   ProviderSyncRun,
   ReviewWorkspaceData,
@@ -69,7 +71,7 @@ import {
 } from "@dawn/integrations";
 
 class MemoryTransactionReviewRepository implements DawnRepository {
-  auditEvents: unknown[] = [];
+  auditEvents: AuditLogEntry[] = [];
   outboxEvents: unknown[] = [];
   bankAccounts = new Map<string, BankAccount>();
   bankConnections = new Map<string, BankConnection>();
@@ -103,6 +105,7 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   automationRuns = new Map<string, AutomationRun>();
   integrationConnections = new Map<string, IntegrationConnection & { tokenCiphertext: string }>();
   integrationSyncRuns = new Map<string, IntegrationSyncRun>();
+  jobRuns = new Map<string, JobRun>();
   apiKeys = new Map<string, ApiKey & { keyHash: string }>();
   oauthApps = new Map<string, OAuthApp>();
   webhookSubscriptions = new Map<string, WebhookSubscription & { signingSecretHash: string }>();
@@ -312,12 +315,61 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return updated;
   }
 
-  async appendAuditEvent(input: unknown) {
-    this.auditEvents.push(input);
+  async appendAuditEvent(input: {
+    teamId: string;
+    actorId: string;
+    requestId: string;
+    action: string;
+    entityType: string;
+    entityId: string;
+    metadata: Record<string, unknown>;
+  }) {
+    this.auditEvents.push({
+      id: `audit_${this.auditEvents.length + 1}`,
+      occurredAt: new Date().toISOString(),
+      ...input,
+    });
   }
 
   async appendOutboxEvent(input: unknown) {
     this.outboxEvents.push(input);
+  }
+
+  async listAuditEvents(input: {
+    teamId: string;
+    limit: number;
+    action?: string | null;
+    entityType?: string | null;
+    entityId?: string | null;
+    requestId?: string | null;
+  }) {
+    return this.auditEvents
+      .filter((event) => event.teamId === input.teamId)
+      .filter((event) => !input.action || event.action === input.action)
+      .filter((event) => !input.entityType || event.entityType === input.entityType)
+      .filter((event) => !input.entityId || event.entityId === input.entityId)
+      .filter((event) => !input.requestId || event.requestId === input.requestId)
+      .slice(0, input.limit);
+  }
+
+  async listOutboxEvents(teamId: string, limit: number) {
+    return [...this.outboxEventRecords.values()]
+      .filter((event) => event.teamId === teamId)
+      .slice(0, limit);
+  }
+
+  async listJobRuns(teamId: string, limit: number) {
+    return [...this.jobRuns.values()].filter((run) => run.teamId === teamId).slice(0, limit);
+  }
+
+  async listProviderSyncRuns(teamId: string, limit: number) {
+    return this.syncRuns.filter((run) => run.teamId === teamId).slice(0, limit);
+  }
+
+  async listIntegrationSyncRuns(teamId: string, limit: number) {
+    return [...this.integrationSyncRuns.values()]
+      .filter((run) => run.teamId === teamId)
+      .slice(0, limit);
   }
 
   async saveIdempotencyResult(input: {
@@ -3330,5 +3382,91 @@ describe("appRouter", () => {
     expect(synced.syncRun).toMatchObject({ status: "completed", recordsSynced: 3 });
     expect(disabled.connection.status).toBe("disabled");
     expect(repository.integrationSyncRuns).toHaveLength(1);
+  });
+
+  test("returns operations workspace with redacted failure and audit records", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    repository.auditEvents.push({
+      id: "audit_1",
+      teamId: "team_1",
+      actorId: "user_1",
+      requestId: "request_trace_1",
+      action: "webhook.delivery_failed",
+      entityType: "webhook_delivery",
+      entityId: "delivery_1",
+      metadata: { email: "ops@example.com", safe: "value" },
+      occurredAt: "2026-06-15T00:00:00.000Z",
+    });
+    repository.outboxEventRecords.set("outbox_1", {
+      id: "outbox_1",
+      teamId: "team_1",
+      type: "webhook.delivery_failed",
+      version: 1,
+      payload: { authorization: "Bearer token123", deliveryId: "delivery_1" },
+      dispatchAttempts: 8,
+      status: "failed",
+      lastError: "failed for ops@example.com",
+      nextAttemptAt: null,
+      occurredAt: "2026-06-15T00:00:00.000Z",
+      processedAt: null,
+    });
+    repository.jobRuns.set("job_1", {
+      id: "job_1",
+      teamId: "team_1",
+      outboxEventId: "outbox_1",
+      jobType: "webhook.deliver",
+      queueName: "dawn-jobs",
+      status: "failed",
+      attempt: 8,
+      idempotencyKey: "webhook:deliver:outbox_1",
+      error: "Bearer token123 failed for ops@example.com",
+      createdAt: "2026-06-15T00:00:00.000Z",
+      updatedAt: "2026-06-15T00:00:01.000Z",
+    });
+    repository.webhookDeliveries.set("delivery_1", {
+      id: "delivery_1",
+      teamId: "team_1",
+      subscriptionId: "subscription_1",
+      outboxEventId: "outbox_1",
+      status: "failed",
+      attempt: 1,
+      requestPayload: { email: "ops@example.com" },
+      responseStatus: 500,
+      responseBody: "failed for ops@example.com",
+      error: "Bearer token123 rejected",
+      nextAttemptAt: null,
+      deliveredAt: null,
+      createdAt: "2026-06-15T00:00:00.000Z",
+      updatedAt: "2026-06-15T00:00:01.000Z",
+    });
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+
+    const workspace = await call(
+      router.operations.list,
+      {
+        teamId: "team_1",
+        audit: {
+          action: "webhook.delivery_failed",
+          entityType: "webhook_delivery",
+          entityId: "delivery_1",
+          requestId: "request_trace_1",
+        },
+      },
+      context,
+    );
+
+    expect(workspace.metrics).toMatchObject({ deadLetters: 1, failedJobs: 1, webhookFailures: 1 });
+    expect(workspace.auditEvents).toHaveLength(1);
+    expect(workspace.auditEvents[0]?.metadata).toEqual({ email: "[redacted]", safe: "value" });
+    expect(workspace.recentOutboxEvents[0]?.payload).toEqual({
+      authorization: "[redacted]",
+      deliveryId: "delivery_1",
+    });
+    expect(workspace.recentJobRuns[0]?.error).toBe(
+      "Bearer [redacted-token] failed for [redacted-email]",
+    );
   });
 });

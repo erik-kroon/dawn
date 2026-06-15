@@ -37,6 +37,7 @@ import { cors } from "hono/cors";
 
 import { processDocumentExtractionJob } from "./document-extraction";
 import { createR2DocumentObjectStorage } from "./document-storage";
+import { logServerError, requestIdFromHeaders } from "./observability";
 import { createCloudflareOutboxQueuePublisher } from "./outbox-queue";
 import { publishTenantSyncInvalidation } from "./tenant-sync";
 
@@ -63,13 +64,18 @@ app.use("*", async (c, next) => {
   await identifyUser(c.get("log"), c.req.raw.headers, c.req.path);
   await next();
 });
+app.use("*", async (c, next) => {
+  const requestId = requestIdFromHeaders(c.req.raw.headers);
+  c.header("x-request-id", requestId);
+  await next();
+});
 
 app.use(
   "/*",
   cors({
     origin: env.CORS_ORIGIN,
     allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: ["Content-Type", "Authorization", "x-request-id"],
     credentials: true,
   }),
 );
@@ -237,7 +243,7 @@ export const apiHandler = new OpenAPIHandler(appRouter, {
   ],
   interceptors: [
     onError((error) => {
-      console.error(error);
+      logServerError(error, { operation: "openapi" });
     }),
   ],
 });
@@ -245,7 +251,7 @@ export const apiHandler = new OpenAPIHandler(appRouter, {
 export const rpcHandler = new RPCHandler(appRouter, {
   interceptors: [
     onError((error) => {
-      console.error(error);
+      logServerError(error, { operation: "rpc" });
     }),
   ],
 });
@@ -604,7 +610,12 @@ export default {
         await handleQueueMessage(message, env);
         message.ack();
       } catch (error) {
-        console.error(error);
+        logServerError(error, {
+          operation: message.body.type,
+          requestId: message.body.idempotencyKey,
+          teamId: message.body.teamId,
+          actorType: "system",
+        });
         message.retry();
       }
     }

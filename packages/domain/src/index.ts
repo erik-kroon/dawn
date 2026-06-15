@@ -30,6 +30,7 @@ export type Permission =
   | "automations.read"
   | "automations.write"
   | "automations.run"
+  | "operations.read"
   | "webhooks.manage";
 
 export type PublicApiScope =
@@ -845,6 +846,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "automations.read",
     "automations.write",
     "automations.run",
+    "operations.read",
     "webhooks.manage",
   ],
   admin: [
@@ -868,6 +870,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "automations.read",
     "automations.write",
     "automations.run",
+    "operations.read",
     "webhooks.manage",
   ],
   member: [

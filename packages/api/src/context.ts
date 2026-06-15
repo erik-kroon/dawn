@@ -11,7 +11,10 @@ export async function createContext({ context }: CreateContextOptions) {
   });
   return {
     auth: null,
-    requestId: context.req.header("x-request-id") ?? crypto.randomUUID(),
+    requestId:
+      context.req.header("x-request-id") ??
+      context.res.headers.get("x-request-id") ??
+      crypto.randomUUID(),
     session,
   };
 }

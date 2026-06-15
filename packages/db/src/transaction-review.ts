@@ -1,5 +1,6 @@
 import type {
   ActorTeam,
+  AuditLogEntry,
   BankAccount,
   BankConnection,
   BankConnectionSummary,
@@ -3183,6 +3184,86 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     });
   }
 
+  async listAuditEvents(input: {
+    teamId: string;
+    limit: number;
+    action?: string | null;
+    entityType?: string | null;
+    entityId?: string | null;
+    requestId?: string | null;
+  }): Promise<AuditLogEntry[]> {
+    const filters = [eq(schema.auditLog.teamId, input.teamId)];
+
+    if (input.action) {
+      filters.push(eq(schema.auditLog.action, input.action));
+    }
+
+    if (input.entityType) {
+      filters.push(eq(schema.auditLog.entityType, input.entityType));
+    }
+
+    if (input.entityId) {
+      filters.push(eq(schema.auditLog.entityId, input.entityId));
+    }
+
+    if (input.requestId) {
+      filters.push(eq(schema.auditLog.requestId, input.requestId));
+    }
+
+    const events = await this.client
+      .select()
+      .from(schema.auditLog)
+      .where(and(...filters))
+      .orderBy(desc(schema.auditLog.occurredAt))
+      .limit(input.limit);
+
+    return events.map(mapAuditLogEntry);
+  }
+
+  async listOutboxEvents(teamId: string, limit: number): Promise<OutboxEvent[]> {
+    const events = await this.client
+      .select()
+      .from(schema.outboxEvent)
+      .where(eq(schema.outboxEvent.teamId, teamId))
+      .orderBy(desc(schema.outboxEvent.occurredAt))
+      .limit(limit);
+
+    return events.map(mapOutboxEvent);
+  }
+
+  async listJobRuns(teamId: string, limit: number): Promise<JobRun[]> {
+    const runs = await this.client
+      .select()
+      .from(schema.jobRun)
+      .where(eq(schema.jobRun.teamId, teamId))
+      .orderBy(desc(schema.jobRun.createdAt))
+      .limit(limit);
+
+    return runs.map(mapJobRun);
+  }
+
+  async listProviderSyncRuns(teamId: string, limit: number): Promise<ProviderSyncRun[]> {
+    const runs = await this.client
+      .select()
+      .from(schema.providerSyncRun)
+      .where(eq(schema.providerSyncRun.teamId, teamId))
+      .orderBy(desc(schema.providerSyncRun.startedAt))
+      .limit(limit);
+
+    return runs.map(mapProviderSyncRun);
+  }
+
+  async listIntegrationSyncRuns(teamId: string, limit: number): Promise<IntegrationSyncRun[]> {
+    const runs = await this.client
+      .select()
+      .from(schema.integrationSyncRun)
+      .where(eq(schema.integrationSyncRun.teamId, teamId))
+      .orderBy(desc(schema.integrationSyncRun.startedAt))
+      .limit(limit);
+
+    return runs.map(mapIntegrationSyncRun);
+  }
+
   async listDispatchableOutboxEvents(input: { limit: number; now: Date }): Promise<OutboxEvent[]> {
     const events = await this.client
       .select()
@@ -4082,6 +4163,20 @@ function mapTransactionImportSession(
     importedCount: importSession.importedCount,
     duplicateCount: importSession.duplicateCount,
     invalidCount: importSession.invalidCount,
+  };
+}
+
+function mapAuditLogEntry(event: typeof schema.auditLog.$inferSelect): AuditLogEntry {
+  return {
+    id: event.id,
+    teamId: event.teamId,
+    actorId: event.actorId,
+    requestId: event.requestId,
+    action: event.action,
+    entityType: event.entityType,
+    entityId: event.entityId,
+    metadata: event.metadata,
+    occurredAt: event.occurredAt.toISOString(),
   };
 }
 

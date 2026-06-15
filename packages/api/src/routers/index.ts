@@ -38,6 +38,7 @@ import {
   listIntegrationWorkspace,
   listLedgerSummary,
   listBusinessReport,
+  listOperationsWorkspace,
   listProjectWorkspace,
   listTeamDirectory,
   listTeams,
@@ -186,6 +187,21 @@ const publicApiScopeInput = z.enum([
 const developerWorkspaceInput = z
   .object({
     teamId: z.string().min(1).optional(),
+  })
+  .optional();
+
+const operationsWorkspaceInput = z
+  .object({
+    teamId: z.string().min(1).optional(),
+    limit: z.number().int().min(1).max(50).optional(),
+    audit: z
+      .object({
+        action: z.string().trim().min(1).nullable().optional(),
+        entityType: z.string().trim().min(1).nullable().optional(),
+        entityId: z.string().trim().min(1).nullable().optional(),
+        requestId: z.string().trim().min(1).nullable().optional(),
+      })
+      .optional(),
   })
   .optional();
 
@@ -937,6 +953,29 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 teamId: input.teamId,
               },
               input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    operations: {
+      list: protectedProcedure
+        .input(operationsWorkspaceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listOperationsWorkspace(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input?.teamId,
+              },
+              {
+                teamId: input?.teamId,
+                limit: input?.limit,
+                audit: input?.audit,
+              },
             );
           } catch (error) {
             mapAppError(error);

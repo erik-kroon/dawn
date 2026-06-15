@@ -105,7 +105,12 @@ import {
   timeEntryToInvoiceLine,
 } from "@dawn/domain";
 import { providerTransactionToLedgerDraft } from "@dawn/integrations";
-import { dawnQueueNames, nextOutboxRetryAt, outboxEventToQueueMessages } from "@dawn/jobs";
+import {
+  dawnQueueNames,
+  nextOutboxRetryAt,
+  outboxDispatchRetryPolicy,
+  outboxEventToQueueMessages,
+} from "@dawn/jobs";
 import { buildTransactionSyncResponse } from "@dawn/sync";
 
 export type AppErrorCode = "FORBIDDEN" | "NOT_FOUND" | "CONFLICT";
@@ -943,6 +948,67 @@ export type JobRun = {
   updatedAt: string;
 };
 
+export type AuditLogEntry = {
+  id: string;
+  teamId: string;
+  actorId: string;
+  requestId: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  metadata: Record<string, unknown>;
+  occurredAt: string;
+};
+
+export type OperationsWorkspaceInput = {
+  teamId?: string;
+  limit?: number;
+  audit?: {
+    action?: string | null;
+    entityType?: string | null;
+    entityId?: string | null;
+    requestId?: string | null;
+  };
+};
+
+export type OperationsMetricSnapshot = {
+  queueDepth: number;
+  failedJobs: number;
+  deadLetters: number;
+  providerFailures: number;
+  integrationFailures: number;
+  webhookFailures: number;
+  automationFailures: number;
+  syncLagSeconds: number | null;
+  apiLatencyP95Ms: number | null;
+  aiCostCents: number;
+};
+
+export type DataWorkflowStatus = {
+  type: "team_data_export" | "team_data_deletion";
+  status: "available" | "staged";
+  description: string;
+  nextStep: string;
+};
+
+export type OperationsWorkspace = {
+  teamId: string;
+  requestTrace: {
+    requestId: string;
+    actorId: string;
+    actorType: Actor["type"];
+  };
+  metrics: OperationsMetricSnapshot;
+  recentOutboxEvents: OutboxEvent[];
+  recentJobRuns: JobRun[];
+  recentProviderSyncRuns: ProviderSyncRun[];
+  recentIntegrationSyncRuns: IntegrationSyncRun[];
+  recentAutomationRuns: AutomationRun[];
+  recentWebhookDeliveries: WebhookDelivery[];
+  auditEvents: AuditLogEntry[];
+  dataWorkflows: DataWorkflowStatus[];
+};
+
 export type DispatchOutboxCommand = {
   limit?: number;
   now?: Date;
@@ -1373,7 +1439,25 @@ export type DawnRepository = BankingUseCaseRepository &
   AssistantRepository &
   AutomationRepository &
   DeveloperRepository &
-  IntegrationRepository;
+  IntegrationRepository &
+  OperationsRepository;
+
+export type OperationsRepository = {
+  listAuditEvents(input: {
+    teamId: string;
+    limit: number;
+    action?: string | null;
+    entityType?: string | null;
+    entityId?: string | null;
+    requestId?: string | null;
+  }): Promise<AuditLogEntry[]>;
+  listOutboxEvents(teamId: string, limit: number): Promise<OutboxEvent[]>;
+  listJobRuns(teamId: string, limit: number): Promise<JobRun[]>;
+  listProviderSyncRuns(teamId: string, limit: number): Promise<ProviderSyncRun[]>;
+  listIntegrationSyncRuns(teamId: string, limit: number): Promise<IntegrationSyncRun[]>;
+  listAutomationRuns(teamId: string, limit: number): Promise<AutomationRun[]>;
+  listWebhookDeliveries(teamId: string, limit: number): Promise<WebhookDelivery[]>;
+};
 
 export type ProjectRepository = {
   listProjects(teamId: string): Promise<Project[]>;
@@ -2235,6 +2319,144 @@ function numberConfig(config: Record<string, unknown>, key: string) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function normalizeOperationsLimit(limit?: number) {
+  return Math.min(Math.max(Number.isInteger(limit) ? (limit ?? 20) : 20, 1), 50);
+}
+
+function operationsMetrics(input: {
+  outboxEvents: OutboxEvent[];
+  jobRuns: JobRun[];
+  providerSyncRuns: ProviderSyncRun[];
+  integrationSyncRuns: IntegrationSyncRun[];
+  automationRuns: AutomationRun[];
+  webhookDeliveries: WebhookDelivery[];
+  now: Date;
+}): OperationsMetricSnapshot {
+  const syncTimes = [
+    ...input.providerSyncRuns.map((run) => run.completedAt ?? run.startedAt),
+    ...input.integrationSyncRuns.map((run) => run.completedAt ?? run.startedAt),
+  ]
+    .map((value) => new Date(value).getTime())
+    .filter((value) => Number.isFinite(value));
+  const latestSyncTime = syncTimes.length ? Math.max(...syncTimes) : null;
+
+  return {
+    queueDepth: input.outboxEvents.filter(
+      (event) => event.status === "pending" || event.status === "dispatching",
+    ).length,
+    failedJobs: input.jobRuns.filter((run) => run.status === "failed").length,
+    deadLetters: input.outboxEvents.filter(
+      (event) =>
+        event.status === "failed" &&
+        event.dispatchAttempts >= outboxDispatchRetryPolicy.maxAttempts,
+    ).length,
+    providerFailures: input.providerSyncRuns.filter((run) => run.status === "failed").length,
+    integrationFailures: input.integrationSyncRuns.filter((run) => run.status === "failed").length,
+    webhookFailures: input.webhookDeliveries.filter((delivery) => delivery.status === "failed")
+      .length,
+    automationFailures: input.automationRuns.filter((run) => run.status === "failed").length,
+    syncLagSeconds:
+      latestSyncTime === null
+        ? null
+        : Math.max(0, Math.floor((input.now.getTime() - latestSyncTime) / 1_000)),
+    apiLatencyP95Ms: null,
+    aiCostCents: 0,
+  };
+}
+
+const sensitiveOperationalKeyPattern =
+  /(authorization|cookie|password|secret|token|email|ssn|card|iban|routing|accountNumber)/i;
+const emailTextPattern = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const bearerTextPattern = /Bearer\s+[A-Za-z0-9._~+/-]+=*/g;
+const apiTokenTextPattern = /\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_-]{8,}\b/g;
+
+export function redactOperationalText(value: string | null | undefined): string | null {
+  if (value == null) {
+    return null;
+  }
+
+  return value
+    .replace(emailTextPattern, "[redacted-email]")
+    .replace(bearerTextPattern, "Bearer [redacted-token]")
+    .replace(apiTokenTextPattern, "[redacted-token]");
+}
+
+export function redactOperationalValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    return redactOperationalText(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(redactOperationalValue);
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
+        key,
+        sensitiveOperationalKeyPattern.test(key) ? "[redacted]" : redactOperationalValue(nested),
+      ]),
+    );
+  }
+
+  return value;
+}
+
+function redactAuditLogEntry(event: AuditLogEntry): AuditLogEntry {
+  return {
+    ...event,
+    metadata: redactOperationalValue(event.metadata) as Record<string, unknown>,
+  };
+}
+
+function redactOutboxEvent(event: OutboxEvent): OutboxEvent {
+  return {
+    ...event,
+    payload: redactOperationalValue(event.payload) as Record<string, unknown>,
+    lastError: redactOperationalText(event.lastError),
+  };
+}
+
+function redactJobRun(run: JobRun): JobRun {
+  return {
+    ...run,
+    error: redactOperationalText(run.error),
+  };
+}
+
+function redactProviderSyncRun(run: ProviderSyncRun): ProviderSyncRun {
+  return {
+    ...run,
+    error: redactOperationalText(run.error),
+  };
+}
+
+function redactIntegrationSyncRun(run: IntegrationSyncRun): IntegrationSyncRun {
+  return {
+    ...run,
+    error: redactOperationalText(run.error),
+    rawPayload: redactOperationalValue(run.rawPayload) as Record<string, unknown>,
+  };
+}
+
+function redactAutomationRun(run: AutomationRun): AutomationRun {
+  return {
+    ...run,
+    input: redactOperationalValue(run.input) as Record<string, unknown>,
+    output: redactOperationalValue(run.output) as Record<string, unknown>,
+    error: redactOperationalText(run.error),
+  };
+}
+
+function redactWebhookDelivery(delivery: WebhookDelivery): WebhookDelivery {
+  return {
+    ...delivery,
+    requestPayload: redactOperationalValue(delivery.requestPayload) as Record<string, unknown>,
+    responseBody: redactOperationalText(delivery.responseBody),
+    error: redactOperationalText(delivery.error),
+  };
+}
+
 export async function listDeveloperWorkspace(
   repository: DawnRepository,
   context: TransactionReviewContext,
@@ -2253,6 +2475,94 @@ export async function listDeveloperWorkspace(
     oauthApps: await repository.listOAuthApps(access.teamId),
     webhookSubscriptions: await repository.listWebhookSubscriptions(access.teamId),
     recentWebhookDeliveries: await repository.listWebhookDeliveries(access.teamId, 10),
+  };
+}
+
+export async function listOperationsWorkspace(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  input: OperationsWorkspaceInput = {},
+): Promise<OperationsWorkspace> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: input.teamId ?? context.teamId },
+    "operations.read",
+    "You cannot read operations for this team",
+  );
+  const limit = normalizeOperationsLimit(input.limit);
+  const [
+    auditEvents,
+    outboxEvents,
+    jobRuns,
+    providerSyncRuns,
+    integrationSyncRuns,
+    automationRuns,
+    webhookDeliveries,
+  ] = await Promise.all([
+    repository.listAuditEvents({
+      teamId: access.teamId,
+      limit,
+      action: input.audit?.action ?? null,
+      entityType: input.audit?.entityType ?? null,
+      entityId: input.audit?.entityId ?? null,
+      requestId: input.audit?.requestId ?? null,
+    }),
+    repository.listOutboxEvents(access.teamId, limit),
+    repository.listJobRuns(access.teamId, limit),
+    repository.listProviderSyncRuns(access.teamId, limit),
+    repository.listIntegrationSyncRuns(access.teamId, limit),
+    repository.listAutomationRuns(access.teamId, limit),
+    repository.listWebhookDeliveries(access.teamId, limit),
+  ]);
+
+  const redactedOutboxEvents = outboxEvents.map(redactOutboxEvent);
+  const redactedJobRuns = jobRuns.map(redactJobRun);
+  const redactedProviderSyncRuns = providerSyncRuns.map(redactProviderSyncRun);
+  const redactedIntegrationSyncRuns = integrationSyncRuns.map(redactIntegrationSyncRun);
+  const redactedAutomationRuns = automationRuns.map(redactAutomationRun);
+  const redactedWebhookDeliveries = webhookDeliveries.map(redactWebhookDelivery);
+
+  return {
+    teamId: access.teamId,
+    requestTrace: {
+      requestId: context.requestId,
+      actorId: context.actor.id,
+      actorType: context.actor.type,
+    },
+    metrics: operationsMetrics({
+      outboxEvents,
+      jobRuns,
+      providerSyncRuns,
+      integrationSyncRuns,
+      automationRuns,
+      webhookDeliveries,
+      now: new Date(),
+    }),
+    recentOutboxEvents: redactedOutboxEvents,
+    recentJobRuns: redactedJobRuns,
+    recentProviderSyncRuns: redactedProviderSyncRuns,
+    recentIntegrationSyncRuns: redactedIntegrationSyncRuns,
+    recentAutomationRuns: redactedAutomationRuns,
+    recentWebhookDeliveries: redactedWebhookDeliveries,
+    auditEvents: auditEvents.map(redactAuditLogEntry),
+    dataWorkflows: [
+      {
+        type: "team_data_export",
+        status: "available",
+        description:
+          "Team data export is staged through app-layer read models for audit, outbox, jobs, documents, ledger, billing, projects, assistant, automation, integration, and developer records.",
+        nextStep:
+          "Add an asynchronous export job that writes a signed archive to R2 when product-ready export delivery is needed.",
+      },
+      {
+        type: "team_data_deletion",
+        status: "staged",
+        description:
+          "Tenant deletion requires owner confirmation, retention checks, provider revocation, R2 object cleanup, search/vector projection cleanup, and audit-safe tombstones.",
+        nextStep:
+          "Implement a confirmation-gated deletion workflow backed by queue jobs and retention policy once compliance requirements are finalized.",
+      },
+    ],
   };
 }
 

@@ -151,6 +151,8 @@ function RouteComponent() {
     transactionReview.data?.permissions.includes("bank_connections.manage") ?? false;
   const canManageIntegrations =
     transactionReview.data?.permissions.includes("integrations.write") ?? false;
+  const canReadOperations =
+    transactionReview.data?.permissions.includes("operations.read") ?? false;
   const banking = useQuery({
     ...orpc.banking.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
@@ -186,6 +188,10 @@ function RouteComponent() {
   const automations = useQuery({
     ...orpc.automations.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
+  });
+  const operations = useQuery({
+    ...orpc.operations.list.queryOptions({ input: { teamId: currentTeamId, limit: 8 } }),
+    enabled: canReadOperations && Boolean(currentTeamId),
   });
   const teamDirectory = useQuery({
     ...orpc.teams.directory.queryOptions({ input: { teamId: currentTeamId } }),
@@ -1247,6 +1253,179 @@ function RouteComponent() {
           </div>
         </CardContent>
       </Card>
+
+      {canReadOperations ? (
+        <Card id="operations">
+          <CardHeader>
+            <CardTitle>Operations</CardTitle>
+            <CardDescription>
+              Trace request, queue, provider, webhook, automation, audit, and data workflow state
+              from one team-scoped view.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4">
+              <div className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                <OperationMetric label="Queue depth" value={operations.data?.metrics.queueDepth} />
+                <OperationMetric label="Failed jobs" value={operations.data?.metrics.failedJobs} />
+                <OperationMetric
+                  label="Dead letters"
+                  value={operations.data?.metrics.deadLetters}
+                />
+                <OperationMetric
+                  label="Provider failures"
+                  value={operations.data?.metrics.providerFailures}
+                />
+                <OperationMetric
+                  label="Integration failures"
+                  value={operations.data?.metrics.integrationFailures}
+                />
+                <OperationMetric
+                  label="Webhook failures"
+                  value={operations.data?.metrics.webhookFailures}
+                />
+                <OperationMetric
+                  label="Automation failures"
+                  value={operations.data?.metrics.automationFailures}
+                />
+                <OperationMetric
+                  label="Sync lag"
+                  value={formatSyncLag(operations.data?.metrics.syncLagSeconds)}
+                />
+              </div>
+
+              {operations.data?.requestTrace ? (
+                <p className="text-xs text-muted-foreground">
+                  Request {operations.data.requestTrace.requestId} ·{" "}
+                  {operations.data.requestTrace.actorType} {operations.data.requestTrace.actorId}
+                </p>
+              ) : null}
+
+              <div className="grid gap-3 lg:grid-cols-3">
+                <div className="grid gap-2">
+                  <p className="text-sm font-medium">Outbox and jobs</p>
+                  {operations.data?.recentOutboxEvents.length ||
+                  operations.data?.recentJobRuns.length ? (
+                    <div className="grid gap-2">
+                      {operations.data?.recentOutboxEvents.slice(0, 4).map((event) => (
+                        <div className="grid gap-1 border p-3 text-sm" key={event.id}>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate">{event.type}</span>
+                            <span className="text-xs text-muted-foreground">{event.status}</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            {event.dispatchAttempts} attempts ·{" "}
+                            {new Date(event.occurredAt).toLocaleString()}
+                          </p>
+                          {event.lastError ? (
+                            <p className="break-words text-xs text-destructive">
+                              {event.lastError}
+                            </p>
+                          ) : null}
+                        </div>
+                      ))}
+                      {operations.data?.recentJobRuns.slice(0, 2).map((run) => (
+                        <div className="grid gap-1 border p-3 text-sm" key={run.id}>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate">{run.jobType}</span>
+                            <span className="text-xs text-muted-foreground">{run.status}</span>
+                          </div>
+                          {run.error ? (
+                            <p className="break-words text-xs text-destructive">{run.error}</p>
+                          ) : (
+                            <p className="text-xs text-muted-foreground">
+                              {new Date(run.createdAt).toLocaleString()}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No outbox or job runs yet.</p>
+                  )}
+                </div>
+
+                <div className="grid gap-2">
+                  <p className="text-sm font-medium">Provider activity</p>
+                  {operations.data?.recentProviderSyncRuns.length ||
+                  operations.data?.recentIntegrationSyncRuns.length ||
+                  operations.data?.recentWebhookDeliveries.length ? (
+                    <div className="grid gap-2">
+                      {operations.data?.recentProviderSyncRuns.slice(0, 2).map((run) => (
+                        <OperationRun
+                          detail={`${run.transactionsImported} transactions`}
+                          error={run.error}
+                          key={run.id}
+                          label={`Bank ${run.connectionId}`}
+                          status={run.status}
+                        />
+                      ))}
+                      {operations.data?.recentIntegrationSyncRuns.slice(0, 2).map((run) => (
+                        <OperationRun
+                          detail={`${run.recordsSynced} records`}
+                          error={run.error}
+                          key={run.id}
+                          label={`${run.category} · ${run.provider}`}
+                          status={run.status}
+                        />
+                      ))}
+                      {operations.data?.recentWebhookDeliveries.slice(0, 2).map((delivery) => (
+                        <OperationRun
+                          detail={`attempt ${delivery.attempt}`}
+                          error={delivery.error}
+                          key={delivery.id}
+                          label={`Webhook ${delivery.subscriptionId}`}
+                          status={delivery.status}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No provider activity yet.</p>
+                  )}
+                </div>
+
+                <div className="grid gap-2">
+                  <p className="text-sm font-medium">Audit and data workflows</p>
+                  {operations.data?.auditEvents.length ? (
+                    <div className="grid gap-2">
+                      {operations.data.auditEvents.slice(0, 3).map((event) => (
+                        <div className="grid gap-1 border p-3 text-sm" key={event.id}>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate">{event.action}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {event.entityType}
+                            </span>
+                          </div>
+                          <p className="break-words text-xs text-muted-foreground">
+                            {event.requestId} · {event.entityId}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No audit records yet.</p>
+                  )}
+                  <div className="grid gap-2">
+                    {operations.data?.dataWorkflows.map((workflow) => (
+                      <div className="grid gap-1 border p-3 text-sm" key={workflow.type}>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">{workflow.type.replaceAll("_", " ")}</span>
+                          <span className="text-xs text-muted-foreground">{workflow.status}</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">{workflow.nextStep}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {operations.error ? (
+                <p className="text-sm text-destructive">{errorMessage(operations.error)}</p>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>
@@ -2947,6 +3126,22 @@ function formatBytes(byteSize: number) {
   return `${(byteSize / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatSyncLag(seconds?: number | null) {
+  if (seconds == null) {
+    return "n/a";
+  }
+
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  if (seconds < 60 * 60) {
+    return `${Math.floor(seconds / 60)}m`;
+  }
+
+  return `${Math.floor(seconds / (60 * 60))}h`;
+}
+
 function CorrectionInput({
   field,
   initial,
@@ -3016,6 +3211,41 @@ function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function OperationMetric({ label, value }: { label: string; value?: number | string | null }) {
+  return (
+    <div className="grid gap-1 border p-3">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="font-mono text-lg">{value ?? "..."}</span>
+    </div>
+  );
+}
+
+function OperationRun({
+  detail,
+  error,
+  label,
+  status,
+}: {
+  detail: string;
+  error?: string | null;
+  label: string;
+  status: string;
+}) {
+  return (
+    <div className="grid gap-1 border p-3 text-sm">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate">{label}</span>
+        <span className="text-xs text-muted-foreground">{status}</span>
+      </div>
+      {error ? (
+        <p className="break-words text-xs text-destructive">{error}</p>
+      ) : (
+        <p className="text-xs text-muted-foreground">{detail}</p>
+      )}
     </div>
   );
 }

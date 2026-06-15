@@ -11,6 +11,7 @@ describe("team role permissions", () => {
   test("admins can manage team members but not billing settings", () => {
     expect(roleHasPermission("admin", "team.manage")).toBe(true);
     expect(roleHasPermission("admin", "settings.billing")).toBe(false);
+    expect(roleHasPermission("admin", "operations.read")).toBe(true);
   });
 
   test("accountants can categorize transactions without managing teams", () => {
@@ -22,8 +23,12 @@ describe("team role permissions", () => {
     expect(permissionsForRole("viewer")).toEqual([
       "transactions.read",
       "documents.read",
+      "projects.read",
       "invoices.read",
+      "integrations.read",
       "assistant.use",
+      "automations.read",
     ]);
+    expect(roleHasPermission("viewer", "operations.read")).toBe(false);
   });
 });
