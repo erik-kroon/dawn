@@ -716,6 +716,102 @@ describe("exportAccountantPacket", () => {
     ]);
   });
 
+  test("audits failed packet email sends without saving idempotency", async () => {
+    const repository = createReviewRepository("admin");
+    repository.accountantPacketExports.set("packet_1", {
+      packetId: "packet_1",
+      teamId: "team_1",
+      actorId: "user_1",
+      objectKey: "teams/team_1/accountant-packets/packet_1.zip",
+      fileName: "accountant-packet.zip",
+      contentType: "application/zip",
+      byteSize: 100,
+      status: "available",
+      revokedAt: null,
+      revokedByActorId: null,
+      revokeReason: null,
+      manifest: {
+        packetId: "packet_1",
+        teamId: "team_1",
+        actorId: "user_1",
+        generatedAt: "2026-06-15T12:00:00.000Z",
+        filters: {
+          from: "2026-06-01T00:00:00.000Z",
+          to: "2026-06-30T23:59:59.999Z",
+          transactionIds: ["txn_1"],
+        },
+        settings: { formats: ["csv"], csvDelimiter: "," },
+        transactionCount: 1,
+        attachmentCount: 0,
+        skippedAttachmentCount: 0,
+        currencyTotals: { USD: { amountMinor: -1200, currency: "USD" } },
+        files: [],
+      },
+      createdAt: "2026-06-15T12:00:00.000Z",
+    });
+    const signer = {
+      async createUploadUrl() {
+        throw new Error("upload signing should not be used");
+      },
+      async createDownloadUrl() {
+        return {
+          url: "http://localhost:3000/documents/download/packet_1",
+          expiresAt: "2026-06-15T12:05:00.000Z",
+        };
+      },
+    };
+    const emailProvider = {
+      provider: "mock-email" as const,
+      async sendAccountantPacket() {
+        throw new Error("SMTP failed for accountant@example.com using sk_live_12345678");
+      },
+    };
+
+    await expect(
+      sendAccountantPacketEmail(
+        repository,
+        signer,
+        emailProvider,
+        { actor: testActor, requestId: "request_1", teamId: "team_1" },
+        {
+          teamId: "team_1",
+          packetId: "packet_1",
+          toEmail: "accountant@example.com",
+          idempotencyKey: "email_packet_1",
+        },
+      ),
+    ).rejects.toThrow("SMTP failed");
+
+    expect(repository.auditEvents).toMatchObject([
+      { action: "accountant_packet.download_link_created" },
+      {
+        action: "accountant_packet.email_failed",
+        metadata: {
+          toEmail: "accountant@example.com",
+          error: "SMTP failed for [redacted-email] using [redacted-token]",
+        },
+      },
+    ]);
+    expect(repository.outboxEvents).toMatchObject([
+      {
+        type: "accountant_packet.email_failed",
+        payload: {
+          packetId: "packet_1",
+          toEmail: "accountant@example.com",
+          error: "SMTP failed for [redacted-email] using [redacted-token]",
+        },
+      },
+    ]);
+    expect(
+      await repository.getIdempotencyResult(
+        "team_1",
+        "user_1",
+        "accountant_packet.email.send",
+        "email_packet_1",
+      ),
+    ).toBeNull();
+  });
+
   test("revokes stored packet links and blocks new download links", async () => {
     const repository = createReviewRepository("admin");
     repository.accountantPacketExports.set("packet_1", {

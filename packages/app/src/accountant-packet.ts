@@ -632,17 +632,57 @@ export async function sendAccountantPacketEmail(
     const emailText =
       message ??
       `Download ${download.packet.fileName} before ${download.downloadExpiresAt}: ${download.downloadUrl}`;
-    const delivery = await emailProvider.sendAccountantPacket({
-      teamId: command.teamId,
-      packetId: command.packetId,
-      to: toEmail,
-      cc: copiedRequesterEmail ? [copiedRequesterEmail] : [],
-      subject,
-      text: emailText,
-      downloadUrl: download.downloadUrl,
-      downloadExpiresAt: download.downloadExpiresAt,
-      fileName: download.packet.fileName,
-    });
+    let delivery: Awaited<
+      ReturnType<AccountantPacketEmailDeliveryProvider["sendAccountantPacket"]>
+    >;
+
+    try {
+      delivery = await emailProvider.sendAccountantPacket({
+        teamId: command.teamId,
+        packetId: command.packetId,
+        to: toEmail,
+        cc: copiedRequesterEmail ? [copiedRequesterEmail] : [],
+        subject,
+        text: emailText,
+        downloadUrl: download.downloadUrl,
+        downloadExpiresAt: download.downloadExpiresAt,
+        fileName: download.packet.fileName,
+      });
+    } catch (error) {
+      const errorText = redactOperationalText(errorMessage(error));
+
+      await packetRepository.appendAuditEvent({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        action: "accountant_packet.email_failed",
+        entityType: "accountant_packet",
+        entityId: command.packetId,
+        metadata: {
+          toEmail,
+          copiedRequesterEmail,
+          provider: emailProvider.provider,
+          downloadExpiresAt: download.downloadExpiresAt,
+          error: errorText,
+        },
+      });
+      await packetRepository.appendOutboxEvent({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        type: "accountant_packet.email_failed",
+        version: 1,
+        payload: {
+          packetId: command.packetId,
+          toEmail,
+          copiedRequesterEmail,
+          error: errorText,
+        },
+      });
+
+      throw error;
+    }
+
     const result: SendAccountantPacketEmailResult = {
       packet: download.packet,
       providerMessageId: delivery.providerMessageId,
@@ -1106,6 +1146,16 @@ function normalizeOptionalEmail(email: string | null | undefined) {
   }
 
   return normalized;
+}
+
+function redactOperationalText(value: string) {
+  return value
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]")
+    .replace(/\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_-]{8,}\b/g, "[redacted-token]");
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function normalizeExportSettings(command: ExportAccountantPacketCommand) {
