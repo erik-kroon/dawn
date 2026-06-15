@@ -275,7 +275,7 @@ pass, and the implementing agent has inspected the diff.
 | `b08cfdd` | Integration adapter foundation       | Added generic provider contracts, integration connection/sync persistence, protected routes, dashboard status UI, and migration. |
 | `c8e1d92` | Desktop quick capture shell          | Added Dawn deep links, tray quick capture, file association metadata, dashboard capture handoff, and shell helper tests.         |
 | `3a040c7` | Observability workspace              | Added operations permission, request tracing, redacted logs, operations read model/API/UI, and controlled failure tests.         |
-| Pending   | Security release gates               | Added release gate scripts/CI, rate limits, signed file URL policy, webhook signature verification, and tenant isolation tests.  |
+| `9f1f29c` | Security release gates               | Added release gate scripts/CI, rate limits, signed file URL policy, webhook signature verification, and tenant isolation tests.  |
 
 ## Implementation Notes
 
