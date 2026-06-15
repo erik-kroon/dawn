@@ -64,7 +64,7 @@ pass, and the implementing agent has inspected the diff.
 | 20  | AI Draft, Mutate, And Approval Gates                         | Verified foundation, authenticated approval flow blocked    | Slice 19                 | Approval-gated draft/mutate/send tests; API tests; migration; typecheck/check; HTTP/browser smoke.                       |
 | 21  | AI Evaluation Harness                                        | Verified deterministic foundation, provider evals blocked   | Slices 19, 20            | Deterministic eval fixtures, runner, release gate, focused tests, typecheck/check.                                       |
 | 22  | Automation Rules                                             | Verified foundation, live/manual automation review blocked  | Slices 8, 20             | Rule/action tests; protected API tests; job contract tests; migration; typecheck/check.                                  |
-| 23  | Public API, OAuth Apps, API Keys, And Webhooks               | Not started                                                 | Slices 3, 8              | API contract tests; scope tests; webhook retry/failure tests.                                                            |
+| 23  | Public API, OAuth Apps, API Keys, And Webhooks               | Verified foundation, live integration review blocked        | Slices 3, 8              | API contract tests; scope tests; webhook retry/failure tests; migration; typecheck/check.                                |
 | 24  | Accounting, Payments, Messaging, And Email Provider Adapters | Not started                                                 | Slices 16, 23            | Adapter contract tests; sandbox tests where available; manual status review.                                             |
 | 25  | Desktop Quick Capture And Native Shell Deepening             | Not started                                                 | Slices 12, 13            | Desktop build/smoke; file capture test.                                                                                  |
 | 26  | Observability, Admin Tools, And Operations                   | Not started                                                 | Slices 8, 11, 16, 20     | Controlled failure; redaction review; data workflow tests.                                                               |
@@ -220,6 +220,10 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 22     | `bun test packages/jobs/src/index.test.ts packages/app/src/outbox-dispatch.test.ts packages/app/src/automations.test.ts packages/api/src/router.test.ts`                                                                                                                                                                     | Pass    | 33 tests passed for automation job contracts, outbox dispatch queueing, app use cases, protected API routes, approval-required actions, and run logs.            |
 | 2026-06-15 slice 22     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
 | 2026-06-15 slice 22     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 255 files.                                                                                                         |
+| 2026-06-15 slice 23     | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0017_demonic_fenris.sql` for API keys, OAuth apps/grants, webhook subscriptions, and webhook delivery logs.               |
+| 2026-06-15 slice 23     | `bun test packages/jobs/src/index.test.ts packages/app/src/outbox-dispatch.test.ts packages/app/src/developers.test.ts packages/api/src/router.test.ts apps/server/src/public-api.test.ts`                                                                                                                                    | Pass    | 35 tests passed for public API job contracts, developer use cases, protected developer routes, OpenAPI paths, one-time secret replay, and webhook failures.      |
+| 2026-06-15 slice 23     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
+| 2026-06-15 slice 23     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 258 files.                                                                                                         |
 
 ## Commit Log
 
@@ -249,6 +253,7 @@ pass, and the implementing agent has inspected the diff.
 | `1299415` | Assistant approval gates             | Added approval-gated assistant draft, mutation, and invoice-send actions backed by app use cases, API routes, UI, and migration. |
 | `2e1e371` | AI evaluation harness                | Added deterministic AI eval fixtures, runner, CLI release gate, tests, and short release-gate guidance.                          |
 | `04811d5` | Automation rules foundation          | Added event-triggered automation rules, run logs, queue job contracts, protected routes, dashboard panel, tests, and migration.  |
+| `18f24d7` | Public developer platform            | Added scoped API keys, OAuth app/grant records, public REST routes, webhook subscriptions/delivery logs, tests, and migration.   |
 
 ## Implementation Notes
 
@@ -451,6 +456,17 @@ log `approval_required` unless the rule explicitly uses `auto_approve`.
 Postgres stores `automation_rule` and `automation_run`, the API exposes
 protected list/create/run routes, and the dashboard has a compact rule/run panel.
 
+Slice 23 foundation added scoped public API actors, hashed API keys with
+one-time returned tokens, OAuth app/grant records, webhook subscriptions, and
+auditable webhook delivery attempts. The app layer resolves API keys into
+team-scoped actors with permissions derived from public scopes, developer
+settings are managed through protected API routes, and public REST endpoints now
+cover transactions, invoices, webhook subscription creation, and OpenAPI
+discovery. Outbox dispatch now emits `webhook.deliver` jobs, the server queue
+handler records delivery success/failure and retries failed webhook jobs through
+the queue, and Postgres stores API key/OAuth/webhook state via migration
+`0017_demonic_fenris`.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -531,3 +547,9 @@ protected list/create/run routes, and the dashboard has a compact rule/run panel
   event. Current verification covers rule creation, permissioned app execution,
   approval-required risky actions, run logging, queue job mapping, protected API
   routes, migration generation, typecheck/check, and dashboard build.
+- Slice 23 still needs live public API requests against a migrated local or
+  preview database, OAuth authorization UI/consent flows, and webhook delivery
+  review against a reachable endpoint. Current verification covers hashed scoped
+  API keys, one-time credential replay behavior, protected developer routes,
+  public OpenAPI shape, queue retry signaling, delivery audit records,
+  migration generation, typecheck/check, and focused tests.
