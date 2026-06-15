@@ -191,6 +191,7 @@ pass, and the implementing agent has inspected the diff.
 | `f926ce5` | Outbox dispatcher queue bridge       | Added job contracts, app dispatcher, outbox retry metadata, persisted job runs, Cloudflare queue publisher, and trigger.   |
 | `0a83b5c` | Tenant realtime fanout               | Added transaction realtime protocol, TenantCoordinator fanout, queue invalidation bridge, and web subscription refetch.    |
 | `28d9e47` | Mock banking provider sync           | Added provider adapter package, mock bank sync use cases, persistence, API routes, dashboard status, and migration.        |
+| `c2ef645` | Documents and R2 storage             | Added document metadata/versioning, signed R2 upload/download flow, protected API routes, dashboard panel, and migration.   |
 
 ## Implementation Notes
 
