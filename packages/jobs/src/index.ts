@@ -70,6 +70,15 @@ export const inboxMatchSuggestionsJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const inboxProviderSyncJobSchema = z.object({
+  type: z.literal("inbox.provider.sync"),
+  teamId: z.string().min(1),
+  connectionId: z.string().min(1),
+  provider: z.string().min(1),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const recurringInvoiceGenerationJobSchema = z.object({
   type: z.literal("invoice.recurring.generate"),
   teamId: z.string().min(1),
@@ -135,6 +144,7 @@ export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   documentExtractionJobSchema,
   transactionPendingInboxMatchJobSchema,
   inboxMatchSuggestionsJobSchema,
+  inboxProviderSyncJobSchema,
   recurringInvoiceGenerationJobSchema,
   weeklyInsightGenerationJobSchema,
   automationRunJobSchema,
@@ -149,6 +159,7 @@ export type SyncInvalidationJob = z.infer<typeof syncInvalidationJobSchema>;
 export type DocumentExtractionJob = z.infer<typeof documentExtractionJobSchema>;
 export type TransactionPendingInboxMatchJob = z.infer<typeof transactionPendingInboxMatchJobSchema>;
 export type InboxMatchSuggestionsJob = z.infer<typeof inboxMatchSuggestionsJobSchema>;
+export type InboxProviderSyncJob = z.infer<typeof inboxProviderSyncJobSchema>;
 export type RecurringInvoiceGenerationJob = z.infer<typeof recurringInvoiceGenerationJobSchema>;
 export type WeeklyInsightGenerationJob = z.infer<typeof weeklyInsightGenerationJobSchema>;
 export type AutomationRunJob = z.infer<typeof automationRunJobSchema>;
@@ -201,6 +212,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const extractionJob = createDocumentExtractionJob(event);
   const transactionMatchJobs = createTransactionPendingInboxMatchJobs(event);
   const inboxMatchJob = createInboxMatchSuggestionsJob(event);
+  const inboxProviderSyncJob = createInboxProviderSyncJob(event);
   const recurringInvoiceJob = createRecurringInvoiceGenerationJob(event);
   const weeklyInsightJob = createWeeklyInsightGenerationJob(event);
   const automationJob = createAutomationRunJob(event);
@@ -215,6 +227,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
     extractionJob,
     ...transactionMatchJobs,
     inboxMatchJob,
+    inboxProviderSyncJob,
     recurringInvoiceJob,
     weeklyInsightJob,
     bankSyncJob,
@@ -291,6 +304,10 @@ function createDocumentExtractionJob(event: OutboxEventForJob): DocumentExtracti
     return null;
   }
 
+  if (event.payload.skipExtraction === true) {
+    return null;
+  }
+
   if (
     typeof event.payload.documentId !== "string" ||
     typeof event.payload.versionId !== "string" ||
@@ -347,6 +364,28 @@ function createInboxMatchSuggestionsJob(event: OutboxEventForJob): InboxMatchSug
     inboxItemId: event.payload.inboxItemId,
     sourceOutboxEventId: event.id,
     idempotencyKey: `inbox:match-suggestions:${event.id}:${event.payload.inboxItemId}`,
+  };
+}
+
+function createInboxProviderSyncJob(event: OutboxEventForJob): InboxProviderSyncJob | null {
+  if (event.type !== "inbox.provider.sync_requested") {
+    return null;
+  }
+
+  if (
+    typeof event.payload.connectionId !== "string" ||
+    typeof event.payload.provider !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    type: "inbox.provider.sync",
+    teamId: event.teamId,
+    connectionId: event.payload.connectionId,
+    provider: event.payload.provider,
+    sourceOutboxEventId: event.id,
+    idempotencyKey: `inbox:provider-sync:${event.id}:${event.payload.connectionId}`,
   };
 }
 

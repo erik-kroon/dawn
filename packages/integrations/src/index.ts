@@ -2,6 +2,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 import type { InvoiceDraft, LedgerTransactionDraft, Money, Transaction } from "@dawn/domain";
 
+export * from "./email-inbox";
+
 export type BankingProviderName = "mock-bank" | "sandbox-bank";
 
 export type BankingProviderCapability =

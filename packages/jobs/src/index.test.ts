@@ -357,6 +357,29 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps inbox provider sync requests to queued sync jobs", () => {
+    const messages = outboxEventToQueueMessages({
+      id: "outbox_1",
+      teamId: "team_1",
+      type: "inbox.provider.sync_requested",
+      version: 1,
+      payload: {
+        connectionId: "conn_1",
+        provider: "gmail",
+      },
+      dispatchAttempts: 0,
+    });
+
+    expect(messages).toContainEqual({
+      type: "inbox.provider.sync",
+      teamId: "team_1",
+      connectionId: "conn_1",
+      provider: "gmail",
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "inbox:provider-sync:outbox_1:conn_1",
+    });
+  });
+
   test("maps recurring invoice due events to generation jobs", () => {
     expect(
       outboxEventToQueueMessages({
@@ -520,6 +543,7 @@ describe("job contracts", () => {
       "sync.invalidate": record("sync.invalidate"),
       "document.extract": record("document.extract"),
       "inbox.match_suggestions": record("inbox.match_suggestions"),
+      "inbox.provider.sync": record("inbox.provider.sync"),
       "transaction.match_pending_inbox": record("transaction.match_pending_inbox"),
       "invoice.recurring.generate": record("invoice.recurring.generate"),
       "insights.weekly.generate": record("insights.weekly.generate"),

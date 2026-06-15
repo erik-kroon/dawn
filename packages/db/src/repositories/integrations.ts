@@ -256,6 +256,7 @@ export function mapIntegrationConnection(
     capabilities: connection.capabilities,
     tokenKeyId: connection.tokenKeyId,
     tokenLastFour: connection.tokenLastFour,
+    rawPayload: connection.rawPayload,
     lastSyncAt: connection.lastSyncAt?.toISOString() ?? null,
     lastError: connection.lastError,
     disabledAt: connection.disabledAt?.toISOString() ?? null,

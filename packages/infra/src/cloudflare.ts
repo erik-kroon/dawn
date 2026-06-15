@@ -23,6 +23,8 @@ export type DawnCloudflareBindings = {
   BETTER_AUTH_SECRET: string;
   POLAR_ACCESS_TOKEN: string;
   POLAR_SUCCESS_URL: string;
+  GMAIL_CLIENT_ID?: string;
+  GMAIL_CLIENT_SECRET?: string;
   DATABASE_URL: string;
   DAWN_DOCUMENTS: R2Bucket;
   DAWN_JOBS: Queue<DawnQueueMessage>;

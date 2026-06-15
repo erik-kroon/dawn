@@ -390,8 +390,8 @@ export type BankingRepository = {
   }): Promise<BankConnection>;
   upsertProviderObject(input: {
     teamId: string;
-    provider: BankingProviderName;
-    providerObjectType: "connection" | "account" | "transaction";
+    provider: string;
+    providerObjectType: string;
     providerObjectId: string;
     connectionId?: string | null;
     bankAccountId?: string | null;

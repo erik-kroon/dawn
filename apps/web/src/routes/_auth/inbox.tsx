@@ -17,9 +17,12 @@ import {
   FileTextIcon,
   InboxIcon,
   ListFilterIcon,
+  MailIcon,
   MoreVerticalIcon,
   PlusIcon,
+  RefreshCwIcon,
   SearchIcon,
+  Settings2Icon,
   SparklesIcon,
   Trash2Icon,
   UploadIcon,
@@ -35,16 +38,25 @@ import { ensureCurrentTeam, optionalStringSearchParam } from "../-team-routing";
 type InboxTab = "all" | "review";
 
 type InboxSearch = {
+  code?: string;
+  emailInboxProvider?: "gmail" | "mock-email-inbox";
   itemId?: string;
   q?: string;
+  state?: string;
   tab?: InboxTab;
 };
 
 export const Route = createFileRoute("/_auth/inbox")({
   component: InboxRoute,
   validateSearch: (search: Record<string, unknown>): InboxSearch => ({
+    code: optionalStringSearchParam(search.code),
+    emailInboxProvider:
+      search.emailInboxProvider === "gmail" || search.emailInboxProvider === "mock-email-inbox"
+        ? search.emailInboxProvider
+        : undefined,
     itemId: optionalStringSearchParam(search.itemId),
     q: optionalStringSearchParam(search.q),
+    state: optionalStringSearchParam(search.state),
     tab: search.tab === "review" ? "review" : undefined,
   }),
   loaderDeps: ({ search }) => ({ teamId: search.teamId }),
@@ -61,6 +73,9 @@ export const Route = createFileRoute("/_auth/inbox")({
       ),
       context.queryClient.ensureQueryData(
         context.orpc.inbox.list.queryOptions({ input: { teamId: currentTeamId } }),
+      ),
+      context.queryClient.ensureQueryData(
+        context.orpc.emailInbox.list.queryOptions({ input: { teamId: currentTeamId } }),
       ),
     ]);
 
@@ -101,6 +116,10 @@ function InboxRoute() {
   });
   const inbox = useQuery({
     ...orpc.inbox.list.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
+  const emailInbox = useQuery({
+    ...orpc.emailInbox.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
 
@@ -189,6 +208,69 @@ function InboxRoute() {
       },
     }),
   );
+  const connectEmailInboxMutation = useMutation({
+    mutationFn: async (input: { teamId: string; provider: "gmail" | "mock-email-inbox" }) => {
+      return client.emailInbox.createAuthorizationUrl({
+        teamId: input.teamId,
+        provider: input.provider,
+        redirectUrl: emailInboxRedirectUrl(input.teamId, input.provider),
+        state: crypto.randomUUID(),
+      });
+    },
+    onSuccess: (result) => {
+      window.location.assign(result.authorizationUrl);
+    },
+  });
+  const completeEmailInboxOAuthMutation = useMutation(
+    orpc.emailInbox.completeOAuth.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.emailInbox.list.queryKey() });
+        await navigate({
+          replace: true,
+          search: (previous) => ({
+            ...previous,
+            code: undefined,
+            emailInboxProvider: undefined,
+            state: undefined,
+          }),
+        });
+      },
+    }),
+  );
+  const requestEmailInboxSyncMutation = useMutation(
+    orpc.emailInbox.requestSync.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.emailInbox.list.queryKey() });
+      },
+    }),
+  );
+  const updateEmailInboxSettingsMutation = useMutation(
+    orpc.emailInbox.updateSettings.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.emailInbox.list.queryKey() });
+      },
+    }),
+  );
+
+  useEffect(() => {
+    if (
+      !currentTeamId ||
+      !search.code ||
+      !search.emailInboxProvider ||
+      completeEmailInboxOAuthMutation.isPending ||
+      completeEmailInboxOAuthMutation.isSuccess
+    ) {
+      return;
+    }
+
+    completeEmailInboxOAuthMutation.mutate({
+      teamId: currentTeamId,
+      provider: search.emailInboxProvider,
+      code: search.code,
+      redirectUrl: emailInboxRedirectUrl(currentTeamId, search.emailInboxProvider),
+      idempotencyKey: `email-inbox-oauth:${search.emailInboxProvider}:${search.code}`,
+    });
+  }, [currentTeamId, search.code, search.emailInboxProvider]);
 
   const inboxItems = inbox.data?.inboxItems ?? [];
   const filteredInboxItems = useMemo(() => {
@@ -274,6 +356,46 @@ function InboxRoute() {
           </Button>
         </div>
       ) : null}
+
+      <EmailInboxConnectorStrip
+        connections={emailInbox.data?.connections ?? []}
+        connectPending={connectEmailInboxMutation.isPending}
+        currentTeamId={currentTeamId}
+        oauthPending={completeEmailInboxOAuthMutation.isPending}
+        onConnect={(provider) => {
+          if (!currentTeamId) {
+            return;
+          }
+
+          connectEmailInboxMutation.mutate({ teamId: currentTeamId, provider });
+        }}
+        onSaveSettings={(connectionId, settings) => {
+          if (!currentTeamId) {
+            return;
+          }
+
+          updateEmailInboxSettingsMutation.mutate({
+            teamId: currentTeamId,
+            connectionId,
+            settings,
+            idempotencyKey: crypto.randomUUID(),
+          });
+        }}
+        onSync={(connectionId) => {
+          if (!currentTeamId) {
+            return;
+          }
+
+          requestEmailInboxSyncMutation.mutate({
+            teamId: currentTeamId,
+            connectionId,
+            idempotencyKey: crypto.randomUUID(),
+          });
+        }}
+        providers={emailInbox.data?.providers ?? []}
+        settingsPending={updateEmailInboxSettingsMutation.isPending}
+        syncPending={requestEmailInboxSyncMutation.isPending}
+      />
 
       <section className="grid min-h-[calc(100svh-150px)] gap-6 lg:grid-cols-[minmax(360px,0.95fr)_minmax(520px,1.35fr)]">
         <div className="grid min-h-0 grid-rows-[auto_1fr] gap-6">
@@ -778,6 +900,206 @@ function DocumentPreview({
   );
 }
 
+type EmailInboxProviderOption = {
+  provider: "gmail" | "mock-email-inbox";
+  displayName: string;
+  capabilities: readonly string[];
+  defaultScopes: readonly string[];
+};
+
+type EmailInboxConnectionOption = {
+  accountEmail: string | null;
+  reauthorizationRequired: boolean;
+  settings: {
+    senderBlocklist: string[];
+    domainBlocklist: string[];
+    senderAllowlist?: string[];
+    searchQuery?: string | null;
+    maxAttachmentBytes: number;
+  };
+  latestSyncRun?: {
+    status: string;
+    recordsSynced: number;
+    error?: string | null;
+  } | null;
+  connection: {
+    id: string;
+    provider: string;
+    status: string;
+    lastSyncAt?: string | null;
+    lastError?: string | null;
+  };
+};
+
+function EmailInboxConnectorStrip({
+  connections,
+  connectPending,
+  currentTeamId,
+  oauthPending,
+  onConnect,
+  onSaveSettings,
+  onSync,
+  providers,
+  settingsPending,
+  syncPending,
+}: {
+  connections: EmailInboxConnectionOption[];
+  connectPending: boolean;
+  currentTeamId?: string;
+  oauthPending: boolean;
+  onConnect: (provider: "gmail" | "mock-email-inbox") => void;
+  onSaveSettings: (
+    connectionId: string,
+    settings: {
+      senderBlocklist: string[];
+      domainBlocklist: string[];
+      senderAllowlist: string[];
+      searchQuery: string | null;
+      maxAttachmentBytes: number;
+    },
+  ) => void;
+  onSync: (connectionId: string) => void;
+  providers: EmailInboxProviderOption[];
+  settingsPending: boolean;
+  syncPending: boolean;
+}) {
+  const primaryProvider =
+    providers.find((provider) => provider.provider === "gmail") ?? providers[0] ?? null;
+  const primaryConnection =
+    connections.find((connection) => connection.connection.provider === "gmail") ??
+    connections[0] ??
+    null;
+  const [blockedSenders, setBlockedSenders] = useState(
+    primaryConnection?.settings.senderBlocklist.join(", ") ?? "",
+  );
+  const [blockedDomains, setBlockedDomains] = useState(
+    primaryConnection?.settings.domainBlocklist.join(", ") ?? "",
+  );
+
+  useEffect(() => {
+    setBlockedSenders(primaryConnection?.settings.senderBlocklist.join(", ") ?? "");
+    setBlockedDomains(primaryConnection?.settings.domainBlocklist.join(", ") ?? "");
+  }, [primaryConnection?.connection.id]);
+
+  return (
+    <section className="grid gap-3 border border-border bg-background p-4 lg:grid-cols-[minmax(260px,0.8fr)_minmax(360px,1fr)_auto] lg:items-center">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-card">
+          <MailIcon aria-hidden="true" className="size-5 text-muted-foreground" />
+        </div>
+        <div className="min-w-0">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <p className="truncate text-sm font-medium">
+              {primaryConnection?.accountEmail ?? primaryProvider?.displayName ?? "Email inbox"}
+            </p>
+            <EmailInboxConnectionBadge connection={primaryConnection} oauthPending={oauthPending} />
+          </div>
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            {primaryConnection
+              ? `${primaryConnection.connection.provider} · ${formatEmailInboxSyncStatus(primaryConnection)}`
+              : "Connect Gmail to import receipt attachments and email-body receipts."}
+          </p>
+        </div>
+      </div>
+
+      {primaryConnection ? (
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Label className="grid gap-1 text-xs text-muted-foreground">
+            Block senders
+            <Input
+              className="h-9 border-border text-foreground"
+              onChange={(event) => setBlockedSenders(event.target.value)}
+              placeholder="billing@example.com"
+              value={blockedSenders}
+            />
+          </Label>
+          <Label className="grid gap-1 text-xs text-muted-foreground">
+            Block domains
+            <Input
+              className="h-9 border-border text-foreground"
+              onChange={(event) => setBlockedDomains(event.target.value)}
+              placeholder="example.com"
+              value={blockedDomains}
+            />
+          </Label>
+        </div>
+      ) : (
+        <div className="grid gap-1 text-xs text-muted-foreground">
+          <span>Scopes</span>
+          <span className="truncate font-mono">
+            {primaryProvider?.defaultScopes.join(" ") ?? "gmail.readonly"}
+          </span>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
+        {primaryConnection ? (
+          <>
+            <Button
+              disabled={settingsPending || !currentTeamId}
+              onClick={() =>
+                onSaveSettings(primaryConnection.connection.id, {
+                  senderBlocklist: commaList(blockedSenders),
+                  domainBlocklist: commaList(blockedDomains),
+                  senderAllowlist: primaryConnection.settings.senderAllowlist ?? [],
+                  searchQuery: primaryConnection.settings.searchQuery ?? null,
+                  maxAttachmentBytes: primaryConnection.settings.maxAttachmentBytes,
+                })
+              }
+              size="sm"
+              variant="outline"
+            >
+              <Settings2Icon aria-hidden="true" className="size-3.5" />
+              Save filters
+            </Button>
+            <Button
+              disabled={
+                syncPending || !currentTeamId || primaryConnection.connection.status === "disabled"
+              }
+              onClick={() => onSync(primaryConnection.connection.id)}
+              size="sm"
+            >
+              <RefreshCwIcon aria-hidden="true" className="size-3.5" />
+              Sync
+            </Button>
+          </>
+        ) : (
+          <Button
+            disabled={connectPending || !currentTeamId || !primaryProvider}
+            onClick={() => (primaryProvider ? onConnect(primaryProvider.provider) : undefined)}
+            size="sm"
+          >
+            <MailIcon aria-hidden="true" className="size-3.5" />
+            Connect {primaryProvider?.displayName ?? "Gmail"}
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function EmailInboxConnectionBadge({
+  connection,
+  oauthPending,
+}: {
+  connection: EmailInboxConnectionOption | null;
+  oauthPending: boolean;
+}) {
+  if (oauthPending) {
+    return <Badge variant="warning">Connecting</Badge>;
+  }
+
+  if (!connection) {
+    return <Badge variant="outline">Not connected</Badge>;
+  }
+
+  if (connection.reauthorizationRequired || connection.connection.status === "error") {
+    return <Badge variant="destructive">Reauth required</Badge>;
+  }
+
+  return <Badge variant="success">Connected</Badge>;
+}
+
 function CorrectionInput({
   field,
   initial,
@@ -942,6 +1264,33 @@ function formatExtractionConfidence(confidence: Record<string, number | undefine
 
 function formatMatchScore(score: number) {
   return `${Math.round(score * 100)}%`;
+}
+
+function formatEmailInboxSyncStatus(connection: EmailInboxConnectionOption) {
+  if (connection.latestSyncRun?.status === "failed") {
+    return connection.latestSyncRun.error ?? "Last sync failed";
+  }
+
+  if (connection.connection.lastSyncAt) {
+    return `Last synced ${formatDate(connection.connection.lastSyncAt)}`;
+  }
+
+  return "Ready to sync";
+}
+
+function emailInboxRedirectUrl(teamId: string, provider: "gmail" | "mock-email-inbox") {
+  const url = new URL(window.location.origin);
+  url.pathname = "/inbox";
+  url.searchParams.set("teamId", teamId);
+  url.searchParams.set("emailInboxProvider", provider);
+  return url.toString();
+}
+
+function commaList(value: string) {
+  return value
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function bestSuggestionStatus(suggestions?: { status: string }[]) {

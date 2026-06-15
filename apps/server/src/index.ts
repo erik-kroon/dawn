@@ -64,7 +64,7 @@ import { logServerError, requestIdFromHeaders } from "./observability";
 import { createCloudflareOutboxQueuePublisher } from "./outbox-queue";
 import { enforcePublicApiRateLimit } from "./rate-limit";
 import { publishTenantSyncInvalidation } from "./tenant-sync";
-import { handleDawnWorkerQueueBatch } from "./worker-runtime";
+import { handleDawnWorkerQueueBatch, requestScheduledEmailInboxSyncs } from "./worker-runtime";
 import { RateLimitError } from "@dawn/app/rate-limit";
 
 export { TenantCoordinator } from "./tenant-coordinator";
@@ -1702,5 +1702,11 @@ export default {
   fetch: app.fetch.bind(app),
   async queue(batch, env) {
     await handleDawnWorkerQueueBatch(batch, env);
+  },
+  async scheduled(controller, env) {
+    await requestScheduledEmailInboxSyncs({
+      env,
+      scheduledTime: controller.scheduledTime,
+    });
   },
 } satisfies ExportedHandler<DawnCloudflareBindings, DawnQueueMessage>;

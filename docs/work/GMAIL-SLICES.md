@@ -8,6 +8,24 @@ Dawn has a Gmail connector that matches or exceeds Midday by supporting:
 - Deduping, sender/domain blocklists, size limits, sync run records, audit logs, outbox jobs, and observable failure states.
 - Provider-neutral architecture so Outlook or another mailbox provider can use the same app/job/document pipeline.
 
+**Implementation Status**
+Implemented on 2026-06-15.
+
+- Provider-neutral `InboxConnector` and email evidence contract live in `packages/integrations`.
+- Gmail OAuth, token refresh, message search, attachment fetch, body evidence mapping, and structured provider errors are implemented behind the Gmail adapter.
+- Email inbox app use cases own OAuth completion, encrypted token persistence, settings, sync requests, evidence ingestion, dedupe, audit, outbox, and sync-run status.
+- Manual and scheduled sync jobs route through `inbox.provider.sync`; the scheduled worker requests due connections on cron.
+- Mock provider coverage imports both a PDF attachment and body-only receipt into Documents/Inbox, with body receipt extraction.
+- Inbox UI exposes provider connect status, OAuth callback handling, manual sync, and filtering controls.
+
+Verification passed:
+
+- `bun test packages/integrations`
+- `bun test packages/integrations packages/app/src/email-inbox.test.ts packages/api/src/router.test.ts packages/jobs/src/index.test.ts`
+- `DATABASE_URL=postgres://user:pass@localhost:5432/dawn BETTER_AUTH_SECRET=12345678901234567890123456789012 BETTER_AUTH_URL=http://localhost:3000 CORS_ORIGIN=http://localhost:3000 bun test apps/server/src/worker-runtime.test.ts`
+- `bun run check-types`
+- Browser smoke opened `/inbox` on the local web app and verified the unauthenticated redirect to `/login` with no client errors. A full authenticated Gmail browser smoke still requires a working local database/session and Google OAuth credentials.
+
 **Slice Strategy**
 Do not port Midday’s `getAttachments()` shape directly. In Dawn, Gmail should be an `email inbox provider` behind `packages/integrations`, with application use cases in `packages/app` owning OAuth completion, sync requests, evidence ingestion, idempotency, audit, and outbox events.
 

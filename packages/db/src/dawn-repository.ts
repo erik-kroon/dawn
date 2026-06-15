@@ -18,10 +18,12 @@ import type {
   InboxTransactionMatchSuggestion,
   InboxSource,
   InboxSourceType,
+  IntegrationConnectionSecrets,
   JobRun,
   MatchFeedback,
   OutboxDispatchRepository,
   OutboxEvent,
+  ProviderObjectRecord,
   ProviderSyncRun,
   ReviewWorkspaceData,
   TeamAlias,
@@ -705,8 +707,8 @@ export class DrizzleDawnRepository implements DrizzleRepository {
 
   async upsertProviderObject(input: {
     teamId: string;
-    provider: BankConnection["provider"];
-    providerObjectType: "connection" | "account" | "transaction";
+    provider: string;
+    providerObjectType: string;
     providerObjectId: string;
     connectionId?: string | null;
     bankAccountId?: string | null;
@@ -756,8 +758,67 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     });
   }
 
+  async getProviderObjectForTeam(input: {
+    teamId: string;
+    provider: string;
+    providerObjectType: string;
+    providerObjectId: string;
+  }): Promise<ProviderObjectRecord | null> {
+    const [object] = await this.client
+      .select()
+      .from(schema.providerObject)
+      .where(
+        and(
+          eq(schema.providerObject.teamId, input.teamId),
+          eq(schema.providerObject.provider, input.provider),
+          eq(schema.providerObject.providerObjectType, input.providerObjectType),
+          eq(schema.providerObject.providerObjectId, input.providerObjectId),
+        ),
+      )
+      .limit(1);
+
+    return object
+      ? {
+          id: object.id,
+          teamId: object.teamId,
+          provider: object.provider,
+          providerObjectType: object.providerObjectType,
+          providerObjectId: object.providerObjectId,
+          internalEntityType: object.internalEntityType,
+          internalEntityId: object.internalEntityId,
+          rawPayload: object.rawPayload,
+        }
+      : null;
+  }
+
   async listIntegrationConnectionSummaries(teamId: string) {
     return integrationPersistence.listIntegrationConnectionSummaries(this.client, teamId);
+  }
+
+  async listIntegrationConnectionsForTeam(teamId: string): Promise<IntegrationConnection[]> {
+    const connections = await this.client
+      .select()
+      .from(schema.integrationConnection)
+      .where(eq(schema.integrationConnection.teamId, teamId))
+      .orderBy(desc(schema.integrationConnection.createdAt));
+
+    return connections.map(integrationPersistence.mapIntegrationConnection);
+  }
+
+  async listEmailInboxSyncCandidateConnections(): Promise<IntegrationConnection[]> {
+    const connections = await this.client
+      .select()
+      .from(schema.integrationConnection)
+      .where(
+        and(
+          eq(schema.integrationConnection.category, "email"),
+          eq(schema.integrationConnection.status, "connected"),
+          inArray(schema.integrationConnection.provider, ["gmail", "mock-email-inbox"]),
+        ),
+      )
+      .orderBy(asc(schema.integrationConnection.lastSyncAt));
+
+    return connections.map(integrationPersistence.mapIntegrationConnection);
   }
 
   async getIntegrationConnectionForTeam(
@@ -786,6 +847,77 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     createdByActorId: string;
   }): Promise<IntegrationConnection> {
     return integrationPersistence.upsertIntegrationConnection(this.client, input);
+  }
+
+  async getIntegrationConnectionSecretsForTeam(
+    teamId: string,
+    connectionId: string,
+  ): Promise<IntegrationConnectionSecrets | null> {
+    const [connection] = await this.client
+      .select()
+      .from(schema.integrationConnection)
+      .where(
+        and(
+          eq(schema.integrationConnection.teamId, teamId),
+          eq(schema.integrationConnection.id, connectionId),
+        ),
+      )
+      .limit(1);
+
+    return connection
+      ? {
+          token: {
+            encryptedToken: connection.tokenCiphertext,
+            keyId: connection.tokenKeyId,
+            lastFour: connection.tokenLastFour,
+          },
+          rawPayload: connection.rawPayload,
+        }
+      : null;
+  }
+
+  async updateIntegrationConnectionTokenAndRawPayload(input: {
+    connectionId: string;
+    token?: IntegrationConnectionSecrets["token"] | null;
+    rawPayload: Record<string, unknown>;
+    status?: IntegrationConnection["status"];
+    lastError?: string | null;
+    lastSyncAt?: Date | null;
+  }): Promise<IntegrationConnection> {
+    const update: Partial<typeof schema.integrationConnection.$inferInsert> = {
+      rawPayload: input.rawPayload,
+      updatedAt: new Date(),
+    };
+
+    if (input.token) {
+      update.tokenCiphertext = input.token.encryptedToken;
+      update.tokenKeyId = input.token.keyId;
+      update.tokenLastFour = input.token.lastFour;
+    }
+
+    if (input.status) {
+      update.status = input.status;
+    }
+
+    if (input.lastError !== undefined) {
+      update.lastError = input.lastError;
+    }
+
+    if (input.lastSyncAt !== undefined) {
+      update.lastSyncAt = input.lastSyncAt;
+    }
+
+    const [connection] = await this.client
+      .update(schema.integrationConnection)
+      .set(update)
+      .where(eq(schema.integrationConnection.id, input.connectionId))
+      .returning();
+
+    if (!connection) {
+      throw new Error("Integration connection was not updated");
+    }
+
+    return integrationPersistence.mapIntegrationConnection(connection);
   }
 
   async createIntegrationSyncRun(input: {
@@ -1070,6 +1202,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     inboxItemId: string;
     sourceId: string;
     teamId: string;
+    sourceType?: InboxSourceType;
     documentId: string;
     documentVersionId: string;
     createdByActorId: string;
@@ -1095,7 +1228,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         id: input.inboxItemId,
         teamId: input.teamId,
         sourceId: input.sourceId,
-        sourceType: "document_upload",
+        sourceType: input.sourceType ?? "document_upload",
         documentId: input.documentId,
         documentVersionId: input.documentVersionId,
         status: "pending_extraction",

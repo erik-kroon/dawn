@@ -54,7 +54,7 @@ export type BusinessDocument = {
   currentVersion?: BusinessDocumentVersion | null;
 };
 
-export type InboxSourceType = "document_upload" | "email_forward";
+export type InboxSourceType = "document_upload" | "email_forward" | "email_provider";
 
 export type InboxSource = {
   id: string;
@@ -380,6 +380,7 @@ export type InboxRepository = {
     inboxItemId: string;
     sourceId: string;
     teamId: string;
+    sourceType?: InboxSourceType;
     documentId: string;
     documentVersionId: string;
     createdByActorId: string;

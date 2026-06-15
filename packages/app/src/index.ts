@@ -33,6 +33,7 @@ import type { OperationsRepository } from "./operations";
 import type { AssistantUseCaseRepository } from "./assistant";
 import type { AutomationUseCaseRepository } from "./automation";
 import type { DeveloperUseCaseRepository } from "./developer";
+import type { EmailInboxUseCaseRepository } from "./email-inbox";
 import type { IntegrationUseCaseRepository } from "./integrations";
 
 export * from "./assistant";
@@ -41,6 +42,7 @@ export * from "./banking-ledger";
 export * from "./billing";
 export * from "./developer";
 export * from "./documents-inbox";
+export * from "./email-inbox";
 export * from "./integrations";
 export * from "./operations";
 export * from "./projects-reporting";
@@ -257,6 +259,7 @@ export type DawnRepository = BankingUseCaseRepository &
   AssistantUseCaseRepository &
   AutomationUseCaseRepository &
   DeveloperUseCaseRepository &
+  EmailInboxUseCaseRepository &
   IntegrationUseCaseRepository &
   OperationsRepository;
 

@@ -42,6 +42,7 @@ describe("Dawn worker runtime", () => {
       "bank.sync",
       "document.extract",
       "inbox.match_suggestions",
+      "inbox.provider.sync",
       "insights.weekly.generate",
       "invoice.recurring.generate",
       "outbox.dispatch",

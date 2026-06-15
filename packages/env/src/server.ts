@@ -11,6 +11,8 @@ export const serverEnvSchema = {
   BETTER_AUTH_URL: z.url(),
   POLAR_ACCESS_TOKEN: z.string().min(1).optional(),
   POLAR_SUCCESS_URL: z.url().optional(),
+  GMAIL_CLIENT_ID: z.string().min(1).optional(),
+  GMAIL_CLIENT_SECRET: z.string().min(1).optional(),
   CORS_ORIGIN: z.url(),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
 };

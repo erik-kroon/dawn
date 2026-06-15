@@ -58,9 +58,12 @@ import type {
 } from "@dawn/app";
 import {
   createMockBankingProvider,
+  createEmailInboxTokenCodec,
+  createMockEmailInboxProvider,
   createSandboxBankingProvider,
   createMockIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
+  InboxConnector,
 } from "@dawn/integrations";
 import {
   createApiTestContext as testContext,
@@ -362,6 +365,23 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       `${input.provider}:${input.providerObjectType}:${input.providerObjectId}`,
       input.rawPayload,
     );
+  }
+
+  async getProviderObjectForTeam(input: Parameters<DawnRepository["getProviderObjectForTeam"]>[0]) {
+    const rawPayload = this.providerObjects.get(
+      `${input.provider}:${input.providerObjectType}:${input.providerObjectId}`,
+    );
+
+    return rawPayload
+      ? {
+          id: `${input.provider}:${input.providerObjectType}:${input.providerObjectId}`,
+          teamId: input.teamId,
+          provider: input.provider,
+          providerObjectType: input.providerObjectType,
+          providerObjectId: input.providerObjectId,
+          rawPayload,
+        }
+      : null;
   }
 
   async listDocuments(teamId: string) {
@@ -1775,9 +1795,36 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       }));
   }
 
+  async listIntegrationConnectionsForTeam(teamId: string) {
+    return [...this.integrationConnections.values()].filter(
+      (connection) => connection.teamId === teamId,
+    );
+  }
+
+  async listEmailInboxSyncCandidateConnections() {
+    return [...this.integrationConnections.values()].filter(
+      (connection) => connection.category === "email" && connection.status === "connected",
+    );
+  }
+
   async getIntegrationConnectionForTeam(teamId: string, connectionId: string) {
     const connection = this.integrationConnections.get(connectionId);
     return connection?.teamId === teamId ? connection : null;
+  }
+
+  async getIntegrationConnectionSecretsForTeam(teamId: string, connectionId: string) {
+    const connection = this.integrationConnections.get(connectionId);
+
+    return connection?.teamId === teamId
+      ? {
+          token: {
+            encryptedToken: connection.tokenCiphertext,
+            keyId: connection.tokenKeyId,
+            lastFour: connection.tokenLastFour,
+          },
+          rawPayload: connection.rawPayload ?? {},
+        }
+      : null;
   }
 
   async upsertIntegrationConnection(input: {
@@ -1791,6 +1838,7 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     tokenCiphertext: string;
     tokenKeyId: string;
     tokenLastFour: string;
+    rawPayload: Record<string, unknown>;
     createdByActorId: string;
   }) {
     const existing = [...this.integrationConnections.values()].find(
@@ -1812,6 +1860,7 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       tokenCiphertext: input.tokenCiphertext,
       tokenKeyId: input.tokenKeyId,
       tokenLastFour: input.tokenLastFour,
+      rawPayload: input.rawPayload,
       lastSyncAt: null,
       lastError: null,
       disabledAt: null,
@@ -1821,6 +1870,34 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     };
     this.integrationConnections.set(connection.id, connection);
     return connection;
+  }
+
+  async updateIntegrationConnectionTokenAndRawPayload(input: {
+    connectionId: string;
+    token?: { encryptedToken: string; keyId: string; lastFour: string } | null;
+    rawPayload: Record<string, unknown>;
+    status?: IntegrationConnection["status"];
+    lastError?: string | null;
+    lastSyncAt?: Date | null;
+  }) {
+    const connection = this.integrationConnections.get(input.connectionId);
+
+    if (!connection) {
+      throw new Error("missing connection");
+    }
+
+    const updated = {
+      ...connection,
+      tokenCiphertext: input.token?.encryptedToken ?? connection.tokenCiphertext,
+      tokenKeyId: input.token?.keyId ?? connection.tokenKeyId,
+      tokenLastFour: input.token?.lastFour ?? connection.tokenLastFour,
+      rawPayload: input.rawPayload,
+      status: input.status ?? connection.status,
+      lastError: input.lastError ?? connection.lastError,
+      lastSyncAt: input.lastSyncAt?.toISOString() ?? connection.lastSyncAt,
+    };
+    this.integrationConnections.set(updated.id, updated);
+    return updated;
   }
 
   async createIntegrationSyncRun(input: {
@@ -2138,6 +2215,15 @@ async function createTestRouter(repository: DawnRepository) {
       }),
     ],
     integrationProviders: createMockIntegrationProviders(),
+    emailInboxConnectors: [
+      new InboxConnector({
+        provider: createMockEmailInboxProvider(),
+        tokenCodec: createEmailInboxTokenCodec({
+          secret: "test_secret_that_is_long_enough_for_aes",
+          keyId: "test-email-token",
+        }),
+      }),
+    ],
     documentUrlSigner: testDocumentUrlSigner,
     invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
     invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
@@ -3914,6 +4000,91 @@ describe("appRouter", () => {
     expect(disabled.connection.status).toBe("disabled");
     expect(repository.invoicePayments).toHaveLength(1);
     expect(repository.integrationSyncRuns).toHaveLength(6);
+  });
+
+  test("manages email inbox OAuth, settings, and sync requests through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+
+    const catalog = await call(router.emailInbox.list, { teamId: "team_1" }, context);
+    const authUrl = await call(
+      router.emailInbox.createAuthorizationUrl,
+      {
+        teamId: "team_1",
+        provider: "mock-email-inbox",
+        redirectUrl: "http://localhost:3001/inbox?emailInboxProvider=mock-email-inbox",
+        state: "state_1",
+      },
+      context,
+    );
+    const connected = await call(
+      router.emailInbox.completeOAuth,
+      {
+        teamId: "team_1",
+        provider: "mock-email-inbox",
+        code: "oauth_code_1",
+        redirectUrl: "http://localhost:3001/inbox?emailInboxProvider=mock-email-inbox",
+        idempotencyKey: "email_inbox_oauth_1",
+      },
+      context,
+    );
+    const settings = await call(
+      router.emailInbox.updateSettings,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        settings: {
+          senderBlocklist: ["blocked@example.com"],
+          domainBlocklist: ["noise.example"],
+          maxAttachmentBytes: 1_000_000,
+        },
+        idempotencyKey: "email_inbox_settings_1",
+      },
+      context,
+    );
+    const requested = await call(
+      router.emailInbox.requestSync,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "email_inbox_sync_request_1",
+      },
+      context,
+    );
+    const workspace = await call(router.emailInbox.list, { teamId: "team_1" }, context);
+
+    expect(catalog.providers.map((provider) => provider.provider)).toContain("mock-email-inbox");
+    expect(authUrl.authorizationUrl).toContain("state=state_1");
+    expect(connected.connection).toMatchObject({
+      category: "email",
+      provider: "mock-email-inbox",
+      displayName: "receipts@example.com",
+    });
+    expect(
+      repository.integrationConnections.get(connected.connection.id)?.tokenCiphertext,
+    ).not.toContain("mock_refresh");
+    expect(settings.connection.rawPayload?.emailInbox).toMatchObject({
+      settings: {
+        senderBlocklist: ["blocked@example.com"],
+        domainBlocklist: ["noise.example"],
+        maxAttachmentBytes: 1_000_000,
+      },
+    });
+    expect(requested.connection.id).toBe(connected.connection.id);
+    expect(workspace.connections[0]).toMatchObject({
+      accountEmail: "receipts@example.com",
+      settings: {
+        senderBlocklist: ["blocked@example.com"],
+        domainBlocklist: ["noise.example"],
+      },
+    });
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "inbox.provider.sync_requested",
+      payload: { connectionId: connected.connection.id, provider: "mock-email-inbox" },
+    });
   });
 
   test("returns operations workspace with redacted failure and audit records", async () => {

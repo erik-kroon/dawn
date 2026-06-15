@@ -7,6 +7,7 @@ import {
   approveAssistantAction,
   commitCsvTransactionImport,
   completeBankConnection,
+  completeEmailInboxOAuth,
   createLedgerCounterparty,
   connectIntegration,
   createDeterministicInvoicePdfRenderer,
@@ -31,12 +32,14 @@ import {
   createWebhookSubscription,
   disableIntegration,
   disconnectBankConnection,
+  createEmailInboxAuthorizationUrl,
   generateInboxMatchSuggestions,
   getAssistantConversation,
   exportAccountingIntegration,
   recordPaymentProviderEvent,
   inviteTeamMember,
   correctDocumentExtraction,
+  listEmailInboxWorkspace,
   listAssistantWorkspace,
   listAutomationWorkspace,
   listBankConnections,
@@ -60,6 +63,7 @@ import {
   rejectInboxMatch,
   rejectAssistantAction,
   recordInvoicePayment,
+  requestEmailInboxSync,
   reviewTransaction,
   requestTeamDataDeletion,
   requestTeamDataExport,
@@ -77,6 +81,7 @@ import {
   type DocumentExtractionFields,
   type DocumentUrlSigner,
   type InvoicePdfRenderer,
+  updateEmailInboxSettings,
   updateDraftInvoice,
   updateTeamMemberRole,
 } from "@dawn/app";
@@ -89,7 +94,12 @@ import {
   createSandboxBankingProvider,
   createMockIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
+  createEmailInboxTokenCodec,
+  createGmailEmailInboxProvider,
+  createMockEmailInboxProvider,
+  InboxConnector,
   type BankingProvider,
+  type EmailInboxProviderName,
   type IntegrationProvider,
   type InvoiceEmailDeliveryProvider,
 } from "@dawn/integrations";
@@ -104,6 +114,7 @@ export type AppRouterDependencies = {
   dawnRepository: DawnRepository;
   bankingProviders: readonly BankingProvider[];
   integrationProviders: readonly IntegrationProvider[];
+  emailInboxConnectors: readonly InboxConnector[];
   documentUrlSigner: DocumentUrlSigner;
   invoicePdfRenderer: InvoicePdfRenderer;
   invoiceEmailDeliveryProvider: InvoiceEmailDeliveryProvider;
@@ -305,6 +316,8 @@ const integrationProviderInput = z.enum([
   "mock-email",
 ]);
 
+const emailInboxProviderInput = z.enum(["mock-email-inbox", "gmail"]);
+
 const integrationWorkspaceInput = z
   .object({
     teamId: z.string().min(1).optional(),
@@ -348,6 +361,44 @@ const disableIntegrationInput = z.object({
   teamId: z.string().min(1),
   connectionId: z.string().min(1),
   idempotencyKey: z.string().min(1),
+});
+
+const emailInboxWorkspaceInput = z
+  .object({
+    teamId: z.string().min(1).optional(),
+  })
+  .optional();
+
+const createEmailInboxAuthorizationUrlInput = z.object({
+  teamId: z.string().min(1),
+  provider: emailInboxProviderInput,
+  redirectUrl: z.url(),
+  state: z.string().min(1).nullable().optional(),
+  loginHint: z.email().nullable().optional(),
+});
+
+const completeEmailInboxOAuthInput = z.object({
+  teamId: z.string().min(1),
+  provider: emailInboxProviderInput,
+  code: z.string().min(1),
+  redirectUrl: z.url(),
+  idempotencyKey: z.string().min(1),
+});
+
+const requestEmailInboxSyncInput = z.object({
+  teamId: z.string().min(1),
+  connectionId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const updateEmailInboxSettingsInput = requestEmailInboxSyncInput.extend({
+  settings: z.object({
+    senderBlocklist: z.array(z.email()).optional(),
+    domainBlocklist: z.array(z.string().min(1)).optional(),
+    senderAllowlist: z.array(z.email()).optional(),
+    searchQuery: z.string().nullable().optional(),
+    maxAttachmentBytes: z.number().int().positive().optional(),
+  }),
 });
 
 const createDocumentUploadInput = z.object({
@@ -655,6 +706,7 @@ function createDefaultDependencies(): AppRouterDependencies {
       }),
     ],
     integrationProviders: createMockIntegrationProviders(),
+    emailInboxConnectors: createDefaultEmailInboxConnectors(),
     documentUrlSigner: createDocumentUrlSigner({
       baseUrl: env.BETTER_AUTH_URL,
       secret: env.BETTER_AUTH_SECRET,
@@ -664,11 +716,32 @@ function createDefaultDependencies(): AppRouterDependencies {
   };
 }
 
+function createDefaultEmailInboxConnectors() {
+  const tokenCodec = createEmailInboxTokenCodec({
+    secret: env.BETTER_AUTH_SECRET,
+    keyId: "server-email-inbox-token-v1",
+  });
+  const providers = [
+    createMockEmailInboxProvider(),
+    ...(env.GMAIL_CLIENT_ID && env.GMAIL_CLIENT_SECRET
+      ? [
+          createGmailEmailInboxProvider({
+            clientId: env.GMAIL_CLIENT_ID,
+            clientSecret: env.GMAIL_CLIENT_SECRET,
+          }),
+        ]
+      : []),
+  ];
+
+  return providers.map((provider) => new InboxConnector({ provider, tokenCodec }));
+}
+
 export function createAppRouter(dependencies: AppRouterDependencies = createDefaultDependencies()) {
   const {
     bankingProviders,
     documentUrlSigner,
     integrationProviders,
+    emailInboxConnectors,
     invoiceEmailDeliveryProvider,
     invoicePdfRenderer,
     dawnRepository,
@@ -1319,6 +1392,81 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await disableIntegration(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    emailInbox: {
+      list: protectedProcedure
+        .input(emailInboxWorkspaceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listEmailInboxWorkspace(
+              dawnRepository,
+              emailInboxConnectors,
+              appRequestFromSession(context, { teamId: input?.teamId }),
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createAuthorizationUrl: protectedProcedure
+        .input(createEmailInboxAuthorizationUrlInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createEmailInboxAuthorizationUrl(
+              dawnRepository,
+              emailInboxConnectors,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              {
+                ...input,
+                provider: input.provider as EmailInboxProviderName,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      completeOAuth: protectedProcedure
+        .input(completeEmailInboxOAuthInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await completeEmailInboxOAuth(
+              dawnRepository,
+              emailInboxConnectors,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              {
+                ...input,
+                provider: input.provider as EmailInboxProviderName,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      requestSync: protectedProcedure
+        .input(requestEmailInboxSyncInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await requestEmailInboxSync(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      updateSettings: protectedProcedure
+        .input(updateEmailInboxSettingsInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await updateEmailInboxSettings(
               dawnRepository,
               appRequestFromSession(context, { teamId: input.teamId }),
               input,

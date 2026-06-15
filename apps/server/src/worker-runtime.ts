@@ -7,8 +7,10 @@ import {
   generateWeeklyInsights,
   generateInboxMatchSuggestions,
   matchPendingInboxForTransaction,
+  requestDueEmailInboxSyncs,
   resolveSystemAppRequest,
   runAutomationsForOutboxEvent,
+  syncEmailInbox,
   syncBankConnection,
   type WebhookDeliveryProvider,
 } from "@dawn/app";
@@ -20,7 +22,14 @@ import {
   type DawnQueueMessageHandlers,
   type DawnQueueMessageType,
 } from "@dawn/jobs";
-import { createMockBankingProvider, createSandboxBankingProvider } from "@dawn/integrations";
+import {
+  createEmailInboxTokenCodec,
+  createGmailEmailInboxProvider,
+  createMockBankingProvider,
+  createMockEmailInboxProvider,
+  createSandboxBankingProvider,
+  InboxConnector,
+} from "@dawn/integrations";
 
 import { processTeamDataExportJob } from "./data-export";
 import { processDocumentExtractionJob } from "./document-extraction";
@@ -137,6 +146,24 @@ export function createDawnWorkerJobHandlers(env: DawnCloudflareBindings): DawnQu
         },
       );
     },
+    "inbox.provider.sync": async (message) => {
+      await syncEmailInbox(
+        new DrizzleDawnRepository(),
+        createWorkerEmailInboxConnectors(env),
+        createR2DocumentObjectStorage(env.DAWN_DOCUMENTS),
+        resolveSystemAppRequest({
+          actorId: "system:email-inbox",
+          requestId: message.idempotencyKey,
+          teamId: message.teamId,
+        }),
+        {
+          teamId: message.teamId,
+          connectionId: message.connectionId,
+          idempotencyKey: message.idempotencyKey,
+          enforceCallerPermission: false,
+        },
+      );
+    },
     "invoice.recurring.generate": async (message) => {
       await generateRecurringInvoice(new DrizzleDawnRepository(), {
         teamId: message.teamId,
@@ -220,6 +247,33 @@ export function createDawnWorkerJobHandlers(env: DawnCloudflareBindings): DawnQu
   };
 }
 
+export async function requestScheduledEmailInboxSyncs(input: {
+  env: DawnCloudflareBindings;
+  scheduledTime: number;
+}) {
+  const repository = new DrizzleDawnRepository();
+  const now = new Date(input.scheduledTime);
+  const connections = await repository.listEmailInboxSyncCandidateConnections();
+  const teamIds = [...new Set(connections.map((connection) => connection.teamId))];
+
+  for (const teamId of teamIds) {
+    await requestDueEmailInboxSyncs(
+      repository,
+      resolveSystemAppRequest({
+        actorId: "system:email-inbox-scheduler",
+        requestId: `email-inbox-schedule:${now.toISOString()}:${teamId}`,
+        teamId,
+      }),
+      {
+        teamId,
+        now,
+        idempotencyKey: `email-inbox-schedule:${now.toISOString()}:${teamId}`,
+        enforceCallerPermission: false,
+      },
+    );
+  }
+}
+
 function createFetchWebhookDeliveryProvider(): WebhookDeliveryProvider {
   return {
     async deliver(input) {
@@ -245,4 +299,24 @@ function createWorkerBankingProviderRegistry(env: DawnCloudflareBindings) {
       webhookSecret: env.BETTER_AUTH_SECRET,
     }),
   ]);
+}
+
+function createWorkerEmailInboxConnectors(env: DawnCloudflareBindings) {
+  const tokenCodec = createEmailInboxTokenCodec({
+    secret: env.BETTER_AUTH_SECRET,
+    keyId: "worker-email-inbox-token-v1",
+  });
+  const providers = [
+    createMockEmailInboxProvider(),
+    ...(env.GMAIL_CLIENT_ID && env.GMAIL_CLIENT_SECRET
+      ? [
+          createGmailEmailInboxProvider({
+            clientId: env.GMAIL_CLIENT_ID,
+            clientSecret: env.GMAIL_CLIENT_SECRET,
+          }),
+        ]
+      : []),
+  ];
+
+  return providers.map((provider) => new InboxConnector({ provider, tokenCodec }));
 }

@@ -13,6 +13,7 @@ export type IntegrationConnection = {
   capabilities: string[];
   tokenKeyId: string;
   tokenLastFour: string;
+  rawPayload?: Record<string, unknown>;
   lastSyncAt?: string | null;
   lastError?: string | null;
   disabledAt?: string | null;
