@@ -198,6 +198,7 @@ pass, and the implementing agent has inspected the diff.
 | `0a83b5c` | Tenant realtime fanout               | Added transaction realtime protocol, TenantCoordinator fanout, queue invalidation bridge, and web subscription refetch.    |
 | `28d9e47` | Mock banking provider sync           | Added provider adapter package, mock bank sync use cases, persistence, API routes, dashboard status, and migration.        |
 | `c2ef645` | Documents and R2 storage             | Added document metadata/versioning, signed R2 upload/download flow, protected API routes, dashboard panel, and migration.  |
+| `26ea3b7` | Inbox document extraction            | Added inbox sources/items, extraction jobs, deterministic worker processing, correction UI/API, and migration.             |
 
 ## Implementation Notes
 
