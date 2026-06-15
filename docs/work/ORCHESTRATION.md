@@ -63,7 +63,7 @@ pass, and the implementing agent has inspected the diff.
 | 19  | TanStack AI Assistant Read And Suggest Tools                 | Verified foundation, authenticated assistant review blocked | Slice 18                 | Tool schema tests; app/API permission tests; migration; typecheck/check; HTTP/browser smoke.                             |
 | 20  | AI Draft, Mutate, And Approval Gates                         | Verified foundation, authenticated approval flow blocked    | Slice 19                 | Approval-gated draft/mutate/send tests; API tests; migration; typecheck/check; HTTP/browser smoke.                       |
 | 21  | AI Evaluation Harness                                        | Verified deterministic foundation, provider evals blocked   | Slices 19, 20            | Deterministic eval fixtures, runner, release gate, focused tests, typecheck/check.                                       |
-| 22  | Automation Rules                                             | Not started                                                 | Slices 8, 20             | Trigger/action tests; manual event-driven automation.                                                                    |
+| 22  | Automation Rules                                             | Verified foundation, live/manual automation review blocked  | Slices 8, 20             | Rule/action tests; protected API tests; job contract tests; migration; typecheck/check.                                  |
 | 23  | Public API, OAuth Apps, API Keys, And Webhooks               | Not started                                                 | Slices 3, 8              | API contract tests; scope tests; webhook retry/failure tests.                                                            |
 | 24  | Accounting, Payments, Messaging, And Email Provider Adapters | Not started                                                 | Slices 16, 23            | Adapter contract tests; sandbox tests where available; manual status review.                                             |
 | 25  | Desktop Quick Capture And Native Shell Deepening             | Not started                                                 | Slices 12, 13            | Desktop build/smoke; file capture test.                                                                                  |
@@ -216,6 +216,10 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 21     | `bun run eval:ai`                                                                                                                                                                                                                                                                                                            | Pass    | Deterministic eval gate passed: 8/8 cases, 100% accuracy, zero false mutations, hallucinated sources, permission failures, and refusal failures.                 |
 | 2026-06-15 slice 21     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
 | 2026-06-15 slice 21     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 253 files.                                                                                                         |
+| 2026-06-15 slice 22     | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0016_previous_killmonger.sql` for automation rules and run logs.                                                           |
+| 2026-06-15 slice 22     | `bun test packages/jobs/src/index.test.ts packages/app/src/outbox-dispatch.test.ts packages/app/src/automations.test.ts packages/api/src/router.test.ts`                                                                                                                                                                     | Pass    | 33 tests passed for automation job contracts, outbox dispatch queueing, app use cases, protected API routes, approval-required actions, and run logs.            |
+| 2026-06-15 slice 22     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
+| 2026-06-15 slice 22     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 255 files.                                                                                                         |
 
 ## Commit Log
 
@@ -244,6 +248,7 @@ pass, and the implementing agent has inspected the diff.
 | `4a9aaf3` | Assistant read and suggest tools     | Added permissioned assistant tool schemas, persisted conversations/tool calls, protected routes, and dashboard assistant UI.     |
 | `1299415` | Assistant approval gates             | Added approval-gated assistant draft, mutation, and invoice-send actions backed by app use cases, API routes, UI, and migration. |
 | `2e1e371` | AI evaluation harness                | Added deterministic AI eval fixtures, runner, CLI release gate, tests, and short release-gate guidance.                          |
+| `04811d5` | Automation rules foundation          | Added event-triggered automation rules, run logs, queue job contracts, protected routes, dashboard panel, tests, and migration.  |
 
 ## Implementation Notes
 
@@ -436,6 +441,16 @@ failures, and correction acceptance, then applies a strict release gate through
 `bun run eval:ai`. `docs/ai/EVALUATIONS.md` documents the verification path for
 AI tool, prompt, provider, retrieval, and approval-policy changes.
 
+Slice 22 foundation added team-scoped automation permissions, rule contracts,
+and run logs. Automations are triggered from outbox events through a new
+`automation.run` queue job and execute through application use cases as the rule
+creator, checking `automations.run` plus the target action permission. Supported
+actions cover transaction categorization, notification requests, draft invoice
+creation, and accounting export requests; external-side-effect export actions
+log `approval_required` unless the rule explicitly uses `auto_approve`.
+Postgres stores `automation_rule` and `automation_run`, the API exposes
+protected list/create/run routes, and the dashboard has a compact rule/run panel.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -511,3 +526,8 @@ AI tool, prompt, provider, retrieval, and approval-policy changes.
   AI confidence. Current verification covers deterministic fixtures, mocked
   provider metrics, release-gate behavior, typecheck/check, and failure
   actionability.
+- Slice 22 still needs authenticated browser review against a migrated local or
+  preview database and a live queue/worker automation run from an actual outbox
+  event. Current verification covers rule creation, permissioned app execution,
+  approval-required risky actions, run logging, queue job mapping, protected API
+  routes, migration generation, typecheck/check, and dashboard build.
