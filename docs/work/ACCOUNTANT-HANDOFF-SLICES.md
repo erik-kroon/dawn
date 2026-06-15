@@ -26,15 +26,15 @@ The goal thread should:
 
 The full goal is done when all of these are true:
 
-- [ ] A user can import a company bank CSV through a polished mapped preview flow.
-- [ ] Imported transactions feed the review/export queue without duplicates.
+- [x] A user can import a company bank CSV through a polished mapped preview flow.
+- [x] Imported transactions feed the review/export queue without duplicates.
 - [ ] Gmail can be connected, synced, and used to create inbox/document evidence in the accountant workflow.
-- [ ] Receipt matching works in both directions and exposes accept/reject review controls.
-- [ ] Transactions have a clear accountant lifecycle from needs work to ready, exporting, exported, failed, excluded, or archived.
-- [ ] A user can generate an accountant packet containing transaction CSV, manifest, and matched receipt/invoice files.
-- [ ] The accountant packet can optionally include XLSX and can optionally be sent to an accountant email address, when email delivery is configured.
-- [ ] Export status, history, retries, and package access are visible and audited.
-- [ ] The accountant role can access handoff artifacts according to Dawn permissions without unsafe financial mutation rights.
+- [x] Receipt matching works in both directions and exposes accept/reject review controls.
+- [x] Transactions have a clear accountant lifecycle from needs work to ready, exporting, exported, failed, excluded, or archived.
+- [x] A user can generate an accountant packet containing transaction CSV, manifest, and matched receipt/invoice files.
+- [x] The accountant packet can optionally include XLSX and can optionally be sent to an accountant email address, when email delivery is configured.
+- [x] Export status, history, retries, and package access are visible and audited.
+- [x] The accountant role can access handoff artifacts according to Dawn permissions without unsafe financial mutation rights.
 - [x] The close-loop path is verified with representative fixture data from CSV import through export package.
 - [x] `bun run check-types` passes.
 - [x] Focused package/app/job tests for changed areas pass.
