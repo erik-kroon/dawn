@@ -1122,6 +1122,53 @@ export type TeamDataExportSnapshot = {
   generatedAt: string;
   sourceOutboxEventId: string;
   ledger: ReviewWorkspaceData;
+  banking: {
+    connections: BankConnectionSummary[];
+  };
+  documents: {
+    documents: BusinessDocument[];
+    inboxItems: InboxItem[];
+    aliases: TeamAlias[];
+  };
+  billing: {
+    customers: Customer[];
+    contacts: CustomerContact[];
+    products: Product[];
+    invoices: InvoiceDraft[];
+    payments: InvoicePayment[];
+    recurringSchedules: RecurringInvoiceSchedule[];
+  };
+  projects: {
+    projects: Project[];
+    members: ProjectMember[];
+    timeEntries: TimeEntry[];
+  };
+  reporting: {
+    insights: BusinessInsight[];
+  };
+  assistant: {
+    conversations: Array<{
+      thread: AssistantThread;
+      messages: AssistantMessage[];
+      toolCalls: AssistantToolCall[];
+      actionApprovals: AssistantActionApproval[];
+    }>;
+    pendingApprovals: AssistantActionApproval[];
+  };
+  automations: {
+    rules: AutomationRule[];
+    runs: AutomationRun[];
+  };
+  integrations: {
+    connections: IntegrationConnectionSummary[];
+    syncRuns: IntegrationSyncRun[];
+  };
+  developer: {
+    apiKeys: ApiKey[];
+    oauthApps: OAuthApp[];
+    webhookSubscriptions: WebhookSubscription[];
+    webhookDeliveries: WebhookDelivery[];
+  };
   operations: {
     auditEvents: AuditLogEntry[];
     outboxEvents: OutboxEvent[];
@@ -2607,6 +2654,15 @@ function redactProviderSyncRun(run: ProviderSyncRun): ProviderSyncRun {
   };
 }
 
+function redactBankConnectionSummary(summary: BankConnectionSummary): BankConnectionSummary {
+  return {
+    ...summary,
+    latestSyncRun: summary.latestSyncRun
+      ? redactProviderSyncRun(summary.latestSyncRun)
+      : summary.latestSyncRun,
+  };
+}
+
 function redactIntegrationSyncRun(run: IntegrationSyncRun): IntegrationSyncRun {
   return {
     ...run,
@@ -2820,15 +2876,63 @@ export async function buildTeamDataExportSnapshot(
   const systemActor: Actor = { id: "system:data-export", type: "system" };
   const [
     ledger,
+    bankingConnections,
+    documents,
+    inboxItems,
+    aliases,
+    customers,
+    contacts,
+    products,
+    invoices,
+    payments,
+    recurringSchedules,
+    projects,
+    projectMembers,
+    timeEntries,
+    insights,
+    assistantThreads,
+    pendingAssistantApprovals,
+    automationRules,
+    automationWorkflowRuns,
+    integrationConnections,
+    integrationWorkflowSyncRuns,
+    apiKeys,
+    oauthApps,
+    webhookSubscriptions,
+    developerWebhookDeliveries,
     auditEvents,
     outboxEvents,
     jobRuns,
     providerSyncRuns,
-    integrationSyncRuns,
-    automationRuns,
-    webhookDeliveries,
+    operationalIntegrationSyncRuns,
+    operationalAutomationRuns,
+    operationalWebhookDeliveries,
   ] = await Promise.all([
     repository.listWorkspace(systemActor, input.teamId),
+    repository.listBankConnectionSummaries(input.teamId),
+    repository.listDocuments(input.teamId),
+    repository.listInboxItems(input.teamId),
+    repository.listTeamAliases(input.teamId),
+    repository.listCustomers(input.teamId),
+    repository.listCustomerContacts(input.teamId),
+    repository.listProducts(input.teamId),
+    repository.listInvoices(input.teamId),
+    repository.listInvoicePayments(input.teamId),
+    repository.listRecurringInvoiceSchedules(input.teamId),
+    repository.listProjects(input.teamId),
+    repository.listProjectMembers(input.teamId),
+    repository.listTimeEntries(input.teamId),
+    repository.listBusinessInsights({ teamId: input.teamId }),
+    repository.listAssistantThreads(input.teamId),
+    repository.listPendingAssistantActionApprovals(input.teamId),
+    repository.listAutomationRules(input.teamId),
+    repository.listAutomationRuns(input.teamId, limit),
+    repository.listIntegrationConnectionSummaries(input.teamId),
+    repository.listIntegrationSyncRuns(input.teamId, limit),
+    repository.listApiKeys(input.teamId),
+    repository.listOAuthApps(input.teamId),
+    repository.listWebhookSubscriptions(input.teamId),
+    repository.listWebhookDeliveries(input.teamId, limit),
     repository.listAuditEvents({ teamId: input.teamId, limit }),
     repository.listOutboxEvents(input.teamId, limit),
     repository.listJobRuns(input.teamId, limit),
@@ -2837,6 +2941,14 @@ export async function buildTeamDataExportSnapshot(
     repository.listAutomationRuns(input.teamId, limit),
     repository.listWebhookDeliveries(input.teamId, limit),
   ]);
+  const assistantConversations = await Promise.all(
+    assistantThreads.map(async (thread) => ({
+      thread,
+      messages: await repository.listAssistantMessages(thread.id),
+      toolCalls: await repository.listAssistantToolCalls(thread.id),
+      actionApprovals: await repository.listAssistantActionApprovals(thread.id),
+    })),
+  );
 
   return {
     schemaVersion: 1,
@@ -2845,14 +2957,56 @@ export async function buildTeamDataExportSnapshot(
     generatedAt: input.generatedAt ?? new Date().toISOString(),
     sourceOutboxEventId: input.sourceOutboxEventId,
     ledger,
+    banking: {
+      connections: bankingConnections.map(redactBankConnectionSummary),
+    },
+    documents: {
+      documents,
+      inboxItems,
+      aliases,
+    },
+    billing: {
+      customers,
+      contacts,
+      products,
+      invoices,
+      payments,
+      recurringSchedules,
+    },
+    projects: {
+      projects,
+      members: projectMembers,
+      timeEntries,
+    },
+    reporting: {
+      insights,
+    },
+    assistant: {
+      conversations: assistantConversations,
+      pendingApprovals: pendingAssistantApprovals,
+    },
+    automations: {
+      rules: automationRules,
+      runs: automationWorkflowRuns.map(redactAutomationRun),
+    },
+    integrations: {
+      connections: integrationConnections,
+      syncRuns: integrationWorkflowSyncRuns.map(redactIntegrationSyncRun),
+    },
+    developer: {
+      apiKeys,
+      oauthApps,
+      webhookSubscriptions,
+      webhookDeliveries: developerWebhookDeliveries.map(redactWebhookDelivery),
+    },
     operations: {
       auditEvents: auditEvents.map(redactAuditLogEntry),
       outboxEvents: outboxEvents.map(redactOutboxEvent),
       jobRuns: jobRuns.map(redactJobRun),
       providerSyncRuns: providerSyncRuns.map(redactProviderSyncRun),
-      integrationSyncRuns: integrationSyncRuns.map(redactIntegrationSyncRun),
-      automationRuns: automationRuns.map(redactAutomationRun),
-      webhookDeliveries: webhookDeliveries.map(redactWebhookDelivery),
+      integrationSyncRuns: operationalIntegrationSyncRuns.map(redactIntegrationSyncRun),
+      automationRuns: operationalAutomationRuns.map(redactAutomationRun),
+      webhookDeliveries: operationalWebhookDeliveries.map(redactWebhookDelivery),
     },
   };
 }

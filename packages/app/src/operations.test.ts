@@ -102,6 +102,115 @@ class MemoryOperationsRepository {
     };
   }
 
+  async listBankConnectionSummaries() {
+    return [
+      {
+        connection: {
+          id: "bank_connection_1",
+          teamId: "team_1",
+          provider: "mock-bank",
+          providerConnectionId: "provider_connection_1",
+          institutionName: "Mock Bank",
+          status: "error",
+          tokenKeyId: "bank_tokens",
+          tokenLastFour: "1234",
+          lastSyncAt: null,
+          createdAt: "2026-06-15T00:00:00.000Z",
+          updatedAt: "2026-06-15T00:00:00.000Z",
+        },
+        accounts: [],
+        latestSyncRun: {
+          id: "provider_sync_1",
+          teamId: "team_1",
+          connectionId: "bank_connection_1",
+          status: "failed",
+          startedAt: "2026-06-15T00:00:00.000Z",
+          completedAt: "2026-06-15T00:00:01.000Z",
+          accountsSynced: 0,
+          transactionsImported: 0,
+          duplicateCount: 0,
+          error: "provider failed with token sk_live_secret123456",
+        },
+      },
+    ];
+  }
+
+  async listDocuments() {
+    return [];
+  }
+
+  async listInboxItems() {
+    return [];
+  }
+
+  async listTeamAliases() {
+    return [];
+  }
+
+  async listCustomers() {
+    return [];
+  }
+
+  async listCustomerContacts() {
+    return [];
+  }
+
+  async listProducts() {
+    return [];
+  }
+
+  async listInvoices() {
+    return [];
+  }
+
+  async listInvoicePayments() {
+    return [];
+  }
+
+  async listRecurringInvoiceSchedules() {
+    return [];
+  }
+
+  async listProjects() {
+    return [];
+  }
+
+  async listProjectMembers() {
+    return [];
+  }
+
+  async listTimeEntries() {
+    return [];
+  }
+
+  async listBusinessInsights() {
+    return [];
+  }
+
+  async listAssistantThreads() {
+    return [];
+  }
+
+  async listPendingAssistantActionApprovals() {
+    return [];
+  }
+
+  async listAssistantMessages() {
+    return [];
+  }
+
+  async listAssistantToolCalls() {
+    return [];
+  }
+
+  async listAssistantActionApprovals() {
+    return [];
+  }
+
+  async listAutomationRules() {
+    return [];
+  }
+
   async listOutboxEvents(teamId: string, limit: number) {
     return this.outboxEvents.filter((event) => event.teamId === teamId).slice(0, limit);
   }
@@ -116,6 +225,22 @@ class MemoryOperationsRepository {
 
   async listIntegrationSyncRuns(teamId: string, limit: number) {
     return this.integrationSyncRuns.filter((run) => run.teamId === teamId).slice(0, limit);
+  }
+
+  async listIntegrationConnectionSummaries() {
+    return [];
+  }
+
+  async listApiKeys() {
+    return [];
+  }
+
+  async listOAuthApps() {
+    return [];
+  }
+
+  async listWebhookSubscriptions() {
+    return [];
   }
 
   async listAutomationRuns(teamId: string, limit: number) {
@@ -401,7 +526,19 @@ describe("operations workspace", () => {
         teamName: "Acme Studio",
         transactions: [{ id: "transaction_1" }],
       },
+      banking: {
+        connections: [{ connection: { id: "bank_connection_1" } }],
+      },
+      documents: { documents: [], inboxItems: [], aliases: [] },
+      billing: { customers: [], contacts: [], products: [], invoices: [] },
+      projects: { projects: [], members: [], timeEntries: [] },
+      reporting: { insights: [] },
+      assistant: { conversations: [], pendingApprovals: [] },
+      automations: { rules: [], runs: [] },
+      integrations: { connections: [], syncRuns: [] },
+      developer: { apiKeys: [], oauthApps: [], webhookSubscriptions: [] },
     });
+    expect(snapshot.banking.connections[0]?.latestSyncRun?.error).toContain("[redacted-token]");
     expect(snapshot.operations.auditEvents[0]?.metadata).toEqual({
       email: "[redacted]",
       token: "[redacted]",

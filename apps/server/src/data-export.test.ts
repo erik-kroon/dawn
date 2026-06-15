@@ -50,6 +50,114 @@ class MemoryDataExportRepository {
     };
   }
 
+  async listBankConnectionSummaries() {
+    return [];
+  }
+
+  async listDocuments() {
+    return [];
+  }
+
+  async listInboxItems() {
+    return [];
+  }
+
+  async listTeamAliases() {
+    return [];
+  }
+
+  async listCustomers() {
+    return [];
+  }
+
+  async listCustomerContacts() {
+    return [];
+  }
+
+  async listProducts() {
+    return [];
+  }
+
+  async listInvoices() {
+    return [];
+  }
+
+  async listInvoicePayments() {
+    return [];
+  }
+
+  async listRecurringInvoiceSchedules() {
+    return [];
+  }
+
+  async listProjects() {
+    return [];
+  }
+
+  async listProjectMembers() {
+    return [];
+  }
+
+  async listTimeEntries() {
+    return [];
+  }
+
+  async listBusinessInsights() {
+    return [];
+  }
+
+  async listAssistantThreads() {
+    return [];
+  }
+
+  async listPendingAssistantActionApprovals() {
+    return [];
+  }
+
+  async listAssistantMessages() {
+    return [];
+  }
+
+  async listAssistantToolCalls() {
+    return [];
+  }
+
+  async listAssistantActionApprovals() {
+    return [];
+  }
+
+  async listAutomationRules() {
+    return [];
+  }
+
+  async listAutomationRuns() {
+    return [];
+  }
+
+  async listIntegrationConnectionSummaries() {
+    return [];
+  }
+
+  async listIntegrationSyncRuns() {
+    return [];
+  }
+
+  async listApiKeys() {
+    return [];
+  }
+
+  async listOAuthApps() {
+    return [];
+  }
+
+  async listWebhookSubscriptions() {
+    return [];
+  }
+
+  async listWebhookDeliveries() {
+    return [];
+  }
+
   async listAuditEvents() {
     return this.auditEvents;
   }
@@ -63,18 +171,6 @@ class MemoryDataExportRepository {
   }
 
   async listProviderSyncRuns() {
-    return [];
-  }
-
-  async listIntegrationSyncRuns() {
-    return [];
-  }
-
-  async listAutomationRuns() {
-    return [];
-  }
-
-  async listWebhookDeliveries() {
     return [];
   }
 

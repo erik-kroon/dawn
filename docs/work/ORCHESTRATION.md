@@ -588,10 +588,11 @@ fallback for Vite alternate ports.
 
 Slice 26 export delivery now writes an audited JSON archive artifact through the
 Worker queue path. The app layer builds a redacted team export snapshot with
-ledger review data and operational evidence, and the server persists it to the
-R2-compatible `DAWN_DOCUMENTS` binding with artifact metadata in audit logs.
-Tenant deletion execution remains gated by retention, provider cleanup, and
-compliance rules.
+ledger, banking, documents, inbox, billing, projects, reporting, assistant,
+automation, integration, developer, and operational evidence, and the server
+persists it to the R2-compatible `DAWN_DOCUMENTS` binding with artifact
+metadata in audit logs. Tenant deletion execution remains gated by retention,
+provider cleanup, and compliance rules.
 
 ## Blockers And Watch Items
 
