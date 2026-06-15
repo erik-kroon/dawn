@@ -411,6 +411,19 @@ export type SyncIntegrationResult = {
   replayed: boolean;
 };
 
+export type ExportAccountingIntegrationCommand = {
+  teamId: string;
+  connectionId: string;
+  exportType: "transactions" | "invoices";
+  idempotencyKey: string;
+};
+
+export type ExportAccountingIntegrationResult = {
+  connection: IntegrationConnection;
+  syncRun: IntegrationSyncRun;
+  replayed: boolean;
+};
+
 export type DisableIntegrationCommand = {
   teamId: string;
   connectionId: string;
@@ -2106,6 +2119,7 @@ const grantOAuthConsentOperation = "oauth_consent.grant";
 const createWebhookSubscriptionOperation = "webhook_subscription.create";
 const connectIntegrationOperation = "integration.connect";
 const syncIntegrationOperation = "integration.sync";
+const exportAccountingIntegrationOperation = "integration.accounting_export";
 const disableIntegrationOperation = "integration.disable";
 const requestTeamDataExportOperation = "team_data.export.request";
 const requestTeamDataDeletionOperation = "team_data.deletion.request";
@@ -5309,6 +5323,170 @@ export async function syncIntegration(
         teamId: command.teamId,
         actorId: context.actor.id,
         operation: syncIntegrationOperation,
+        key: command.idempotencyKey,
+        fingerprint,
+        result,
+      });
+
+      return result;
+    }
+  });
+}
+
+export async function exportAccountingIntegration(
+  repository: DawnRepository,
+  providers: readonly IntegrationProvider[],
+  context: TransactionReviewContext,
+  command: ExportAccountingIntegrationCommand,
+): Promise<ExportAccountingIntegrationResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const integrationRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Integration not found");
+
+    await resolveTeamAccess(
+      integrationRepository,
+      { ...context, teamId: command.teamId },
+      "integrations.write",
+      "You cannot export accounting data for this team",
+    );
+
+    await resolveTeamAccess(
+      integrationRepository,
+      { ...context, teamId: command.teamId },
+      command.exportType === "transactions" ? "transactions.read" : "invoices.read",
+      "You cannot export accounting data for this team",
+    );
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      connectionId: command.connectionId,
+      exportType: command.exportType,
+    });
+    const replayed = await integrationRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      exportAccountingIntegrationOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different accounting export",
+        );
+      }
+
+      return { ...(replayed.result as ExportAccountingIntegrationResult), replayed: true };
+    }
+
+    const connection = await integrationRepository.getIntegrationConnectionForTeam(
+      command.teamId,
+      command.connectionId,
+    );
+
+    if (!connection || connection.status === "disabled" || connection.category !== "accounting") {
+      throw new AppError("NOT_FOUND", "Accounting integration not found");
+    }
+
+    const provider = requireIntegrationProvider(providers, connection.provider);
+    const syncRun = await integrationRepository.createIntegrationSyncRun({
+      syncRunId: crypto.randomUUID(),
+      teamId: command.teamId,
+      integrationConnectionId: connection.id,
+      category: connection.category,
+      provider: connection.provider,
+    });
+
+    try {
+      const exported =
+        command.exportType === "transactions"
+          ? await exportTransactionsToProvider(integrationRepository, provider, connection)
+          : await exportInvoicesToProvider(integrationRepository, provider, connection);
+      const completedSyncRun = await integrationRepository.finishIntegrationSyncRun({
+        syncRunId: syncRun.id,
+        status: exported.status,
+        recordsSynced: exported.recordsExported,
+        error: null,
+        rawPayload: exported.rawPayload,
+      });
+      const syncedConnection = await integrationRepository.markIntegrationConnectionSynced({
+        connectionId: connection.id,
+        syncedAt: new Date(completedSyncRun.completedAt ?? completedSyncRun.startedAt),
+        status: "connected",
+        lastError: null,
+      });
+
+      await integrationRepository.appendAuditEvent({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        action: "integration.accounting_exported",
+        entityType: "integration_connection",
+        entityId: connection.id,
+        metadata: {
+          provider: connection.provider,
+          exportType: command.exportType,
+          recordsExported: completedSyncRun.recordsSynced,
+        },
+      });
+
+      await integrationRepository.appendOutboxEvent({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        type: "integration.accounting_exported",
+        version: 1,
+        payload: {
+          connectionId: connection.id,
+          provider: connection.provider,
+          exportType: command.exportType,
+          recordsExported: completedSyncRun.recordsSynced,
+        },
+      });
+
+      const result = {
+        connection: syncedConnection,
+        syncRun: completedSyncRun,
+        replayed: false,
+      };
+
+      await integrationRepository.saveIdempotencyResult({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        operation: exportAccountingIntegrationOperation,
+        key: command.idempotencyKey,
+        fingerprint,
+        result,
+      });
+
+      return result;
+    } catch (error) {
+      const message = errorMessage(error);
+      const failedSyncRun = await integrationRepository.finishIntegrationSyncRun({
+        syncRunId: syncRun.id,
+        status: "failed",
+        recordsSynced: 0,
+        error: message,
+        rawPayload: { error: message, exportType: command.exportType },
+      });
+      const failedConnection = await integrationRepository.markIntegrationConnectionSynced({
+        connectionId: connection.id,
+        syncedAt: new Date(failedSyncRun.completedAt ?? failedSyncRun.startedAt),
+        status: "error",
+        lastError: message,
+      });
+      const result = {
+        connection: failedConnection,
+        syncRun: failedSyncRun,
+        replayed: false,
+      };
+
+      await integrationRepository.saveIdempotencyResult({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        operation: exportAccountingIntegrationOperation,
         key: command.idempotencyKey,
         fingerprint,
         result,
@@ -9249,6 +9427,38 @@ function requireIntegrationProvider(
   }
 
   return provider;
+}
+
+async function exportTransactionsToProvider(
+  repository: DawnRepository,
+  provider: IntegrationProvider,
+  connection: IntegrationConnection,
+) {
+  if (!connection.capabilities.includes("exportTransactions") || !provider.exportTransactions) {
+    throw new AppError("CONFLICT", "Integration does not support transaction exports");
+  }
+
+  return await provider.exportTransactions({
+    teamId: connection.teamId,
+    providerConnectionId: connection.providerConnectionId,
+    transactions: await repository.listTransactionsForReport({ teamId: connection.teamId }),
+  });
+}
+
+async function exportInvoicesToProvider(
+  repository: DawnRepository,
+  provider: IntegrationProvider,
+  connection: IntegrationConnection,
+) {
+  if (!connection.capabilities.includes("exportInvoices") || !provider.exportInvoices) {
+    throw new AppError("CONFLICT", "Integration does not support invoice exports");
+  }
+
+  return await provider.exportInvoices({
+    teamId: connection.teamId,
+    providerConnectionId: connection.providerConnectionId,
+    invoices: await repository.listInvoices(connection.teamId),
+  });
 }
 
 export function connectMockBankConnectionFingerprint(

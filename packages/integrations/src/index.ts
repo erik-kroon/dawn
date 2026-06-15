@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import type { LedgerTransactionDraft, Money } from "@dawn/domain";
+import type { InvoiceDraft, LedgerTransactionDraft, Money, Transaction } from "@dawn/domain";
 
 export type BankingProviderName = "mock-bank" | "sandbox-bank";
 
@@ -156,6 +156,12 @@ export type IntegrationProviderSyncResult = {
   rawPayload: ProviderRawPayload;
 };
 
+export type IntegrationProviderExportResult = {
+  status: "completed";
+  recordsExported: number;
+  rawPayload: ProviderRawPayload;
+};
+
 export type IntegrationProvider = {
   provider: IntegrationProviderName;
   category: IntegrationCategory;
@@ -170,6 +176,16 @@ export type IntegrationProvider = {
     teamId: string;
     providerConnectionId: string;
   }): Promise<IntegrationProviderSyncResult>;
+  exportTransactions?(input: {
+    teamId: string;
+    providerConnectionId: string;
+    transactions: readonly Transaction[];
+  }): Promise<IntegrationProviderExportResult>;
+  exportInvoices?(input: {
+    teamId: string;
+    providerConnectionId: string;
+    invoices: readonly InvoiceDraft[];
+  }): Promise<IntegrationProviderExportResult>;
 };
 
 export function canonicalProviderTransactionId(input: {
@@ -560,6 +576,40 @@ export function createMockIntegrationProvider(input: {
           provider: input.provider,
           providerConnectionId: command.providerConnectionId,
           recordsSynced: input.recordsSynced,
+        },
+      };
+    },
+    async exportTransactions(command) {
+      if (!input.capabilities.includes("exportTransactions")) {
+        throw new Error(`${input.provider} does not export transactions`);
+      }
+
+      return {
+        status: "completed",
+        recordsExported: command.transactions.length,
+        rawPayload: {
+          mock: true,
+          provider: input.provider,
+          providerConnectionId: command.providerConnectionId,
+          exportType: "transactions",
+          recordsExported: command.transactions.length,
+        },
+      };
+    },
+    async exportInvoices(command) {
+      if (!input.capabilities.includes("exportInvoices")) {
+        throw new Error(`${input.provider} does not export invoices`);
+      }
+
+      return {
+        status: "completed",
+        recordsExported: command.invoices.length,
+        rawPayload: {
+          mock: true,
+          provider: input.provider,
+          providerConnectionId: command.providerConnectionId,
+          exportType: "invoices",
+          recordsExported: command.invoices.length,
         },
       };
     },

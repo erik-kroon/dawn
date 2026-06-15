@@ -32,6 +32,7 @@ import {
   disconnectBankConnection,
   generateInboxMatchSuggestions,
   getAssistantConversation,
+  exportAccountingIntegration,
   inviteTeamMember,
   correctDocumentExtraction,
   listAssistantWorkspace,
@@ -322,6 +323,10 @@ const syncIntegrationInput = z.object({
   teamId: z.string().min(1),
   connectionId: z.string().min(1),
   idempotencyKey: z.string().min(1),
+});
+
+const exportAccountingIntegrationInput = syncIntegrationInput.extend({
+  exportType: z.enum(["transactions", "invoices"]),
 });
 
 const disableIntegrationInput = z.object({
@@ -1411,6 +1416,24 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
           mapAppError(error);
         }
       }),
+      exportAccounting: protectedProcedure
+        .input(exportAccountingIntegrationInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await exportAccountingIntegration(
+              transactionReviewRepository,
+              integrationProviders,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
       disable: protectedProcedure
         .input(disableIntegrationInput)
         .handler(async ({ context, input }) => {

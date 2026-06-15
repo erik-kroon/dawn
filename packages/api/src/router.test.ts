@@ -3823,12 +3823,72 @@ describe("appRouter", () => {
       },
       context,
     );
+    repository.transactions.set("txn_export_1", {
+      id: "txn_export_1",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Consulting payment",
+      postedAt: "2026-06-15T00:00:00.000Z",
+      money: { amountMinor: 5_000_00, currency: "USD" },
+      type: "income",
+      source: "manual",
+      categoryId: null,
+      reviewState: "reviewed",
+    });
+    const customer = await call(
+      router.billing.createCustomer,
+      {
+        teamId: "team_1",
+        name: "Acme Co",
+        idempotencyKey: "integration_export_customer_1",
+      },
+      context,
+    );
+    await call(
+      router.billing.createDraftInvoice,
+      {
+        teamId: "team_1",
+        customerId: customer.customer.id,
+        invoiceNumber: "INV-EXPORT-1",
+        issueDate: "2026-06-15T00:00:00.000Z",
+        currency: "USD",
+        lines: [
+          {
+            description: "Consulting",
+            quantityMilli: 1_000,
+            unitPrice: { amountMinor: 5_000_00, currency: "USD" },
+          },
+        ],
+        idempotencyKey: "integration_export_invoice_1",
+      },
+      context,
+    );
     const synced = await call(
       router.integrations.sync,
       {
         teamId: "team_1",
         connectionId: connected.connection.id,
         idempotencyKey: "integration_sync_1",
+      },
+      context,
+    );
+    const exportedTransactions = await call(
+      router.integrations.exportAccounting,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        exportType: "transactions",
+        idempotencyKey: "integration_export_transactions_1",
+      },
+      context,
+    );
+    const exportedInvoices = await call(
+      router.integrations.exportAccounting,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        exportType: "invoices",
+        idempotencyKey: "integration_export_invoices_1",
       },
       context,
     );
@@ -3859,8 +3919,18 @@ describe("appRouter", () => {
         ?.tokenCiphertext.includes("mock_secret"),
     ).toBe(false);
     expect(synced.syncRun).toMatchObject({ status: "completed", recordsSynced: 3 });
+    expect(exportedTransactions.syncRun).toMatchObject({
+      status: "completed",
+      recordsSynced: 1,
+      rawPayload: { exportType: "transactions" },
+    });
+    expect(exportedInvoices.syncRun).toMatchObject({
+      status: "completed",
+      recordsSynced: 1,
+      rawPayload: { exportType: "invoices" },
+    });
     expect(disabled.connection.status).toBe("disabled");
-    expect(repository.integrationSyncRuns).toHaveLength(1);
+    expect(repository.integrationSyncRuns).toHaveLength(3);
   });
 
   test("returns operations workspace with redacted failure and audit records", async () => {

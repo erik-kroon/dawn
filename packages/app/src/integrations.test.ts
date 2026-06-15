@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   connectIntegration,
   disableIntegration,
+  exportAccountingIntegration,
   listIntegrationWorkspace,
   syncIntegration,
   type DawnRepository,
@@ -14,7 +15,9 @@ import type {
   IntegrationConnection,
   IntegrationSyncRun,
   IntegrationSyncRunStatus,
+  InvoiceDraft,
   TeamRole,
+  Transaction,
 } from "@dawn/domain";
 import { createMockIntegrationProviders, type IntegrationProvider } from "@dawn/integrations";
 
@@ -22,6 +25,8 @@ class MemoryIntegrationRepository {
   role: TeamRole | null = "owner";
   connections = new Map<string, IntegrationConnection & { tokenCiphertext: string }>();
   syncRuns = new Map<string, IntegrationSyncRun>();
+  transactions: Transaction[] = [];
+  invoices: InvoiceDraft[] = [];
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   auditEvents: unknown[] = [];
   outboxEvents: unknown[] = [];
@@ -32,6 +37,14 @@ class MemoryIntegrationRepository {
 
   async getMembership(_actor: Actor, teamId: string) {
     return this.role && teamId === "team_1" ? { role: this.role } : null;
+  }
+
+  async listTransactionsForReport(input: { teamId: string }) {
+    return this.transactions.filter((transaction) => transaction.teamId === input.teamId);
+  }
+
+  async listInvoices(teamId: string) {
+    return this.invoices.filter((invoice) => invoice.teamId === teamId);
   }
 
   async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
@@ -312,6 +325,100 @@ describe("integration use cases", () => {
     expect(failed.connection).toMatchObject({
       status: "error",
       lastError: "provider unavailable",
+    });
+  });
+
+  test("exports accounting transactions and invoices through connected adapters", async () => {
+    const repository = new MemoryIntegrationRepository();
+    repository.transactions.push({
+      id: "txn_1",
+      teamId: "team_1",
+      description: "Consulting payment",
+      postedAt: "2026-06-15T00:00:00.000Z",
+      money: { amountMinor: 5_000_00, currency: "USD" },
+      categoryId: null,
+      reviewState: "reviewed",
+      source: "manual",
+    });
+    repository.invoices.push({
+      id: "invoice_1",
+      teamId: "team_1",
+      customerId: "customer_1",
+      invoiceNumber: "INV-001",
+      status: "sent",
+      issueDate: "2026-06-15T00:00:00.000Z",
+      currency: "USD",
+      discountBasisPoints: 0,
+      lines: [],
+      totals: {
+        subtotal: { amountMinor: 5_000_00, currency: "USD" },
+        discount: { amountMinor: 0, currency: "USD" },
+        tax: { amountMinor: 0, currency: "USD" },
+        total: { amountMinor: 5_000_00, currency: "USD" },
+      },
+      amountPaid: { amountMinor: 0, currency: "USD" },
+      createdByActorId: "user_1",
+    });
+    const providers = createMockIntegrationProviders();
+    const connected = await connectIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-accounting",
+        idempotencyKey: "connect_1",
+      },
+    );
+
+    const transactionExport = await exportAccountingIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        exportType: "transactions",
+        idempotencyKey: "export_transactions_1",
+      },
+    );
+    const transactionReplay = await exportAccountingIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        exportType: "transactions",
+        idempotencyKey: "export_transactions_1",
+      },
+    );
+    const invoiceExport = await exportAccountingIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        exportType: "invoices",
+        idempotencyKey: "export_invoices_1",
+      },
+    );
+
+    expect(transactionExport.syncRun).toMatchObject({
+      status: "completed",
+      recordsSynced: 1,
+      rawPayload: { exportType: "transactions" },
+    });
+    expect(transactionReplay).toMatchObject({ replayed: true });
+    expect(invoiceExport.syncRun).toMatchObject({
+      status: "completed",
+      recordsSynced: 1,
+      rawPayload: { exportType: "invoices" },
+    });
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "integration.accounting_exported",
+      payload: { exportType: "invoices", recordsExported: 1 },
     });
   });
 

@@ -29,4 +29,71 @@ describe("integration provider contracts", () => {
     expect(connection.token.keyId).toBe("mock-kms-local");
     expect(connection.token.lastFour).toHaveLength(4);
   });
+
+  test("exports accounting transactions and invoices through typed contracts", async () => {
+    const accounting = createMockIntegrationProviders().find(
+      (provider) => provider.provider === "mock-accounting",
+    )!;
+    const payments = createMockIntegrationProviders().find(
+      (provider) => provider.provider === "mock-payments",
+    )!;
+
+    const transactionExport = await accounting.exportTransactions!({
+      teamId: "team_1",
+      providerConnectionId: "mock-accounting_team_1",
+      transactions: [
+        {
+          id: "txn_1",
+          teamId: "team_1",
+          description: "Consulting payment",
+          postedAt: "2026-06-15T00:00:00.000Z",
+          money: { amountMinor: 5_000_00, currency: "USD" },
+          categoryId: null,
+          reviewState: "reviewed",
+          source: "manual",
+        },
+      ],
+    });
+    const invoiceExport = await accounting.exportInvoices!({
+      teamId: "team_1",
+      providerConnectionId: "mock-accounting_team_1",
+      invoices: [
+        {
+          id: "invoice_1",
+          teamId: "team_1",
+          customerId: "customer_1",
+          invoiceNumber: "INV-001",
+          status: "sent",
+          issueDate: "2026-06-15T00:00:00.000Z",
+          currency: "USD",
+          discountBasisPoints: 0,
+          lines: [],
+          totals: {
+            subtotal: { amountMinor: 5_000_00, currency: "USD" },
+            discount: { amountMinor: 0, currency: "USD" },
+            tax: { amountMinor: 0, currency: "USD" },
+            total: { amountMinor: 5_000_00, currency: "USD" },
+          },
+          amountPaid: { amountMinor: 0, currency: "USD" },
+          createdByActorId: "user_1",
+        },
+      ],
+    });
+
+    expect(transactionExport).toMatchObject({
+      recordsExported: 1,
+      rawPayload: { exportType: "transactions" },
+    });
+    expect(invoiceExport).toMatchObject({
+      recordsExported: 1,
+      rawPayload: { exportType: "invoices" },
+    });
+    await expect(
+      payments.exportTransactions!({
+        teamId: "team_1",
+        providerConnectionId: "mock-payments_team_1",
+        transactions: [],
+      }),
+    ).rejects.toThrow("mock-payments does not export transactions");
+  });
 });
