@@ -110,12 +110,21 @@ function RouteComponent() {
     message: "",
     exportType: "transactions",
   });
+  const [desktopCaptureMessage, setDesktopCaptureMessage] = useState<string | null>(null);
   const [syncReviewError, setSyncReviewError] = useState<string | null>(null);
   const [syncReviewingId, setSyncReviewingId] = useState<string | null>(null);
 
   const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: selectedTeamId } }));
   const currentTeamId = selectedTeamId ?? teams.data?.currentTeamId;
   const currentTeam = teams.data?.teams.find((team) => team.id === currentTeamId);
+  useEffect(() => {
+    const teamId = new URLSearchParams(window.location.search).get("teamId");
+
+    if (teamId && teamId !== selectedTeamId) {
+      setSelectedTeamId(teamId);
+      localStorage.setItem("dawn:selected-team-id", teamId);
+    }
+  }, [selectedTeamId]);
   const transactionSync = useTransactionSync(currentTeamId);
   const transactionReview = useQuery(
     orpc.transactionReview.list.queryOptions({ input: { teamId: currentTeamId } }),
@@ -295,6 +304,57 @@ function RouteComponent() {
       window.location.assign(result.downloadUrl);
     },
   });
+  useEffect(() => {
+    const listener = (event: Event) => {
+      const payload = desktopCapturePayload(event);
+      const teamId = payload?.teamId ?? currentTeamId;
+
+      if (!payload) {
+        return;
+      }
+
+      if (!teamId) {
+        setDesktopCaptureMessage("Choose a team before capturing files from the desktop app.");
+        return;
+      }
+
+      const file = fileFromDesktopCapture(payload);
+      setDesktopCaptureMessage(`Uploading ${file.name} from the desktop app.`);
+      documentUploadMutation.mutate(
+        { teamId, file },
+        {
+          onError: (error) =>
+            setDesktopCaptureMessage(
+              error instanceof Error ? error.message : "Desktop capture upload failed.",
+            ),
+          onSuccess: () => setDesktopCaptureMessage(`${file.name} was sent to the inbox.`),
+        },
+      );
+    };
+
+    window.addEventListener("dawn:desktop-capture", listener);
+    return () => window.removeEventListener("dawn:desktop-capture", listener);
+  }, [currentTeamId, documentUploadMutation]);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const focusType = params.get("desktopFocusType");
+    const focusId = params.get("desktopFocusId");
+
+    if (!focusType || !focusId) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      const target = [...document.querySelectorAll("[data-desktop-record-id]")].find(
+        (element) =>
+          element.getAttribute("data-desktop-record-type") === focusType &&
+          element.getAttribute("data-desktop-record-id") === focusId,
+      );
+      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 300);
+
+    return () => window.clearTimeout(timeout);
+  }, [billing.data, documents.data, inbox.data, visibleTransactions]);
   const extractionCorrectionMutation = useMutation(
     orpc.inbox.correctExtraction.mutationOptions({
       onSuccess: async (result) => {
@@ -1456,10 +1516,15 @@ function RouteComponent() {
                   Upload document
                 </Button>
               </div>
+              {desktopCaptureMessage ? (
+                <p className="text-sm text-muted-foreground">{desktopCaptureMessage}</p>
+              ) : null}
               <div className="overflow-hidden border">
                 {documents.data?.documents.map((document) => (
                   <div
                     className="grid gap-3 border-b p-3 last:border-b-0 md:grid-cols-[1fr_auto_auto] md:items-center"
+                    data-desktop-record-id={document.id}
+                    data-desktop-record-type="document"
                     key={document.id}
                   >
                     <div>
@@ -1524,7 +1589,12 @@ function RouteComponent() {
                     extractionFieldsToCorrectionState(item.latestExtraction?.fields);
 
                   return (
-                    <div className="grid gap-3 border-b p-3 last:border-b-0" key={item.id}>
+                    <div
+                      className="grid gap-3 border-b p-3 last:border-b-0"
+                      data-desktop-record-id={item.id}
+                      data-desktop-record-type="inbox_item"
+                      key={item.id}
+                    >
                       <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
                         <div>
                           <p className="font-medium">{item.document?.title ?? item.documentId}</p>
@@ -2044,6 +2114,8 @@ function RouteComponent() {
                     {billing.data.invoices.map((invoice) => (
                       <div
                         className="grid gap-2 border p-3 text-sm md:grid-cols-[1fr_auto]"
+                        data-desktop-record-id={invoice.id}
+                        data-desktop-record-type="invoice"
                         key={invoice.id}
                       >
                         <div>
@@ -2974,7 +3046,11 @@ function TransactionReviewRow({
   const canReview = transaction.reviewState !== "reviewed" && categoryId.length > 0;
 
   return (
-    <div className="grid gap-3 border-b p-3 last:border-b-0 md:grid-cols-[1fr_auto_auto_auto] md:items-center">
+    <div
+      className="grid gap-3 border-b p-3 last:border-b-0 md:grid-cols-[1fr_auto_auto_auto] md:items-center"
+      data-desktop-record-id={transaction.id}
+      data-desktop-record-type="transaction"
+    >
       <div>
         <p className="font-medium">{transaction.description}</p>
         <p className="text-muted-foreground">
@@ -3095,6 +3171,42 @@ function sourceHref(type: string) {
   }
 
   return "#";
+}
+
+type DesktopCapturePayload = {
+  fileName: string;
+  contentType: string;
+  bodyBase64: string;
+  byteSize: number;
+  teamId?: string | null;
+};
+
+function desktopCapturePayload(event: Event): DesktopCapturePayload | null {
+  const detail = (event as CustomEvent<unknown>).detail;
+
+  if (
+    !detail ||
+    typeof detail !== "object" ||
+    typeof (detail as DesktopCapturePayload).fileName !== "string" ||
+    typeof (detail as DesktopCapturePayload).contentType !== "string" ||
+    typeof (detail as DesktopCapturePayload).bodyBase64 !== "string" ||
+    typeof (detail as DesktopCapturePayload).byteSize !== "number"
+  ) {
+    return null;
+  }
+
+  return detail as DesktopCapturePayload;
+}
+
+function fileFromDesktopCapture(payload: DesktopCapturePayload) {
+  const binary = atob(payload.bodyBase64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return new File([bytes], payload.fileName, { type: payload.contentType });
 }
 
 function formatApprovalPreview(preview: Record<string, unknown>) {

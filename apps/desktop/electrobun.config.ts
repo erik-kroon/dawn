@@ -7,6 +7,14 @@ export default {
     name: "dawn",
     identifier: "dev.bettertstack.dawn.desktop",
     version: "0.0.1",
+    urlSchemes: ["dawn"],
+    fileAssociations: [
+      {
+        ext: ["pdf", "png", "jpg", "jpeg", "txt", "csv"],
+        name: "Dawn inbox capture",
+        role: "Editor",
+      },
+    ],
   },
   runtime: {
     exitOnLastWindowClosed: true,
