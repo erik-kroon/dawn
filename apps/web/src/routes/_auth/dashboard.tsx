@@ -67,6 +67,16 @@ function RouteComponent() {
     quantity: "1",
     discountRate: "0",
   });
+  const [invoiceActionDraft, setInvoiceActionDraft] = useState({
+    paymentAmount: "",
+    recurringFrequency: "monthly" as "weekly" | "monthly" | "quarterly" | "yearly",
+    recurringNextRunAt: "",
+  });
+  const [invoicePreview, setInvoicePreview] = useState<{
+    invoiceNumber: string;
+    fileName: string;
+    bodyBase64: string;
+  } | null>(null);
   const [syncReviewError, setSyncReviewError] = useState<string | null>(null);
   const [syncReviewingId, setSyncReviewingId] = useState<string | null>(null);
 
@@ -294,6 +304,40 @@ function RouteComponent() {
           quantity: "1",
           discountRate: "0",
         });
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
+      },
+    }),
+  );
+  const previewInvoicePdfMutation = useMutation({
+    mutationFn: (input: { teamId: string; invoiceId: string }) =>
+      client.billing.previewInvoicePdf(input),
+    onSuccess: (result) => {
+      setInvoicePreview({
+        invoiceNumber: result.invoice.invoiceNumber,
+        fileName: result.pdf.fileName,
+        bodyBase64: result.pdf.bodyBase64,
+      });
+    },
+  });
+  const sendInvoiceMutation = useMutation(
+    orpc.billing.sendInvoice.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
+      },
+    }),
+  );
+  const recordInvoicePaymentMutation = useMutation(
+    orpc.billing.recordPayment.mutationOptions({
+      onSuccess: async () => {
+        setInvoiceActionDraft((draft) => ({ ...draft, paymentAmount: "" }));
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
+      },
+    }),
+  );
+  const createRecurringScheduleMutation = useMutation(
+    orpc.billing.createRecurringSchedule.mutationOptions({
+      onSuccess: async () => {
+        setInvoiceActionDraft((draft) => ({ ...draft, recurringNextRunAt: "" }));
         await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
       },
     }),
@@ -1220,6 +1264,161 @@ function RouteComponent() {
                   draft invoices
                 </p>
               </div>
+              <div className="grid gap-2">
+                <p className="text-sm font-medium">Invoice operations</p>
+                {invoicePreview ? (
+                  <a
+                    className="text-sm underline"
+                    download={invoicePreview.fileName}
+                    href={`data:application/pdf;base64,${invoicePreview.bodyBase64}`}
+                  >
+                    Preview {invoicePreview.invoiceNumber} PDF
+                  </a>
+                ) : null}
+                {billing.data?.invoices.length ? (
+                  <div className="grid gap-2">
+                    {billing.data.invoices.map((invoice) => (
+                      <div
+                        className="grid gap-2 border p-3 text-sm md:grid-cols-[1fr_auto]"
+                        key={invoice.id}
+                      >
+                        <div>
+                          <p className="font-medium">
+                            {invoice.invoiceNumber} · {invoice.status}
+                          </p>
+                          <p className="text-muted-foreground">
+                            {formatMoney(invoice.amountPaid)} paid of{" "}
+                            {formatMoney(invoice.totals.total)}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            disabled={previewInvoicePdfMutation.isPending}
+                            onClick={() =>
+                              previewInvoicePdfMutation.mutate({
+                                teamId: invoice.teamId,
+                                invoiceId: invoice.id,
+                              })
+                            }
+                            size="sm"
+                            variant="outline"
+                          >
+                            Preview PDF
+                          </Button>
+                          <Button
+                            disabled={
+                              sendInvoiceMutation.isPending ||
+                              (invoice.status !== "draft" && invoice.status !== "scheduled")
+                            }
+                            onClick={() =>
+                              sendInvoiceMutation.mutate({
+                                teamId: invoice.teamId,
+                                invoiceId: invoice.id,
+                                confirm: true,
+                                idempotencyKey: crypto.randomUUID(),
+                              })
+                            }
+                            size="sm"
+                            variant="outline"
+                          >
+                            Send
+                          </Button>
+                        </div>
+                        <div className="grid gap-2 md:col-span-2 md:grid-cols-[1fr_auto_1fr_auto]">
+                          <Input
+                            onChange={(event) =>
+                              setInvoiceActionDraft((draft) => ({
+                                ...draft,
+                                paymentAmount: event.target.value,
+                              }))
+                            }
+                            placeholder="Payment amount"
+                            value={invoiceActionDraft.paymentAmount}
+                          />
+                          <Button
+                            disabled={
+                              recordInvoicePaymentMutation.isPending ||
+                              !invoiceActionDraft.paymentAmount.trim() ||
+                              invoice.status === "draft" ||
+                              invoice.status === "scheduled" ||
+                              invoice.status === "paid" ||
+                              invoice.status === "void"
+                            }
+                            onClick={() =>
+                              recordInvoicePaymentMutation.mutate({
+                                teamId: invoice.teamId,
+                                invoiceId: invoice.id,
+                                amount: {
+                                  amountMinor: parseMoneyInputToMinor(
+                                    invoiceActionDraft.paymentAmount,
+                                  ),
+                                  currency: invoice.currency,
+                                },
+                                paidAt: new Date().toISOString(),
+                                idempotencyKey: crypto.randomUUID(),
+                              })
+                            }
+                            size="sm"
+                          >
+                            Record payment
+                          </Button>
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <select
+                              className="h-9 rounded-none border bg-background px-2 text-sm"
+                              onChange={(event) =>
+                                setInvoiceActionDraft((draft) => ({
+                                  ...draft,
+                                  recurringFrequency: event.target
+                                    .value as typeof draft.recurringFrequency,
+                                }))
+                              }
+                              value={invoiceActionDraft.recurringFrequency}
+                            >
+                              <option value="weekly">Weekly</option>
+                              <option value="monthly">Monthly</option>
+                              <option value="quarterly">Quarterly</option>
+                              <option value="yearly">Yearly</option>
+                            </select>
+                            <Input
+                              onChange={(event) =>
+                                setInvoiceActionDraft((draft) => ({
+                                  ...draft,
+                                  recurringNextRunAt: event.target.value,
+                                }))
+                              }
+                              type="date"
+                              value={invoiceActionDraft.recurringNextRunAt}
+                            />
+                          </div>
+                          <Button
+                            disabled={
+                              createRecurringScheduleMutation.isPending ||
+                              !invoiceActionDraft.recurringNextRunAt
+                            }
+                            onClick={() =>
+                              createRecurringScheduleMutation.mutate({
+                                teamId: invoice.teamId,
+                                sourceInvoiceId: invoice.id,
+                                frequency: invoiceActionDraft.recurringFrequency,
+                                nextRunAt: new Date(
+                                  `${invoiceActionDraft.recurringNextRunAt}T00:00:00.000Z`,
+                                ).toISOString(),
+                                idempotencyKey: crypto.randomUUID(),
+                              })
+                            }
+                            size="sm"
+                            variant="outline"
+                          >
+                            Make recurring
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No invoices yet.</p>
+                )}
+              </div>
               {createCustomerMutation.error ? (
                 <p className="text-sm text-destructive">{createCustomerMutation.error.message}</p>
               ) : null}
@@ -1234,6 +1433,24 @@ function RouteComponent() {
               {updateDraftInvoiceMutation.error ? (
                 <p className="text-sm text-destructive">
                   {updateDraftInvoiceMutation.error.message}
+                </p>
+              ) : null}
+              {previewInvoicePdfMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {previewInvoicePdfMutation.error.message}
+                </p>
+              ) : null}
+              {sendInvoiceMutation.error ? (
+                <p className="text-sm text-destructive">{sendInvoiceMutation.error.message}</p>
+              ) : null}
+              {recordInvoicePaymentMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {recordInvoicePaymentMutation.error.message}
+                </p>
+              ) : null}
+              {createRecurringScheduleMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {createRecurringScheduleMutation.error.message}
                 </p>
               ) : null}
             </div>

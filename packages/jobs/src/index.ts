@@ -53,15 +53,27 @@ export const documentExtractionJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const recurringInvoiceGenerationJobSchema = z.object({
+  type: z.literal("invoice.recurring.generate"),
+  teamId: z.string().min(1),
+  scheduleId: z.string().min(1),
+  sourceInvoiceId: z.string().min(1),
+  runAt: z.string().min(1),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   outboxDispatchJobSchema,
   syncInvalidationJobSchema,
   documentExtractionJobSchema,
+  recurringInvoiceGenerationJobSchema,
 ]);
 
 export type OutboxDispatchJob = z.infer<typeof outboxDispatchJobSchema>;
 export type SyncInvalidationJob = z.infer<typeof syncInvalidationJobSchema>;
 export type DocumentExtractionJob = z.infer<typeof documentExtractionJobSchema>;
+export type RecurringInvoiceGenerationJob = z.infer<typeof recurringInvoiceGenerationJobSchema>;
 export type DawnQueueMessage = z.infer<typeof dawnQueueMessageSchema>;
 
 export function createOutboxDispatchJob(event: OutboxEventForJob): OutboxDispatchJob {
@@ -83,9 +95,10 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const dispatchJob = createOutboxDispatchJob(event);
   const syncJob = createSyncInvalidationJob(event);
   const extractionJob = createDocumentExtractionJob(event);
+  const recurringInvoiceJob = createRecurringInvoiceGenerationJob(event);
 
-  return [dispatchJob, syncJob, extractionJob].filter((message): message is DawnQueueMessage =>
-    Boolean(message),
+  return [dispatchJob, syncJob, extractionJob, recurringInvoiceJob].filter(
+    (message): message is DawnQueueMessage => Boolean(message),
   );
 }
 
@@ -154,6 +167,32 @@ function createDocumentExtractionJob(event: OutboxEventForJob): DocumentExtracti
     actorId: event.payload.actorId,
     sourceOutboxEventId: event.id,
     idempotencyKey: `document:extract:${event.id}`,
+  };
+}
+
+function createRecurringInvoiceGenerationJob(
+  event: OutboxEventForJob,
+): RecurringInvoiceGenerationJob | null {
+  if (event.type !== "recurring_invoice.due") {
+    return null;
+  }
+
+  if (
+    typeof event.payload.scheduleId !== "string" ||
+    typeof event.payload.sourceInvoiceId !== "string" ||
+    typeof event.payload.runAt !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    type: "invoice.recurring.generate",
+    teamId: event.teamId,
+    scheduleId: event.payload.scheduleId,
+    sourceInvoiceId: event.payload.sourceInvoiceId,
+    runAt: event.payload.runAt,
+    sourceOutboxEventId: event.id,
+    idempotencyKey: `invoice:recurring:${event.id}`,
   };
 }
 

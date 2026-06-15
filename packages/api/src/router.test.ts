@@ -1,15 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { call } from "@orpc/server";
+import { createDeterministicInvoicePdfRenderer } from "@dawn/app";
 import type {
   Actor,
   Category,
   Customer,
   CustomerContact,
+  InvoiceEvent,
   InvoiceDraft,
   InvoiceLineDraft,
+  InvoicePayment,
   LedgerAccount,
   LedgerTransactionDraft,
   Product,
+  RecurringInvoiceSchedule,
   TeamInvite,
   TeamMember,
   TeamMembership,
@@ -38,7 +42,10 @@ import type {
   TeamAlias,
   TransactionImportSession,
 } from "@dawn/app";
-import { createMockBankingProvider } from "@dawn/integrations";
+import {
+  createMockBankingProvider,
+  createMockInvoiceEmailDeliveryProvider,
+} from "@dawn/integrations";
 
 class MemoryTransactionReviewRepository implements DawnRepository {
   auditEvents: unknown[] = [];
@@ -60,6 +67,9 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   matchSuggestions = new Map<string, InboxTransactionMatchSuggestion>();
   products = new Map<string, Product>();
   invoices = new Map<string, InvoiceDraft>();
+  invoicePayments = new Map<string, InvoicePayment>();
+  invoiceEvents = new Map<string, InvoiceEvent>();
+  recurringInvoices = new Map<string, RecurringInvoiceSchedule>();
   aliases: TeamAlias[] = [];
   hardNegatives: HardNegativeTransactionMatch[] = [];
   attachments: { transactionId: string; documentId: string }[] = [];
@@ -828,15 +838,35 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return [...this.products.values()].filter((product) => product.teamId === teamId);
   }
 
+  async listInvoices(teamId: string) {
+    return [...this.invoices.values()].filter((invoice) => invoice.teamId === teamId);
+  }
+
   async listDraftInvoices(teamId: string) {
     return [...this.invoices.values()].filter(
       (invoice) => invoice.teamId === teamId && invoice.status === "draft",
     );
   }
 
+  async listInvoicePayments(teamId: string) {
+    return [...this.invoicePayments.values()].filter((payment) => payment.teamId === teamId);
+  }
+
+  async listRecurringInvoiceSchedules(teamId: string) {
+    return [...this.recurringInvoices.values()].filter((schedule) => schedule.teamId === teamId);
+  }
+
   async getCustomerForTeam(teamId: string, customerId: string) {
     const customer = this.customers.get(customerId);
     return customer?.teamId === teamId ? customer : null;
+  }
+
+  async getCustomerContactForCustomer(teamId: string, customerId: string) {
+    return (
+      [...this.customerContacts.values()].find(
+        (contact) => contact.teamId === teamId && contact.customerId === customerId,
+      ) ?? null
+    );
   }
 
   async getProductForTeam(teamId: string, productId: string) {
@@ -847,6 +877,11 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   async getInvoiceForTeam(teamId: string, invoiceId: string) {
     const invoice = this.invoices.get(invoiceId);
     return invoice?.teamId === teamId ? invoice : null;
+  }
+
+  async getRecurringInvoiceScheduleForTeam(teamId: string, scheduleId: string) {
+    const schedule = this.recurringInvoices.get(scheduleId);
+    return schedule?.teamId === teamId ? schedule : null;
   }
 
   async createCustomer(input: {
@@ -957,6 +992,156 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return invoice;
   }
 
+  async markInvoiceSent(input: {
+    teamId: string;
+    invoiceId: string;
+    sentAt: string;
+    toEmail: string;
+    providerMessageId: string;
+  }) {
+    const invoice = this.invoices.get(input.invoiceId);
+
+    if (!invoice || invoice.teamId !== input.teamId) {
+      throw new Error("Invoice was not sent");
+    }
+
+    const sent: InvoiceDraft = {
+      ...invoice,
+      status: "sent",
+      sentAt: input.sentAt,
+      deliveryToEmail: input.toEmail,
+      deliveryProviderMessageId: input.providerMessageId,
+      updatedAt: input.sentAt,
+    };
+    this.invoices.set(sent.id, sent);
+    return sent;
+  }
+
+  async recordInvoicePayment(input: {
+    paymentId: string;
+    teamId: string;
+    invoiceId: string;
+    amount: InvoicePayment["amount"];
+    paidAt: string;
+    method?: string | null;
+    note?: string | null;
+    createdByActorId: string;
+    nextInvoiceStatus: InvoiceDraft["status"];
+    nextAmountPaid: InvoicePayment["amount"];
+    invoicePaidAt?: string | null;
+  }) {
+    const invoice = this.invoices.get(input.invoiceId);
+
+    if (!invoice || invoice.teamId !== input.teamId) {
+      throw new Error("Invoice payment did not update invoice");
+    }
+
+    const payment: InvoicePayment = {
+      id: input.paymentId,
+      teamId: input.teamId,
+      invoiceId: input.invoiceId,
+      amount: input.amount,
+      paidAt: input.paidAt,
+      method: input.method ?? null,
+      note: input.note ?? null,
+      createdByActorId: input.createdByActorId,
+      createdAt: input.paidAt,
+    };
+    const updated: InvoiceDraft = {
+      ...invoice,
+      status: input.nextInvoiceStatus,
+      amountPaid: input.nextAmountPaid,
+      paidAt: input.invoicePaidAt ?? null,
+      updatedAt: input.paidAt,
+    };
+    this.invoicePayments.set(payment.id, payment);
+    this.invoices.set(updated.id, updated);
+    return { invoice: updated, payment };
+  }
+
+  async createInvoiceEvent(input: {
+    eventId: string;
+    teamId: string;
+    invoiceId: string;
+    type: InvoiceEvent["type"];
+    occurredAt: string;
+    actorId?: string | null;
+    metadata: Record<string, unknown>;
+  }) {
+    const event: InvoiceEvent = {
+      id: input.eventId,
+      teamId: input.teamId,
+      invoiceId: input.invoiceId,
+      type: input.type,
+      occurredAt: input.occurredAt,
+      actorId: input.actorId ?? null,
+      metadata: input.metadata,
+    };
+    this.invoiceEvents.set(event.id, event);
+    return event;
+  }
+
+  async createRecurringInvoiceSchedule(input: {
+    scheduleId: string;
+    teamId: string;
+    sourceInvoiceId: string;
+    customerId: string;
+    frequency: RecurringInvoiceSchedule["frequency"];
+    nextRunAt: string;
+    createdByActorId: string;
+  }) {
+    const schedule: RecurringInvoiceSchedule = {
+      id: input.scheduleId,
+      teamId: input.teamId,
+      sourceInvoiceId: input.sourceInvoiceId,
+      customerId: input.customerId,
+      frequency: input.frequency,
+      nextRunAt: input.nextRunAt,
+      status: "active",
+      createdByActorId: input.createdByActorId,
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.recurringInvoices.set(schedule.id, schedule);
+    return schedule;
+  }
+
+  async generateRecurringInvoice(input: {
+    invoiceId: string;
+    teamId: string;
+    scheduleId: string;
+    sourceInvoice: InvoiceDraft;
+    runAt: string;
+    nextRunAt: string;
+    createdByActorId: string;
+  }) {
+    const schedule = this.recurringInvoices.get(input.scheduleId);
+
+    if (!schedule || schedule.teamId !== input.teamId) {
+      throw new Error("Recurring invoice schedule was not updated");
+    }
+
+    const invoice = this.invoiceFromInput(
+      input.invoiceId,
+      {
+        teamId: input.teamId,
+        customerId: input.sourceInvoice.customerId,
+        invoiceNumber: `${input.sourceInvoice.invoiceNumber}-R20260715`,
+        issueDate: input.runAt,
+        dueDate: input.sourceInvoice.dueDate,
+        currency: input.sourceInvoice.currency,
+        discountBasisPoints: input.sourceInvoice.discountBasisPoints,
+        notes: input.sourceInvoice.notes,
+        lines: input.sourceInvoice.lines,
+      },
+      input.createdByActorId,
+    );
+    const nextSchedule = { ...schedule, nextRunAt: input.nextRunAt, updatedAt: input.runAt };
+    this.invoices.set(invoice.id, invoice);
+    this.recurringInvoices.set(nextSchedule.id, nextSchedule);
+    return { invoice, schedule: nextSchedule };
+  }
+
   private invoiceFromInput(
     invoiceId: string,
     input: {
@@ -1002,6 +1187,14 @@ class MemoryTransactionReviewRepository implements DawnRepository {
         totals: calculated.lines[index]!,
       })),
       totals: calculated.totals,
+      amountPaid: { amountMinor: 0, currency: input.currency },
+      sentAt: null,
+      viewedAt: null,
+      paidAt: null,
+      overdueAt: null,
+      voidedAt: null,
+      deliveryToEmail: null,
+      deliveryProviderMessageId: null,
       createdByActorId,
       createdAt: "2026-06-15T10:00:00.000Z",
       updatedAt: "2026-06-15T10:00:00.000Z",
@@ -1179,6 +1372,8 @@ async function createTestRouter(repository: DawnRepository) {
     transactionReviewRepository: repository,
     bankingProvider: createMockBankingProvider(),
     documentUrlSigner: testDocumentUrlSigner,
+    invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
+    invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
   });
 }
 
@@ -1364,7 +1559,7 @@ describe("appRouter", () => {
   test("creates ledger transactions through the protected router", async () => {
     const repository = new MemoryTransactionReviewRepository();
     repository.teams.set("team_1", "Test Team");
-    repository.memberships.set("user_1:team_1", "member");
+    repository.memberships.set("user_1:team_1", "admin");
     repository.accounts.set("acct_1", {
       id: "acct_1",
       teamId: "team_1",
@@ -1408,7 +1603,7 @@ describe("appRouter", () => {
   test("previews and commits CSV imports through protected routes", async () => {
     const repository = new MemoryTransactionReviewRepository();
     repository.teams.set("team_1", "Test Team");
-    repository.memberships.set("user_1:team_1", "member");
+    repository.memberships.set("user_1:team_1", "admin");
     repository.accounts.set("acct_1", {
       id: "acct_1",
       teamId: "team_1",
@@ -1461,7 +1656,7 @@ describe("appRouter", () => {
   test("creates customers, products, and draft invoices through protected billing routes", async () => {
     const repository = new MemoryTransactionReviewRepository();
     repository.teams.set("team_1", "Test Team");
-    repository.memberships.set("user_1:team_1", "member");
+    repository.memberships.set("user_1:team_1", "admin");
     const router = await createTestRouter(repository);
     const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
 
@@ -1536,17 +1731,63 @@ describe("appRouter", () => {
       },
       context,
     );
+    const preview = await call(
+      router.billing.previewInvoicePdf,
+      { teamId: "team_1", invoiceId: invoice.invoice.id },
+      context,
+    );
+    const sent = await call(
+      router.billing.sendInvoice,
+      {
+        teamId: "team_1",
+        invoiceId: invoice.invoice.id,
+        confirm: true,
+        idempotencyKey: "send_1",
+      },
+      context,
+    );
+    const payment = await call(
+      router.billing.recordPayment,
+      {
+        teamId: "team_1",
+        invoiceId: invoice.invoice.id,
+        amount: { amountMinor: 112_50, currency: "USD" },
+        paidAt: "2026-06-20T00:00:00.000Z",
+        idempotencyKey: "payment_1",
+      },
+      context,
+    );
+    const recurring = await call(
+      router.billing.createRecurringSchedule,
+      {
+        teamId: "team_1",
+        sourceInvoiceId: invoice.invoice.id,
+        frequency: "monthly",
+        nextRunAt: "2026-07-15T00:00:00.000Z",
+        idempotencyKey: "recurring_1",
+      },
+      context,
+    );
     const list = await call(router.billing.list, { teamId: "team_1" }, context);
 
     expect(customer.contact).toMatchObject({ email: "ada@acme.test" });
     expect(product.product.defaultTaxRateBasisPoints).toBe(2_500);
     expect(invoice.invoice.totals.total).toEqual({ amountMinor: 125_00, currency: "USD" });
     expect(updated.invoice.totals.total).toEqual({ amountMinor: 112_50, currency: "USD" });
+    expect(Buffer.from(preview.pdf.bodyBase64, "base64").toString().startsWith("%PDF-1.4")).toBe(
+      true,
+    );
+    expect(sent.invoice.status).toBe("sent");
+    expect(payment.invoice.status).toBe("paid");
+    expect(recurring.schedule.frequency).toBe("monthly");
     expect(list.customers).toHaveLength(1);
     expect(list.products).toHaveLength(1);
-    expect(list.draftInvoices).toHaveLength(1);
-    expect(repository.auditEvents).toHaveLength(4);
-    expect(repository.outboxEvents).toHaveLength(4);
+    expect(list.invoices).toHaveLength(1);
+    expect(list.draftInvoices).toHaveLength(0);
+    expect(list.payments).toHaveLength(1);
+    expect(list.recurringSchedules).toHaveLength(1);
+    expect(repository.auditEvents).toHaveLength(7);
+    expect(repository.outboxEvents).toHaveLength(7);
   });
 
   test("creates and signs document uploads and downloads through protected routes", async () => {

@@ -47,6 +47,32 @@ export type BankingProvider = {
   }): Promise<BankingProviderTransaction[]>;
 };
 
+export type InvoiceEmailAttachment = {
+  fileName: string;
+  contentType: "application/pdf";
+  bodyBase64: string;
+};
+
+export type InvoiceEmailMessage = {
+  teamId: string;
+  invoiceId: string;
+  to: string;
+  subject: string;
+  text: string;
+  html?: string | null;
+  attachment: InvoiceEmailAttachment;
+};
+
+export type InvoiceEmailDeliveryResult = {
+  providerMessageId: string;
+  acceptedAt: string;
+};
+
+export type InvoiceEmailDeliveryProvider = {
+  provider: "mock-email";
+  sendInvoice(input: InvoiceEmailMessage): Promise<InvoiceEmailDeliveryResult>;
+};
+
 export function canonicalProviderTransactionId(input: {
   provider: BankingProviderName;
   providerConnectionId: string;
@@ -162,6 +188,18 @@ export function createMockBankingProvider(): BankingProvider {
           },
         },
       ];
+    },
+  };
+}
+
+export function createMockInvoiceEmailDeliveryProvider(): InvoiceEmailDeliveryProvider {
+  return {
+    provider: "mock-email",
+    async sendInvoice(input) {
+      return {
+        providerMessageId: `mock_email_${input.teamId}_${input.invoiceId}`,
+        acceptedAt: "2026-06-15T12:00:00.000Z",
+      };
     },
   };
 }

@@ -10,6 +10,7 @@ import {
   AppError,
   completeDocumentUpload,
   dispatchOutboxEvents,
+  generateRecurringInvoice,
   resolveTeamAccess,
 } from "@dawn/app";
 import { auth } from "@dawn/auth";
@@ -296,6 +297,15 @@ async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnC
       repository: new DrizzleTransactionReviewRepository(),
       storage: createR2DocumentObjectStorage(env.DAWN_DOCUMENTS),
       message: message.body,
+    });
+  }
+
+  if (message.body.type === "invoice.recurring.generate") {
+    await generateRecurringInvoice(new DrizzleTransactionReviewRepository(), {
+      teamId: message.body.teamId,
+      scheduleId: message.body.scheduleId,
+      runAt: message.body.runAt,
+      idempotencyKey: message.body.idempotencyKey,
     });
   }
 }

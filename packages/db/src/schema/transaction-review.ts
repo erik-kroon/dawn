@@ -757,7 +757,15 @@ export const invoice = pgTable(
     discountMinor: integer("discount_minor").notNull(),
     taxMinor: integer("tax_minor").notNull(),
     totalMinor: integer("total_minor").notNull(),
+    amountPaidMinor: integer("amount_paid_minor").default(0).notNull(),
     notes: text("notes"),
+    sentAt: timestamp("sent_at"),
+    viewedAt: timestamp("viewed_at"),
+    paidAt: timestamp("paid_at"),
+    overdueAt: timestamp("overdue_at"),
+    voidedAt: timestamp("voided_at"),
+    deliveryToEmail: text("delivery_to_email"),
+    deliveryProviderMessageId: text("delivery_provider_message_id"),
     createdByActorId: text("created_by_actor_id").notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
@@ -799,6 +807,80 @@ export const invoiceLine = pgTable(
   (table) => [
     index("invoice_line_invoice_idx").on(table.invoiceId, table.sortOrder),
     index("invoice_line_product_idx").on(table.productId),
+  ],
+);
+
+export const invoicePayment = pgTable(
+  "invoice_payment",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    invoiceId: text("invoice_id")
+      .notNull()
+      .references(() => invoice.id, { onDelete: "cascade" }),
+    amountMinor: integer("amount_minor").notNull(),
+    currency: text("currency").notNull(),
+    paidAt: timestamp("paid_at").notNull(),
+    method: text("method"),
+    note: text("note"),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("invoice_payment_invoice_idx").on(table.invoiceId, table.paidAt),
+    index("invoice_payment_team_idx").on(table.teamId, table.paidAt),
+  ],
+);
+
+export const invoiceEvent = pgTable(
+  "invoice_event",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    invoiceId: text("invoice_id")
+      .notNull()
+      .references(() => invoice.id, { onDelete: "cascade" }),
+    type: text("type").notNull(),
+    occurredAt: timestamp("occurred_at").notNull(),
+    actorId: text("actor_id"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull(),
+  },
+  (table) => [
+    index("invoice_event_invoice_idx").on(table.invoiceId, table.occurredAt),
+    index("invoice_event_team_idx").on(table.teamId, table.occurredAt),
+  ],
+);
+
+export const recurringInvoice = pgTable(
+  "recurring_invoice",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    sourceInvoiceId: text("source_invoice_id")
+      .notNull()
+      .references(() => invoice.id, { onDelete: "cascade" }),
+    customerId: text("customer_id")
+      .notNull()
+      .references(() => customer.id, { onDelete: "restrict" }),
+    frequency: text("frequency").notNull(),
+    nextRunAt: timestamp("next_run_at").notNull(),
+    status: text("status").default("active").notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("recurring_invoice_team_status_idx").on(table.teamId, table.status, table.nextRunAt),
+    index("recurring_invoice_source_idx").on(table.sourceInvoiceId),
   ],
 );
 

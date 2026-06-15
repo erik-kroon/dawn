@@ -4,9 +4,13 @@ import type {
   CsvTransactionColumnMapping,
   Customer,
   CustomerContact,
+  InvoiceEvent,
   InvoiceDraft,
   InvoiceDraftInput,
   InvoiceLineDraft,
+  InvoicePayment,
+  RecurringInvoiceFrequency,
+  RecurringInvoiceSchedule,
   LedgerAccount,
   LedgerTransactionDraft,
   Money,
@@ -30,17 +34,22 @@ import type {
   BankingProviderConnection,
   BankingProviderName,
   BankingProviderTransaction,
+  InvoiceEmailDeliveryProvider,
 } from "@dawn/integrations";
 import type { DawnQueueMessage, OutboxEventForJob } from "@dawn/jobs";
 import type { TransactionSyncResponse } from "@dawn/sync";
 import {
   applyTransactionReview,
   assertCanEditInvoiceDraft,
+  assertCanSendInvoice,
   assertInvoiceDraftInput,
   assertLedgerTransactionDraft,
   createReportTotals,
   csvRowToLedgerDraft,
+  invoiceStatusAfterPayment,
   ledgerDuplicateKey,
+  markInvoiceSent,
+  nextRecurringInvoiceRun,
   parseCsvTransactionRows,
   permissionsForRole,
   roleHasPermission,
@@ -488,7 +497,10 @@ export type BillingWorkspace = {
   customers: Customer[];
   contacts: CustomerContact[];
   products: Product[];
+  invoices: InvoiceDraft[];
   draftInvoices: InvoiceDraft[];
+  payments: InvoicePayment[];
+  recurringSchedules: RecurringInvoiceSchedule[];
 };
 
 export type CreateCustomerCommand = {
@@ -539,6 +551,89 @@ export type UpdateDraftInvoiceCommand = InvoiceDraftInput & {
 
 export type UpdateDraftInvoiceResult = {
   invoice: InvoiceDraft;
+  replayed: boolean;
+};
+
+export type InvoicePdfDocument = {
+  fileName: string;
+  contentType: "application/pdf";
+  bodyBase64: string;
+  byteSize: number;
+};
+
+export type InvoicePdfRenderer = {
+  render(input: {
+    invoice: InvoiceDraft;
+    customer: Customer;
+    contact?: CustomerContact | null;
+  }): Promise<InvoicePdfDocument>;
+};
+
+export type PreviewInvoicePdfCommand = {
+  teamId: string;
+  invoiceId: string;
+};
+
+export type PreviewInvoicePdfResult = {
+  invoice: InvoiceDraft;
+  pdf: InvoicePdfDocument;
+};
+
+export type SendInvoiceCommand = {
+  teamId: string;
+  invoiceId: string;
+  toEmail?: string | null;
+  subject?: string | null;
+  message?: string | null;
+  confirm: boolean;
+  idempotencyKey: string;
+};
+
+export type SendInvoiceResult = {
+  invoice: InvoiceDraft;
+  providerMessageId: string;
+  replayed: boolean;
+};
+
+export type RecordInvoicePaymentCommand = {
+  teamId: string;
+  invoiceId: string;
+  amount: Money;
+  paidAt: string;
+  method?: string | null;
+  note?: string | null;
+  idempotencyKey: string;
+};
+
+export type RecordInvoicePaymentResult = {
+  invoice: InvoiceDraft;
+  payment: InvoicePayment;
+  replayed: boolean;
+};
+
+export type CreateRecurringInvoiceScheduleCommand = {
+  teamId: string;
+  sourceInvoiceId: string;
+  frequency: RecurringInvoiceFrequency;
+  nextRunAt: string;
+  idempotencyKey: string;
+};
+
+export type CreateRecurringInvoiceScheduleResult = {
+  schedule: RecurringInvoiceSchedule;
+  replayed: boolean;
+};
+
+export type GenerateRecurringInvoiceCommand = {
+  teamId: string;
+  scheduleId: string;
+  runAt: string;
+  idempotencyKey: string;
+};
+
+export type GenerateRecurringInvoiceResult = {
+  invoice: InvoiceDraft;
+  schedule: RecurringInvoiceSchedule;
   replayed: boolean;
 };
 
@@ -810,10 +905,21 @@ export type BillingRepository = {
   listCustomers(teamId: string): Promise<Customer[]>;
   listCustomerContacts(teamId: string): Promise<CustomerContact[]>;
   listProducts(teamId: string): Promise<Product[]>;
+  listInvoices(teamId: string): Promise<InvoiceDraft[]>;
   listDraftInvoices(teamId: string): Promise<InvoiceDraft[]>;
+  listInvoicePayments(teamId: string): Promise<InvoicePayment[]>;
+  listRecurringInvoiceSchedules(teamId: string): Promise<RecurringInvoiceSchedule[]>;
   getCustomerForTeam(teamId: string, customerId: string): Promise<Customer | null>;
+  getCustomerContactForCustomer(
+    teamId: string,
+    customerId: string,
+  ): Promise<CustomerContact | null>;
   getProductForTeam(teamId: string, productId: string): Promise<Product | null>;
   getInvoiceForTeam(teamId: string, invoiceId: string): Promise<InvoiceDraft | null>;
+  getRecurringInvoiceScheduleForTeam(
+    teamId: string,
+    scheduleId: string,
+  ): Promise<RecurringInvoiceSchedule | null>;
   createCustomer(input: {
     customerId: string;
     contactId?: string | null;
@@ -861,6 +967,53 @@ export type BillingRepository = {
     notes?: string | null;
     lines: InvoiceLineDraft[];
   }): Promise<InvoiceDraft>;
+  markInvoiceSent(input: {
+    teamId: string;
+    invoiceId: string;
+    sentAt: string;
+    toEmail: string;
+    providerMessageId: string;
+  }): Promise<InvoiceDraft>;
+  recordInvoicePayment(input: {
+    paymentId: string;
+    teamId: string;
+    invoiceId: string;
+    amount: Money;
+    paidAt: string;
+    method?: string | null;
+    note?: string | null;
+    createdByActorId: string;
+    nextInvoiceStatus: InvoiceDraft["status"];
+    nextAmountPaid: Money;
+    invoicePaidAt?: string | null;
+  }): Promise<{ invoice: InvoiceDraft; payment: InvoicePayment }>;
+  createInvoiceEvent(input: {
+    eventId: string;
+    teamId: string;
+    invoiceId: string;
+    type: InvoiceEvent["type"];
+    occurredAt: string;
+    actorId?: string | null;
+    metadata: Record<string, unknown>;
+  }): Promise<InvoiceEvent>;
+  createRecurringInvoiceSchedule(input: {
+    scheduleId: string;
+    teamId: string;
+    sourceInvoiceId: string;
+    customerId: string;
+    frequency: RecurringInvoiceFrequency;
+    nextRunAt: string;
+    createdByActorId: string;
+  }): Promise<RecurringInvoiceSchedule>;
+  generateRecurringInvoice(input: {
+    invoiceId: string;
+    teamId: string;
+    scheduleId: string;
+    sourceInvoice: InvoiceDraft;
+    runAt: string;
+    nextRunAt: string;
+    createdByActorId: string;
+  }): Promise<{ invoice: InvoiceDraft; schedule: RecurringInvoiceSchedule }>;
 };
 
 export type DawnRepository = BankingUseCaseRepository &
@@ -1022,6 +1175,10 @@ const createCustomerOperation = "customer.create";
 const createProductOperation = "product.create";
 const createDraftInvoiceOperation = "invoice.draft.create";
 const updateDraftInvoiceOperation = "invoice.draft.update";
+const sendInvoiceOperation = "invoice.send";
+const recordInvoicePaymentOperation = "invoice.payment.record";
+const createRecurringInvoiceScheduleOperation = "invoice.recurring.create";
+const generateRecurringInvoiceOperation = "invoice.recurring.generate";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
@@ -2451,19 +2608,27 @@ export async function listBillingWorkspace(
     "invoices.read",
     "You cannot read billing data for this team",
   );
-  const [customers, contacts, products, draftInvoices] = await Promise.all([
-    repository.listCustomers(access.teamId),
-    repository.listCustomerContacts(access.teamId),
-    repository.listProducts(access.teamId),
-    repository.listDraftInvoices(access.teamId),
-  ]);
+  const [customers, contacts, products, invoices, payments, recurringSchedules] = await Promise.all(
+    [
+      repository.listCustomers(access.teamId),
+      repository.listCustomerContacts(access.teamId),
+      repository.listProducts(access.teamId),
+      repository.listInvoices(access.teamId),
+      repository.listInvoicePayments(access.teamId),
+      repository.listRecurringInvoiceSchedules(access.teamId),
+    ],
+  );
+  const draftInvoices = invoices.filter((invoice) => invoice.status === "draft");
 
   return {
     teamId: access.teamId,
     customers,
     contacts,
     products,
+    invoices,
     draftInvoices,
+    payments,
+    recurringSchedules,
   };
 }
 
@@ -2814,6 +2979,569 @@ export async function updateDraftInvoice(
 
     return result;
   });
+}
+
+export async function previewInvoicePdf(
+  repository: DawnRepository,
+  renderer: InvoicePdfRenderer,
+  context: TransactionReviewContext,
+  command: PreviewInvoicePdfCommand,
+): Promise<PreviewInvoicePdfResult> {
+  assertCommandTeamMatchesContext(context, command.teamId, "Invoice not found");
+
+  await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId },
+    "invoices.read",
+    "You cannot preview invoices for this team",
+  );
+
+  const invoice = await repository.getInvoiceForTeam(command.teamId, command.invoiceId);
+
+  if (!invoice) {
+    throw new AppError("NOT_FOUND", "Invoice not found");
+  }
+
+  const customer = await repository.getCustomerForTeam(command.teamId, invoice.customerId);
+
+  if (!customer) {
+    throw new AppError("NOT_FOUND", "Customer not found");
+  }
+
+  const contact = await repository.getCustomerContactForCustomer(command.teamId, customer.id);
+  const pdf = await renderer.render({ invoice, customer, contact });
+
+  return { invoice, pdf };
+}
+
+export async function sendInvoice(
+  repository: DawnRepository,
+  renderer: InvoicePdfRenderer,
+  emailProvider: InvoiceEmailDeliveryProvider,
+  context: TransactionReviewContext,
+  command: SendInvoiceCommand,
+): Promise<SendInvoiceResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const billingRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Invoice not found");
+
+    await resolveTeamAccess(
+      billingRepository,
+      { ...context, teamId: command.teamId },
+      "invoices.send",
+      "You cannot send invoices for this team",
+    );
+
+    if (!command.confirm) {
+      throw new AppError("CONFLICT", "Invoice send requires explicit confirmation");
+    }
+
+    const normalized = {
+      teamId: command.teamId,
+      invoiceId: command.invoiceId,
+      toEmail: normalizeOptionalEmail(command.toEmail),
+      subject: command.subject?.trim() || null,
+      message: command.message?.trim() || null,
+      confirm: command.confirm,
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await billingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      sendInvoiceOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError("CONFLICT", "Idempotency key was already used for a different send");
+      }
+
+      return { ...(replayed.result as SendInvoiceResult), replayed: true };
+    }
+
+    const invoice = await billingRepository.getInvoiceForTeam(command.teamId, command.invoiceId);
+
+    if (!invoice) {
+      throw new AppError("NOT_FOUND", "Invoice not found");
+    }
+
+    try {
+      assertCanSendInvoice(invoice);
+    } catch (error) {
+      throw new AppError("CONFLICT", errorMessage(error));
+    }
+
+    const customer = await billingRepository.getCustomerForTeam(command.teamId, invoice.customerId);
+
+    if (!customer) {
+      throw new AppError("NOT_FOUND", "Customer not found");
+    }
+
+    const contact = await billingRepository.getCustomerContactForCustomer(
+      command.teamId,
+      customer.id,
+    );
+    const toEmail = normalized.toEmail ?? contact?.email ?? customer.email;
+
+    if (!toEmail) {
+      throw new AppError("CONFLICT", "Invoice send requires a recipient email");
+    }
+
+    const pdf = await renderer.render({ invoice, customer, contact });
+    const subject = normalized.subject ?? `Invoice ${invoice.invoiceNumber}`;
+    const delivery = await emailProvider.sendInvoice({
+      teamId: command.teamId,
+      invoiceId: invoice.id,
+      to: toEmail,
+      subject,
+      text: normalized.message ?? `Attached invoice ${invoice.invoiceNumber}`,
+      attachment: {
+        fileName: pdf.fileName,
+        contentType: pdf.contentType,
+        bodyBase64: pdf.bodyBase64,
+      },
+    });
+    const sent = markInvoiceSent(invoice, delivery.acceptedAt);
+    const stored = await billingRepository.markInvoiceSent({
+      teamId: command.teamId,
+      invoiceId: invoice.id,
+      sentAt: sent.sentAt,
+      toEmail,
+      providerMessageId: delivery.providerMessageId,
+    });
+
+    await billingRepository.createInvoiceEvent({
+      eventId: crypto.randomUUID(),
+      teamId: command.teamId,
+      invoiceId: invoice.id,
+      type: "invoice.sent",
+      occurredAt: delivery.acceptedAt,
+      actorId: context.actor.id,
+      metadata: {
+        toEmail,
+        provider: emailProvider.provider,
+        providerMessageId: delivery.providerMessageId,
+      },
+    });
+
+    await billingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "invoice.sent",
+      entityType: "invoice",
+      entityId: invoice.id,
+      metadata: {
+        toEmail,
+        providerMessageId: delivery.providerMessageId,
+      },
+    });
+
+    await billingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "invoice.sent",
+      version: 1,
+      payload: {
+        invoiceId: invoice.id,
+        customerId: invoice.customerId,
+        toEmail,
+        providerMessageId: delivery.providerMessageId,
+      },
+    });
+
+    const result = {
+      invoice: stored,
+      providerMessageId: delivery.providerMessageId,
+      replayed: false,
+    };
+
+    await billingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: sendInvoiceOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function recordInvoicePayment(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: RecordInvoicePaymentCommand,
+): Promise<RecordInvoicePaymentResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const billingRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Invoice not found");
+
+    await resolveTeamAccess(
+      billingRepository,
+      { ...context, teamId: command.teamId },
+      "invoices.write",
+      "You cannot record invoice payments for this team",
+    );
+
+    const normalized = {
+      teamId: command.teamId,
+      invoiceId: command.invoiceId,
+      amount: { ...command.amount, currency: command.amount.currency.toUpperCase() },
+      paidAt: command.paidAt,
+      method: command.method?.trim() || null,
+      note: command.note?.trim() || null,
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await billingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      recordInvoicePaymentOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError("CONFLICT", "Idempotency key was already used for a different payment");
+      }
+
+      return { ...(replayed.result as RecordInvoicePaymentResult), replayed: true };
+    }
+
+    const invoice = await billingRepository.getInvoiceForTeam(command.teamId, command.invoiceId);
+
+    if (!invoice) {
+      throw new AppError("NOT_FOUND", "Invoice not found");
+    }
+
+    let nextPaymentState: ReturnType<typeof invoiceStatusAfterPayment>;
+
+    try {
+      nextPaymentState = invoiceStatusAfterPayment({
+        invoice,
+        payment: normalized.amount,
+        paidAt: normalized.paidAt,
+      });
+    } catch (error) {
+      throw new AppError("CONFLICT", errorMessage(error));
+    }
+
+    const paymentResult = await billingRepository.recordInvoicePayment({
+      paymentId: crypto.randomUUID(),
+      teamId: command.teamId,
+      invoiceId: invoice.id,
+      amount: normalized.amount,
+      paidAt: normalized.paidAt,
+      method: normalized.method,
+      note: normalized.note,
+      createdByActorId: context.actor.id,
+      nextInvoiceStatus: nextPaymentState.status,
+      nextAmountPaid: nextPaymentState.amountPaid,
+      invoicePaidAt: nextPaymentState.paidAt,
+    });
+
+    await billingRepository.createInvoiceEvent({
+      eventId: crypto.randomUUID(),
+      teamId: command.teamId,
+      invoiceId: invoice.id,
+      type: "invoice.payment_recorded",
+      occurredAt: normalized.paidAt,
+      actorId: context.actor.id,
+      metadata: {
+        paymentId: paymentResult.payment.id,
+        amount: normalized.amount,
+        nextStatus: paymentResult.invoice.status,
+      },
+    });
+
+    await billingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "invoice_payment.recorded",
+      entityType: "invoice",
+      entityId: invoice.id,
+      metadata: {
+        paymentId: paymentResult.payment.id,
+        amount: normalized.amount,
+        nextStatus: paymentResult.invoice.status,
+      },
+    });
+
+    await billingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "invoice.payment_recorded",
+      version: 1,
+      payload: {
+        invoiceId: invoice.id,
+        paymentId: paymentResult.payment.id,
+        amount: normalized.amount,
+        nextStatus: paymentResult.invoice.status,
+      },
+    });
+
+    const result = { ...paymentResult, replayed: false };
+
+    await billingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: recordInvoicePaymentOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function createRecurringInvoiceSchedule(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: CreateRecurringInvoiceScheduleCommand,
+): Promise<CreateRecurringInvoiceScheduleResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const billingRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Invoice not found");
+
+    await resolveTeamAccess(
+      billingRepository,
+      { ...context, teamId: command.teamId },
+      "invoices.write",
+      "You cannot create recurring invoice schedules for this team",
+    );
+
+    const normalized = {
+      teamId: command.teamId,
+      sourceInvoiceId: command.sourceInvoiceId,
+      frequency: command.frequency,
+      nextRunAt: new Date(command.nextRunAt).toISOString(),
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await billingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createRecurringInvoiceScheduleOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different recurring schedule",
+        );
+      }
+
+      return { ...(replayed.result as CreateRecurringInvoiceScheduleResult), replayed: true };
+    }
+
+    const sourceInvoice = await billingRepository.getInvoiceForTeam(
+      command.teamId,
+      command.sourceInvoiceId,
+    );
+
+    if (!sourceInvoice) {
+      throw new AppError("NOT_FOUND", "Invoice not found");
+    }
+
+    const schedule = await billingRepository.createRecurringInvoiceSchedule({
+      scheduleId: crypto.randomUUID(),
+      teamId: command.teamId,
+      sourceInvoiceId: sourceInvoice.id,
+      customerId: sourceInvoice.customerId,
+      frequency: normalized.frequency,
+      nextRunAt: normalized.nextRunAt,
+      createdByActorId: context.actor.id,
+    });
+
+    await billingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "recurring_invoice.created",
+      entityType: "recurring_invoice",
+      entityId: schedule.id,
+      metadata: {
+        sourceInvoiceId: sourceInvoice.id,
+        frequency: schedule.frequency,
+        nextRunAt: schedule.nextRunAt,
+      },
+    });
+
+    await billingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "recurring_invoice.schedule_created",
+      version: 1,
+      payload: {
+        scheduleId: schedule.id,
+        sourceInvoiceId: sourceInvoice.id,
+        nextRunAt: schedule.nextRunAt,
+      },
+    });
+
+    const result = { schedule, replayed: false };
+
+    await billingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createRecurringInvoiceScheduleOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function generateRecurringInvoice(
+  repository: DawnRepository,
+  command: GenerateRecurringInvoiceCommand,
+): Promise<GenerateRecurringInvoiceResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const billingRepository = transactionRepository as DawnRepository;
+    const actorId = "system:recurring-invoices";
+    const normalized = {
+      teamId: command.teamId,
+      scheduleId: command.scheduleId,
+      runAt: new Date(command.runAt).toISOString(),
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await billingRepository.getIdempotencyResult(
+      command.teamId,
+      actorId,
+      generateRecurringInvoiceOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different recurring invoice generation",
+        );
+      }
+
+      return { ...(replayed.result as GenerateRecurringInvoiceResult), replayed: true };
+    }
+
+    const schedule = await billingRepository.getRecurringInvoiceScheduleForTeam(
+      command.teamId,
+      command.scheduleId,
+    );
+
+    if (!schedule || schedule.status !== "active") {
+      throw new AppError("NOT_FOUND", "Recurring invoice schedule not found");
+    }
+
+    const sourceInvoice = await billingRepository.getInvoiceForTeam(
+      command.teamId,
+      schedule.sourceInvoiceId,
+    );
+
+    if (!sourceInvoice) {
+      throw new AppError("NOT_FOUND", "Invoice not found");
+    }
+
+    const generated = await billingRepository.generateRecurringInvoice({
+      invoiceId: crypto.randomUUID(),
+      teamId: command.teamId,
+      scheduleId: schedule.id,
+      sourceInvoice,
+      runAt: normalized.runAt,
+      nextRunAt: nextRecurringInvoiceRun({
+        frequency: schedule.frequency,
+        from: normalized.runAt,
+      }),
+      createdByActorId: actorId,
+    });
+
+    await billingRepository.createInvoiceEvent({
+      eventId: crypto.randomUUID(),
+      teamId: command.teamId,
+      invoiceId: generated.invoice.id,
+      type: "recurring_invoice.generated",
+      occurredAt: normalized.runAt,
+      actorId,
+      metadata: {
+        scheduleId: schedule.id,
+        sourceInvoiceId: sourceInvoice.id,
+      },
+    });
+
+    await billingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId,
+      requestId: command.idempotencyKey,
+      type: "recurring_invoice.generated",
+      version: 1,
+      payload: {
+        scheduleId: schedule.id,
+        sourceInvoiceId: sourceInvoice.id,
+        invoiceId: generated.invoice.id,
+      },
+    });
+
+    const result = { ...generated, replayed: false };
+
+    await billingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId,
+      operation: generateRecurringInvoiceOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export function createDeterministicInvoicePdfRenderer(): InvoicePdfRenderer {
+  return {
+    async render(input) {
+      const lines = input.invoice.lines
+        .map(
+          (line) =>
+            `${line.description} ${line.quantityMilli / 1_000} ${line.totals.total.amountMinor}`,
+        )
+        .join("\\n");
+      const pdfText = [
+        "%PDF-1.4",
+        "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
+        "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
+        "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >> endobj",
+        `4 0 obj << /Length 120 >> stream\\nBT /F1 12 Tf 72 720 Td (${escapePdfText(
+          `Invoice ${input.invoice.invoiceNumber} for ${input.customer.name}`,
+        )}) Tj 0 -18 Td (${escapePdfText(`Total ${input.invoice.totals.total.amountMinor} ${input.invoice.currency}`)}) Tj 0 -18 Td (${escapePdfText(lines)}) Tj ET\\nendstream endobj`,
+        "trailer << /Root 1 0 R >>",
+        "%%EOF",
+      ].join("\n");
+      const bodyBase64 = Buffer.from(pdfText).toString("base64");
+
+      return {
+        fileName: `${input.invoice.invoiceNumber}.pdf`,
+        contentType: "application/pdf",
+        bodyBase64,
+        byteSize: Buffer.byteLength(pdfText),
+      };
+    },
+  };
+}
+
+function escapePdfText(value: string) {
+  return value.replace(/[\\()]/g, (character) => `\\${character}`).replace(/\r?\n/g, " ");
 }
 
 function normalizeCreateCustomerCommand(command: CreateCustomerCommand) {

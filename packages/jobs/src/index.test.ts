@@ -111,6 +111,39 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps recurring invoice due events to generation jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "recurring_invoice.due",
+        payload: {
+          scheduleId: "schedule_1",
+          sourceInvoiceId: "invoice_1",
+          runAt: "2026-07-15T00:00:00.000Z",
+        },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "recurring_invoice.due",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "invoice.recurring.generate",
+        teamId: "team_1",
+        scheduleId: "schedule_1",
+        sourceInvoiceId: "invoice_1",
+        runAt: "2026-07-15T00:00:00.000Z",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "invoice:recurring:outbox_1",
+      },
+    ]);
+  });
+
   test("calculates capped exponential retry delays", () => {
     const now = new Date("2026-06-15T10:00:00.000Z");
 

@@ -4,6 +4,13 @@ import {
   assertCanEditInvoiceDraft,
   assertInvoiceDraftInput,
   calculateInvoiceTotals,
+  invoiceStatusAfterPayment,
+  markInvoiceOverdue,
+  markInvoiceSent,
+  markInvoiceViewed,
+  nextRecurringInvoiceRun,
+  voidInvoice,
+  type InvoiceDraft,
   type InvoiceDraftInput,
 } from "./index";
 
@@ -30,6 +37,37 @@ const draft: InvoiceDraftInput = {
       taxRateBasisPoints: 2_500,
     },
   ],
+};
+
+const invoice: InvoiceDraft = {
+  id: "invoice_1",
+  teamId: "team_1",
+  customerId: "customer_1",
+  invoiceNumber: "INV-001",
+  status: "draft",
+  issueDate: "2026-06-15T00:00:00.000Z",
+  dueDate: "2026-07-15T00:00:00.000Z",
+  currency: "USD",
+  discountBasisPoints: 0,
+  notes: null,
+  lines: [],
+  totals: {
+    subtotal: { amountMinor: 100_00, currency: "USD" },
+    discount: { amountMinor: 0, currency: "USD" },
+    tax: { amountMinor: 25_00, currency: "USD" },
+    total: { amountMinor: 125_00, currency: "USD" },
+  },
+  amountPaid: { amountMinor: 0, currency: "USD" },
+  sentAt: null,
+  viewedAt: null,
+  paidAt: null,
+  overdueAt: null,
+  voidedAt: null,
+  deliveryToEmail: null,
+  deliveryProviderMessageId: null,
+  createdByActorId: "user_1",
+  createdAt: "2026-06-15T10:00:00.000Z",
+  updatedAt: "2026-06-15T10:00:00.000Z",
 };
 
 describe("invoice domain", () => {
@@ -78,5 +116,69 @@ describe("invoice domain", () => {
     expect(() => assertCanEditInvoiceDraft({ status: "sent" })).toThrow(
       "Only draft invoices can be edited",
     );
+  });
+
+  test("moves invoices through send, view, overdue, and void states", () => {
+    const sent = markInvoiceSent(invoice, "2026-06-16T00:00:00.000Z");
+    const viewed = markInvoiceViewed(sent, "2026-06-17T00:00:00.000Z");
+    const overdue = markInvoiceOverdue(viewed, "2026-07-16T00:00:00.000Z");
+    const voided = voidInvoice(overdue, "2026-07-17T00:00:00.000Z");
+
+    expect(sent.status).toBe("sent");
+    expect(viewed.status).toBe("viewed");
+    expect(overdue.status).toBe("overdue");
+    expect(voided.status).toBe("void");
+    expect(() => markInvoiceViewed(invoice, "2026-06-17T00:00:00.000Z")).toThrow(
+      "Only sent invoices can be viewed",
+    );
+    expect(() => voidInvoice({ ...invoice, status: "paid" }, "2026-07-17T00:00:00.000Z")).toThrow(
+      "Paid or void invoices cannot be voided",
+    );
+  });
+
+  test("records partial and full payment status without overpayment", () => {
+    const firstPayment = invoiceStatusAfterPayment({
+      invoice: { ...invoice, status: "sent" },
+      payment: { amountMinor: 50_00, currency: "USD" },
+      paidAt: "2026-06-20T00:00:00.000Z",
+    });
+    const finalPayment = invoiceStatusAfterPayment({
+      invoice: { ...invoice, status: firstPayment.status, amountPaid: firstPayment.amountPaid },
+      payment: { amountMinor: 75_00, currency: "USD" },
+      paidAt: "2026-06-21T00:00:00.000Z",
+    });
+
+    expect(firstPayment).toEqual({
+      amountPaid: { amountMinor: 50_00, currency: "USD" },
+      status: "partially_paid",
+      paidAt: null,
+    });
+    expect(finalPayment).toEqual({
+      amountPaid: { amountMinor: 125_00, currency: "USD" },
+      status: "paid",
+      paidAt: "2026-06-21T00:00:00.000Z",
+    });
+    expect(() =>
+      invoiceStatusAfterPayment({
+        invoice: { ...invoice, status: "sent" },
+        payment: { amountMinor: 126_00, currency: "USD" },
+        paidAt: "2026-06-20T00:00:00.000Z",
+      }),
+    ).toThrow("Invoice payment cannot exceed invoice balance");
+  });
+
+  test("calculates next recurring invoice run dates", () => {
+    expect(
+      nextRecurringInvoiceRun({
+        frequency: "weekly",
+        from: "2026-06-15T00:00:00.000Z",
+      }),
+    ).toBe("2026-06-22T00:00:00.000Z");
+    expect(
+      nextRecurringInvoiceRun({
+        frequency: "quarterly",
+        from: "2026-06-15T00:00:00.000Z",
+      }),
+    ).toBe("2026-09-15T00:00:00.000Z");
   });
 });

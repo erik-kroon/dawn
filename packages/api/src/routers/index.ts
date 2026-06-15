@@ -5,6 +5,7 @@ import {
   acceptInboxMatch,
   acceptTeamInvite,
   commitCsvTransactionImport,
+  createDeterministicInvoicePdfRenderer,
   connectMockBankConnection,
   createCustomer,
   createDocumentDownload,
@@ -12,6 +13,7 @@ import {
   createDraftInvoice,
   createLedgerTransaction,
   createProduct,
+  createRecurringInvoiceSchedule,
   createTeam,
   generateInboxMatchSuggestions,
   inviteTeamMember,
@@ -26,18 +28,27 @@ import {
   listTransactionSyncCollection,
   listTransactionReviewWorkspace,
   previewCsvTransactionImport,
+  previewInvoicePdf,
   rejectInboxMatch,
+  recordInvoicePayment,
   reviewTransaction,
+  sendInvoice,
   syncBankConnection,
   type DawnRepository,
   type DocumentExtractionFields,
   type DocumentUrlSigner,
+  type InvoicePdfRenderer,
   updateDraftInvoice,
   updateTeamMemberRole,
 } from "@dawn/app";
 import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
 import { env } from "@dawn/env/server";
-import { createMockBankingProvider, type BankingProvider } from "@dawn/integrations";
+import {
+  createMockBankingProvider,
+  createMockInvoiceEmailDeliveryProvider,
+  type BankingProvider,
+  type InvoiceEmailDeliveryProvider,
+} from "@dawn/integrations";
 import { z } from "zod";
 
 import { protectedProcedure, publicProcedure } from "../index";
@@ -47,6 +58,8 @@ export type AppRouterDependencies = {
   transactionReviewRepository: DawnRepository;
   bankingProvider: BankingProvider;
   documentUrlSigner: DocumentUrlSigner;
+  invoicePdfRenderer: InvoicePdfRenderer;
+  invoiceEmailDeliveryProvider: InvoiceEmailDeliveryProvider;
 };
 
 const reviewTransactionInput = z.object({
@@ -190,6 +203,35 @@ const updateDraftInvoiceInput = createDraftInvoiceInput.extend({
   invoiceId: z.string().min(1),
 });
 
+const invoiceReferenceInput = z.object({
+  teamId: z.string().min(1),
+  invoiceId: z.string().min(1),
+});
+
+const sendInvoiceInput = invoiceReferenceInput.extend({
+  toEmail: z.string().nullable().optional(),
+  subject: z.string().nullable().optional(),
+  message: z.string().nullable().optional(),
+  confirm: z.literal(true),
+  idempotencyKey: z.string().min(1),
+});
+
+const recordInvoicePaymentInput = invoiceReferenceInput.extend({
+  amount: moneyInput,
+  paidAt: z.iso.datetime(),
+  method: z.string().nullable().optional(),
+  note: z.string().nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const createRecurringInvoiceScheduleInput = z.object({
+  teamId: z.string().min(1),
+  sourceInvoiceId: z.string().min(1),
+  frequency: z.enum(["weekly", "monthly", "quarterly", "yearly"]),
+  nextRunAt: z.iso.datetime(),
+  idempotencyKey: z.string().min(1),
+});
+
 const createLedgerTransactionInput = z.object({
   teamId: z.string().min(1),
   accountId: z.string().min(1),
@@ -288,11 +330,19 @@ function createDefaultDependencies(): AppRouterDependencies {
       baseUrl: env.BETTER_AUTH_URL,
       secret: env.BETTER_AUTH_SECRET,
     }),
+    invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
+    invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
   };
 }
 
 export function createAppRouter(dependencies: AppRouterDependencies = createDefaultDependencies()) {
-  const { bankingProvider, documentUrlSigner, transactionReviewRepository } = dependencies;
+  const {
+    bankingProvider,
+    documentUrlSigner,
+    invoiceEmailDeliveryProvider,
+    invoicePdfRenderer,
+    transactionReviewRepository,
+  } = dependencies;
 
   return {
     healthCheck: publicProcedure.handler(() => {
@@ -652,6 +702,86 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                   taxRateBasisPoints: line.taxRateBasisPoints ?? 0,
                 })),
               },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      previewInvoicePdf: protectedProcedure
+        .input(invoiceReferenceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await previewInvoicePdf(
+              transactionReviewRepository,
+              invoicePdfRenderer,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      sendInvoice: protectedProcedure
+        .input(sendInvoiceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await sendInvoice(
+              transactionReviewRepository,
+              invoicePdfRenderer,
+              invoiceEmailDeliveryProvider,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                toEmail: input.toEmail ?? null,
+                subject: input.subject ?? null,
+                message: input.message ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      recordPayment: protectedProcedure
+        .input(recordInvoicePaymentInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await recordInvoicePayment(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                method: input.method ?? null,
+                note: input.note ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createRecurringSchedule: protectedProcedure
+        .input(createRecurringInvoiceScheduleInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createRecurringInvoiceSchedule(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
             );
           } catch (error) {
             mapAppError(error);

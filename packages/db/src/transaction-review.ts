@@ -30,11 +30,14 @@ import type {
   Category,
   Customer,
   CustomerContact,
+  InvoiceEvent,
   InvoiceDraft,
   InvoiceLineDraft,
+  InvoicePayment,
   LedgerAccount,
   LedgerTransactionDraft,
   Product,
+  RecurringInvoiceSchedule,
   TeamInvite,
   TeamMember,
   TeamMembership,
@@ -1341,6 +1344,26 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return products.map(mapProduct);
   }
 
+  async listInvoices(teamId: string): Promise<InvoiceDraft[]> {
+    const [invoices, lines] = await Promise.all([
+      this.client
+        .select()
+        .from(schema.invoice)
+        .where(eq(schema.invoice.teamId, teamId))
+        .orderBy(desc(schema.invoice.updatedAt)),
+      this.client.select().from(schema.invoiceLine).where(eq(schema.invoiceLine.teamId, teamId)),
+    ]);
+
+    return invoices.map((invoice) =>
+      mapInvoiceDraft(
+        invoice,
+        lines
+          .filter((line) => line.invoiceId === invoice.id)
+          .sort((left, right) => left.sortOrder - right.sortOrder),
+      ),
+    );
+  }
+
   async listDraftInvoices(teamId: string): Promise<InvoiceDraft[]> {
     const [invoices, lines] = await Promise.all([
       this.client
@@ -1361,6 +1384,26 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     );
   }
 
+  async listInvoicePayments(teamId: string): Promise<InvoicePayment[]> {
+    const payments = await this.client
+      .select()
+      .from(schema.invoicePayment)
+      .where(eq(schema.invoicePayment.teamId, teamId))
+      .orderBy(desc(schema.invoicePayment.paidAt));
+
+    return payments.map(mapInvoicePayment);
+  }
+
+  async listRecurringInvoiceSchedules(teamId: string): Promise<RecurringInvoiceSchedule[]> {
+    const schedules = await this.client
+      .select()
+      .from(schema.recurringInvoice)
+      .where(eq(schema.recurringInvoice.teamId, teamId))
+      .orderBy(asc(schema.recurringInvoice.nextRunAt));
+
+    return schedules.map(mapRecurringInvoiceSchedule);
+  }
+
   async getCustomerForTeam(teamId: string, customerId: string) {
     const [customer] = await this.client
       .select()
@@ -1369,6 +1412,22 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       .limit(1);
 
     return customer ? mapCustomer(customer) : null;
+  }
+
+  async getCustomerContactForCustomer(teamId: string, customerId: string) {
+    const [contact] = await this.client
+      .select()
+      .from(schema.customerContact)
+      .where(
+        and(
+          eq(schema.customerContact.teamId, teamId),
+          eq(schema.customerContact.customerId, customerId),
+        ),
+      )
+      .orderBy(asc(schema.customerContact.createdAt))
+      .limit(1);
+
+    return contact ? mapCustomerContact(contact) : null;
   }
 
   async getProductForTeam(teamId: string, productId: string) {
@@ -1399,6 +1458,18 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       .orderBy(asc(schema.invoiceLine.sortOrder));
 
     return mapInvoiceDraft(invoice, lines);
+  }
+
+  async getRecurringInvoiceScheduleForTeam(teamId: string, scheduleId: string) {
+    const [schedule] = await this.client
+      .select()
+      .from(schema.recurringInvoice)
+      .where(
+        and(eq(schema.recurringInvoice.teamId, teamId), eq(schema.recurringInvoice.id, scheduleId)),
+      )
+      .limit(1);
+
+    return schedule ? mapRecurringInvoiceSchedule(schedule) : null;
   }
 
   async createCustomer(input: {
@@ -1599,6 +1670,198 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return (
       (await this.getInvoiceForTeam(input.teamId, input.invoiceId)) ?? mapInvoiceDraft(invoice, [])
     );
+  }
+
+  async markInvoiceSent(input: {
+    teamId: string;
+    invoiceId: string;
+    sentAt: string;
+    toEmail: string;
+    providerMessageId: string;
+  }): Promise<InvoiceDraft> {
+    const [invoice] = await this.client
+      .update(schema.invoice)
+      .set({
+        status: "sent",
+        sentAt: new Date(input.sentAt),
+        deliveryToEmail: input.toEmail,
+        deliveryProviderMessageId: input.providerMessageId,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(schema.invoice.teamId, input.teamId), eq(schema.invoice.id, input.invoiceId)))
+      .returning();
+
+    if (!invoice) {
+      throw new Error("Invoice was not sent");
+    }
+
+    return (
+      (await this.getInvoiceForTeam(input.teamId, input.invoiceId)) ?? mapInvoiceDraft(invoice, [])
+    );
+  }
+
+  async recordInvoicePayment(input: {
+    paymentId: string;
+    teamId: string;
+    invoiceId: string;
+    amount: InvoicePayment["amount"];
+    paidAt: string;
+    method?: string | null;
+    note?: string | null;
+    createdByActorId: string;
+    nextInvoiceStatus: InvoiceDraft["status"];
+    nextAmountPaid: InvoicePayment["amount"];
+    invoicePaidAt?: string | null;
+  }): Promise<{ invoice: InvoiceDraft; payment: InvoicePayment }> {
+    const [payment] = await this.client
+      .insert(schema.invoicePayment)
+      .values({
+        id: input.paymentId,
+        teamId: input.teamId,
+        invoiceId: input.invoiceId,
+        amountMinor: input.amount.amountMinor,
+        currency: input.amount.currency,
+        paidAt: new Date(input.paidAt),
+        method: input.method ?? null,
+        note: input.note ?? null,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!payment) {
+      throw new Error("Invoice payment was not recorded");
+    }
+
+    const [invoice] = await this.client
+      .update(schema.invoice)
+      .set({
+        status: input.nextInvoiceStatus,
+        amountPaidMinor: input.nextAmountPaid.amountMinor,
+        paidAt: input.invoicePaidAt ? new Date(input.invoicePaidAt) : null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(schema.invoice.teamId, input.teamId), eq(schema.invoice.id, input.invoiceId)))
+      .returning();
+
+    if (!invoice) {
+      throw new Error("Invoice payment did not update invoice");
+    }
+
+    return {
+      invoice:
+        (await this.getInvoiceForTeam(input.teamId, input.invoiceId)) ??
+        mapInvoiceDraft(invoice, []),
+      payment: mapInvoicePayment(payment),
+    };
+  }
+
+  async createInvoiceEvent(input: {
+    eventId: string;
+    teamId: string;
+    invoiceId: string;
+    type: InvoiceEvent["type"];
+    occurredAt: string;
+    actorId?: string | null;
+    metadata: Record<string, unknown>;
+  }): Promise<InvoiceEvent> {
+    const [event] = await this.client
+      .insert(schema.invoiceEvent)
+      .values({
+        id: input.eventId,
+        teamId: input.teamId,
+        invoiceId: input.invoiceId,
+        type: input.type,
+        occurredAt: new Date(input.occurredAt),
+        actorId: input.actorId ?? null,
+        metadata: input.metadata,
+      })
+      .returning();
+
+    if (!event) {
+      throw new Error("Invoice event was not created");
+    }
+
+    return mapInvoiceEvent(event);
+  }
+
+  async createRecurringInvoiceSchedule(input: {
+    scheduleId: string;
+    teamId: string;
+    sourceInvoiceId: string;
+    customerId: string;
+    frequency: RecurringInvoiceSchedule["frequency"];
+    nextRunAt: string;
+    createdByActorId: string;
+  }): Promise<RecurringInvoiceSchedule> {
+    const [schedule] = await this.client
+      .insert(schema.recurringInvoice)
+      .values({
+        id: input.scheduleId,
+        teamId: input.teamId,
+        sourceInvoiceId: input.sourceInvoiceId,
+        customerId: input.customerId,
+        frequency: input.frequency,
+        nextRunAt: new Date(input.nextRunAt),
+        status: "active",
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!schedule) {
+      throw new Error("Recurring invoice schedule was not created");
+    }
+
+    return mapRecurringInvoiceSchedule(schedule);
+  }
+
+  async generateRecurringInvoice(input: {
+    invoiceId: string;
+    teamId: string;
+    scheduleId: string;
+    sourceInvoice: InvoiceDraft;
+    runAt: string;
+    nextRunAt: string;
+    createdByActorId: string;
+  }): Promise<{ invoice: InvoiceDraft; schedule: RecurringInvoiceSchedule }> {
+    const recurringSuffix = new Date(input.runAt).toISOString().slice(0, 10).replaceAll("-", "");
+    const invoice = await this.createDraftInvoice({
+      invoiceId: input.invoiceId,
+      teamId: input.teamId,
+      customerId: input.sourceInvoice.customerId,
+      invoiceNumber: `${input.sourceInvoice.invoiceNumber}-R${recurringSuffix}`,
+      issueDate: input.runAt,
+      dueDate: input.sourceInvoice.dueDate
+        ? new Date(
+            new Date(input.runAt).getTime() +
+              (new Date(input.sourceInvoice.dueDate).getTime() -
+                new Date(input.sourceInvoice.issueDate).getTime()),
+          ).toISOString()
+        : null,
+      currency: input.sourceInvoice.currency,
+      discountBasisPoints: input.sourceInvoice.discountBasisPoints,
+      notes: input.sourceInvoice.notes,
+      lines: input.sourceInvoice.lines,
+      createdByActorId: input.createdByActorId,
+    });
+    const [schedule] = await this.client
+      .update(schema.recurringInvoice)
+      .set({
+        nextRunAt: new Date(input.nextRunAt),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.recurringInvoice.teamId, input.teamId),
+          eq(schema.recurringInvoice.id, input.scheduleId),
+        ),
+      )
+      .returning();
+
+    if (!schedule) {
+      throw new Error("Recurring invoice schedule was not updated");
+    }
+
+    return { invoice, schedule: mapRecurringInvoiceSchedule(schedule) };
   }
 
   private async insertInvoiceLines(input: {
@@ -2379,6 +2642,14 @@ function mapInvoiceDraft(
       tax: { amountMinor: invoice.taxMinor, currency: invoice.currency },
       total: { amountMinor: invoice.totalMinor, currency: invoice.currency },
     },
+    amountPaid: { amountMinor: invoice.amountPaidMinor, currency: invoice.currency },
+    sentAt: invoice.sentAt?.toISOString() ?? null,
+    viewedAt: invoice.viewedAt?.toISOString() ?? null,
+    paidAt: invoice.paidAt?.toISOString() ?? null,
+    overdueAt: invoice.overdueAt?.toISOString() ?? null,
+    voidedAt: invoice.voidedAt?.toISOString() ?? null,
+    deliveryToEmail: invoice.deliveryToEmail,
+    deliveryProviderMessageId: invoice.deliveryProviderMessageId,
     createdByActorId: invoice.createdByActorId,
     createdAt: invoice.createdAt.toISOString(),
     updatedAt: invoice.updatedAt.toISOString(),
@@ -2407,6 +2678,52 @@ function mapInvoiceLine(
       tax: { amountMinor: line.taxMinor, currency: line.currency },
       total: { amountMinor: line.totalMinor, currency: line.currency },
     },
+  };
+}
+
+function mapInvoicePayment(payment: typeof schema.invoicePayment.$inferSelect): InvoicePayment {
+  return {
+    id: payment.id,
+    teamId: payment.teamId,
+    invoiceId: payment.invoiceId,
+    amount: {
+      amountMinor: payment.amountMinor,
+      currency: payment.currency,
+    },
+    paidAt: payment.paidAt.toISOString(),
+    method: payment.method,
+    note: payment.note,
+    createdByActorId: payment.createdByActorId,
+    createdAt: payment.createdAt.toISOString(),
+  };
+}
+
+function mapInvoiceEvent(event: typeof schema.invoiceEvent.$inferSelect): InvoiceEvent {
+  return {
+    id: event.id,
+    teamId: event.teamId,
+    invoiceId: event.invoiceId,
+    type: event.type as InvoiceEvent["type"],
+    occurredAt: event.occurredAt.toISOString(),
+    actorId: event.actorId,
+    metadata: event.metadata,
+  };
+}
+
+function mapRecurringInvoiceSchedule(
+  schedule: typeof schema.recurringInvoice.$inferSelect,
+): RecurringInvoiceSchedule {
+  return {
+    id: schedule.id,
+    teamId: schedule.teamId,
+    sourceInvoiceId: schedule.sourceInvoiceId,
+    customerId: schedule.customerId,
+    frequency: schedule.frequency as RecurringInvoiceSchedule["frequency"],
+    nextRunAt: schedule.nextRunAt.toISOString(),
+    status: schedule.status as RecurringInvoiceSchedule["status"],
+    createdByActorId: schedule.createdByActorId,
+    createdAt: schedule.createdAt.toISOString(),
+    updatedAt: schedule.updatedAt.toISOString(),
   };
 }
 
