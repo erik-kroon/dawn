@@ -49,6 +49,7 @@ import {
   listDeveloperWorkspace,
   listDocuments,
   listInboxItems,
+  listAccountantPacketExportHistory,
   listIntegrationWorkspace,
   listLedgerSummary,
   listBusinessReport,
@@ -148,6 +149,11 @@ const exportAccountantPacketInput = z.object({
 const createAccountantPacketDownloadInput = z.object({
   teamId: z.string().min(1),
   packetId: z.string().min(1),
+});
+
+const listAccountantPacketExportsInput = z.object({
+  teamId: z.string().min(1),
+  limit: z.number().int().min(1).max(100).optional(),
 });
 
 const updateTransactionAccountantStatusInput = z.object({
@@ -928,6 +934,19 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             return await createAccountantPacketDownload(
               dawnRepository,
               documentUrlSigner,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      listPacketExports: protectedProcedure
+        .input(listAccountantPacketExportsInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listAccountantPacketExportHistory(
+              dawnRepository,
               appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );

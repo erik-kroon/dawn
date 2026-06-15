@@ -138,10 +138,20 @@ export type CreateAccountantPacketDownloadCommand = {
   packetId: string;
 };
 
+export type ListAccountantPacketExportHistoryCommand = {
+  teamId: string;
+  limit?: number;
+};
+
 export type CreateAccountantPacketDownloadResult = {
   packet: AccountantPacketExportRecord;
   downloadUrl: string;
   downloadExpiresAt: string;
+};
+
+export type AccountantPacketExportHistory = {
+  teamId: string;
+  packets: AccountantPacketExportRecord[];
 };
 
 export type AccountantPacketArchiveStorage = {
@@ -505,6 +515,27 @@ export async function createAccountantPacketDownload(
   };
 }
 
+export async function listAccountantPacketExportHistory(
+  repository: AccountantPacketRepository,
+  context: TransactionReviewContext,
+  command: ListAccountantPacketExportHistoryCommand,
+): Promise<AccountantPacketExportHistory> {
+  await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId },
+    "transactions.export",
+    "You cannot read accountant packet exports for this team",
+  );
+
+  return {
+    teamId: command.teamId,
+    packets: await repository.listAccountantPacketExports(
+      command.teamId,
+      normalizePacketHistoryLimit(command.limit),
+    ),
+  };
+}
+
 export function exportAccountantPacketFingerprint(command: ExportAccountantPacketCommand) {
   return JSON.stringify({
     teamId: command.teamId,
@@ -758,6 +789,10 @@ function assertExportCommand(command: ExportAccountantPacketCommand) {
 
 function normalizedTransactionIds(transactionIds: readonly string[] | undefined) {
   return [...new Set((transactionIds ?? []).map((id) => id.trim()).filter(Boolean))].sort();
+}
+
+function normalizePacketHistoryLimit(limit?: number) {
+  return Math.min(Math.max(Number.isInteger(limit) ? (limit ?? 20) : 20, 1), 100);
 }
 
 function normalizeExportSettings(command: ExportAccountantPacketCommand) {

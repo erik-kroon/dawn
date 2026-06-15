@@ -5,6 +5,7 @@ import {
   completeStoredAccountantPacketExport,
   createAccountantPacketDownload,
   exportAccountantPacket,
+  listAccountantPacketExportHistory,
   requestAccountantPacketExport,
 } from "./index";
 import {
@@ -532,5 +533,51 @@ describe("exportAccountantPacket", () => {
       action: "accountant_packet.download_link_created",
       entityId: stored.packetId,
     });
+  });
+
+  test("lists stored packet export history for permitted actors", async () => {
+    const repository = createReviewRepository("accountant");
+    repository.accountantPacketExports.set("packet_old", {
+      packetId: "packet_old",
+      teamId: "team_1",
+      actorId: "user_1",
+      objectKey: "teams/team_1/accountant-packets/packet_old.zip",
+      fileName: "old.zip",
+      contentType: "application/zip",
+      byteSize: 100,
+      manifest: {
+        packetId: "packet_old",
+        teamId: "team_1",
+        actorId: "user_1",
+        generatedAt: "2026-05-15T12:00:00.000Z",
+        filters: {
+          from: "2026-05-01T00:00:00.000Z",
+          to: "2026-05-31T23:59:59.999Z",
+          transactionIds: ["txn_1"],
+        },
+        settings: { formats: ["csv"], csvDelimiter: "," },
+        transactionCount: 1,
+        attachmentCount: 0,
+        skippedAttachmentCount: 0,
+        currencyTotals: { USD: { amountMinor: -1200, currency: "USD" } },
+        files: [],
+      },
+      createdAt: "2026-05-15T12:00:00.000Z",
+    });
+    repository.accountantPacketExports.set("packet_new", {
+      ...repository.accountantPacketExports.get("packet_old")!,
+      packetId: "packet_new",
+      objectKey: "teams/team_1/accountant-packets/packet_new.zip",
+      fileName: "new.zip",
+      createdAt: "2026-06-15T12:00:00.000Z",
+    });
+
+    const history = await listAccountantPacketExportHistory(
+      repository,
+      { actor: testActor, requestId: "request_1", teamId: "team_1" },
+      { teamId: "team_1", limit: 1 },
+    );
+
+    expect(history.packets.map((packet) => packet.packetId)).toEqual(["packet_new"]);
   });
 });

@@ -52,7 +52,7 @@ Live Gmail OAuth and email delivery should not block completion of local product
 | 4. Gmail Connector Production Readiness                 | Local backend/runtime hardening completed | Gmail config health, scheduled/manual sync locking, skipped-count reporting, and deterministic provider-boundary tests landed. Live OAuth smoke remains blocked on Google credentials and a test mailbox.                                                                                                    |
 | 5. Receipt Matching Parity Plus                         | Completed   | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Browser smoke remains deferred while inbox/transactions UI files are under concurrent coss work.                                                                   |
 | 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, signed download links, skipped attachment counts, and exported-after-storage status landed. Email delivery and visible export history remain open.                                             |
-| 7. Accountant Access And Handoff Audit                  | Partial     | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Stored packet records and signed download audits exist; visible export history, revocation, and email access audit remain open.                                                          |
+| 7. Accountant Access And Handoff Audit                  | Partial     | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Stored packet records, export history API, and signed download audits exist; visible history UI, revocation, and email access audit remain open.                                         |
 | 8. Operational Hardening And Accountant Close Loop      | Partial     | Operations API now returns selected-period accountant close readiness from lifecycle states. Operations UI, representative monthly fixture, and retry affordances remain open.                                                                                                                                |
 
 ## Outcome
@@ -487,7 +487,7 @@ Status: Partially completed on 2026-06-15 for accountant role access. The
 accountant role can be invited and can export ready packets, but it no longer
 has transaction categorization or other write-oriented product permissions.
 Stored packet records and signed download-link audit now exist. Visible export
-history, link revocation, and email access audit remain open.
+history UI, link revocation, and email access audit remain open.
 
 ## Scope
 
@@ -513,7 +513,8 @@ history, link revocation, and email access audit remain open.
 - [x] A team can invite an accountant role.
 - [x] An accountant can view the review/export queue and download allowed accountant packets.
 - [x] An accountant cannot review, categorize, delete, or alter transactions unless a permission explicitly allows it.
-- [ ] Export history shows who generated and who accessed each package.
+- [x] Export history API shows who generated each stored package.
+- [ ] Export history UI shows who generated and who accessed each package.
 - [ ] Revoked or expired links cannot be used.
 - [ ] Email-only handoff still works without creating a team member.
 
@@ -524,6 +525,7 @@ history, link revocation, and email access audit remain open.
   passed: 33 tests.
 - Permission matrix tests cover the accountant role.
 - App tests cover accountant export access and denied transaction review.
+- App/API tests cover stored packet export history for accountant-permitted actors.
 - App/API tests for revoked/expired links remain open.
 - Browser smoke with owner and accountant accounts if test auth supports it.
 - `bun run check-types`

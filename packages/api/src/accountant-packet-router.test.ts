@@ -216,6 +216,68 @@ describe("transactionReview.exportPacket router", () => {
     expect(result.packet.objectKey).toBe("teams/team_1/accountant-packets/packet_1.zip");
   });
 
+  test("lists stored packet export history through the router", async () => {
+    process.env.DATABASE_URL ??= "postgres://test";
+    process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";
+    process.env.BETTER_AUTH_URL ??= "http://localhost:3000";
+    process.env.POLAR_ACCESS_TOKEN ??= "test";
+    process.env.POLAR_SUCCESS_URL ??= "http://localhost:3001/success";
+    process.env.CORS_ORIGIN ??= "http://localhost:3001";
+
+    const repository = createReviewRepository("accountant");
+    repository.accountantPacketExports.set("packet_1", {
+      packetId: "packet_1",
+      teamId: "team_1",
+      actorId: "user_1",
+      objectKey: "teams/team_1/accountant-packets/packet_1.zip",
+      fileName: "accountant-packet.zip",
+      contentType: "application/zip",
+      byteSize: 128,
+      manifest: {
+        packetId: "packet_1",
+        teamId: "team_1",
+        actorId: "user_1",
+        generatedAt: "2026-06-15T12:00:00.000Z",
+        filters: {
+          from: "2026-06-01T00:00:00.000Z",
+          to: "2026-06-30T23:59:59.999Z",
+          transactionIds: ["txn_1"],
+        },
+        settings: { formats: ["csv"], csvDelimiter: "," },
+        transactionCount: 1,
+        attachmentCount: 0,
+        skippedAttachmentCount: 0,
+        currencyTotals: { USD: { amountMinor: -1200, currency: "USD" } },
+        files: [],
+      },
+      createdAt: "2026-06-15T12:00:00.000Z",
+    });
+    const { createAppRouter } = await import("./routers/index");
+    const router = createAppRouter({
+      dawnRepository: repository as unknown as DawnRepository,
+      bankingProviders: [],
+      integrationProviders: [],
+      emailInboxConnectors: [],
+      documentUrlSigner,
+      invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
+      invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
+    });
+
+    const result = await call(
+      router.transactionReview.listPacketExports,
+      {
+        teamId: "team_1",
+        limit: 10,
+      },
+      {
+        context: createApiTestContext({ id: "user_1", email: "accountant@example.com" }),
+      },
+    );
+
+    expect(result.packets).toHaveLength(1);
+    expect(result.packets[0]?.packetId).toBe("packet_1");
+  });
+
   test("updates accountant lifecycle status through the router", async () => {
     process.env.DATABASE_URL ??= "postgres://test";
     process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";
