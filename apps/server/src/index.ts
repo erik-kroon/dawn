@@ -9,7 +9,10 @@ import { appRouter } from "@dawn/api/routers/index";
 import {
   AppError,
   completeDocumentUpload,
+  createCustomer,
+  createDraftInvoice,
   createLedgerTransaction,
+  createProduct,
   createProject,
   createTimeEntry,
   createWebhookSubscription,
@@ -333,13 +336,13 @@ app.post("/api/v1/transactions", async (c) => {
         accountId: requireString(body.accountId, "accountId"),
         description: requireString(body.description, "description"),
         postedAt: requireString(body.postedAt, "postedAt"),
-        money: body.money as { amountMinor: number; currency: string },
+        money: requireMoney(body.money, "money"),
         type:
           (body.type as "income" | "expense" | "transfer" | "fee" | "refund" | "adjustment") ??
           "expense",
         source:
           (body.source as "manual" | "csv_import" | "bank_sync" | "provider_webhook") ?? "manual",
-        categoryId: typeof body.categoryId === "string" ? body.categoryId : null,
+        categoryId: optionalString(body.categoryId),
         idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
       },
     );
@@ -369,6 +372,152 @@ app.get("/api/v1/invoices", async (c) => {
     return c.json({
       data: billing.invoices,
     });
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/invoices", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.write");
+    const result = await createDraftInvoice(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        customerId: requireString(body.customerId, "customerId"),
+        invoiceNumber: requireString(body.invoiceNumber, "invoiceNumber"),
+        issueDate: requireString(body.issueDate, "issueDate"),
+        dueDate: optionalString(body.dueDate),
+        currency: requireString(body.currency, "currency"),
+        discountBasisPoints: optionalNumber(body.discountBasisPoints),
+        notes: optionalString(body.notes),
+        lines: requireInvoiceLines(body.lines),
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.get("/api/v1/customers", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+  const teamId = c.req.query("teamId");
+
+  if (!teamId) {
+    return c.json({ error: "teamId is required" }, 400);
+  }
+
+  try {
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.read");
+    const billing = await listBillingWorkspace(repository, {
+      actor,
+      requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+      teamId,
+    });
+
+    return c.json({
+      data: billing.customers,
+      contacts: billing.contacts,
+    });
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/customers", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.write");
+    const result = await createCustomer(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        name: requireString(body.name, "name"),
+        email: optionalString(body.email),
+        billingAddress: optionalString(body.billingAddress),
+        contactName: optionalString(body.contactName),
+        contactEmail: optionalString(body.contactEmail),
+        contactRole: optionalString(body.contactRole),
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.get("/api/v1/products", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+  const teamId = c.req.query("teamId");
+
+  if (!teamId) {
+    return c.json({ error: "teamId is required" }, 400);
+  }
+
+  try {
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.read");
+    const billing = await listBillingWorkspace(repository, {
+      actor,
+      requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+      teamId,
+    });
+
+    return c.json({
+      data: billing.products,
+    });
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/products", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.write");
+    const result = await createProduct(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        name: requireString(body.name, "name"),
+        type: requireProductType(body.type),
+        description: optionalString(body.description),
+        unitPrice: requireMoney(body.unitPrice, "unitPrice"),
+        defaultTaxRateBasisPoints: optionalNumber(body.defaultTaxRateBasisPoints),
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
   } catch (error) {
     return publicApiError(c, error);
   }
@@ -424,8 +573,8 @@ app.post("/api/v1/projects", async (c) => {
         teamId,
         customerId: requireString(body.customerId, "customerId"),
         name: requireString(body.name, "name"),
-        description: typeof body.description === "string" ? body.description : null,
-        billableRate: body.billableRate as { amountMinor: number; currency: string },
+        description: optionalString(body.description),
+        billableRate: requireMoney(body.billableRate, "billableRate"),
         idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
       },
     );
@@ -453,12 +602,12 @@ app.post("/api/v1/time-entries", async (c) => {
       {
         teamId,
         projectId: requireString(body.projectId, "projectId"),
-        actorId: typeof body.actorId === "string" ? body.actorId : null,
+        actorId: optionalString(body.actorId),
         description: requireString(body.description, "description"),
         occurredOn: requireString(body.occurredOn, "occurredOn"),
-        durationMinutes: Number(body.durationMinutes),
+        durationMinutes: requireSafeInteger(body.durationMinutes, "durationMinutes"),
         billableStatus: body.billableStatus === "non_billable" ? "non_billable" : "billable",
-        billableRate: body.billableRate as { amountMinor: number; currency: string } | null,
+        billableRate: optionalMoney(body.billableRate),
         idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
       },
     );
@@ -626,6 +775,83 @@ function requireString(value: unknown, name: string) {
   return value.trim();
 }
 
+function optionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function optionalNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+type PublicApiMoney = {
+  amountMinor: number;
+  currency: string;
+};
+
+function requireMoney(value: unknown, name: string): PublicApiMoney {
+  if (!isRecord(value)) {
+    throw new AppError("CONFLICT", `${name} is required`);
+  }
+
+  const { amountMinor, currency } = value;
+
+  if (typeof amountMinor !== "number" || !Number.isSafeInteger(amountMinor)) {
+    throw new AppError("CONFLICT", `${name}.amountMinor is required`);
+  }
+
+  return {
+    amountMinor,
+    currency: requireString(currency, `${name}.currency`),
+  };
+}
+
+function optionalMoney(value: unknown) {
+  return value == null ? null : requireMoney(value, "billableRate");
+}
+
+function requireProductType(value: unknown) {
+  if (value !== "product" && value !== "service") {
+    throw new AppError("CONFLICT", "type must be product or service");
+  }
+
+  return value;
+}
+
+function requireInvoiceLines(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new AppError("CONFLICT", "lines are required");
+  }
+
+  return value.map((line, index) => {
+    const name = `lines[${index}]`;
+
+    if (!isRecord(line)) {
+      throw new AppError("CONFLICT", `${name} is invalid`);
+    }
+
+    return {
+      productId: optionalString(line.productId),
+      description: requireString(line.description, `${name}.description`),
+      quantityMilli: requireSafeInteger(line.quantityMilli, `${name}.quantityMilli`),
+      unitPrice: requireMoney(line.unitPrice, `${name}.unitPrice`),
+      discountBasisPoints: optionalNumber(line.discountBasisPoints),
+      taxRateBasisPoints: optionalNumber(line.taxRateBasisPoints),
+    };
+  });
+}
+
+function requireSafeInteger(value: unknown, name: string) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new AppError("CONFLICT", `${name} is required`);
+  }
+
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function publicApiError(c: HonoContext<ServerHonoEnv>, error: unknown) {
   if (error instanceof AppError) {
     return c.json({ error: error.message }, appErrorStatus(error));
@@ -669,6 +895,30 @@ export function publicApiOpenApiDocument(requestUrl: string) {
         get: {
           summary: "List team invoices",
           parameters: [{ name: "teamId", in: "query", required: true }],
+        },
+        post: {
+          summary: "Create an invoice draft",
+          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
+        },
+      },
+      "/customers": {
+        get: {
+          summary: "List team customers and contacts",
+          parameters: [{ name: "teamId", in: "query", required: true }],
+        },
+        post: {
+          summary: "Create a customer",
+          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
+        },
+      },
+      "/products": {
+        get: {
+          summary: "List team products",
+          parameters: [{ name: "teamId", in: "query", required: true }],
+        },
+        post: {
+          summary: "Create a product",
+          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
         },
       },
       "/projects": {
