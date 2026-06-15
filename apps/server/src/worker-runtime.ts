@@ -5,6 +5,7 @@ import {
   gateTeamDataDeletion,
   generateRecurringInvoice,
   generateWeeklyInsights,
+  generateInboxMatchSuggestions,
   matchPendingInboxForTransaction,
   resolveSystemAppRequest,
   runAutomationsForOutboxEvent,
@@ -117,6 +118,21 @@ export function createDawnWorkerJobHandlers(env: DawnCloudflareBindings): DawnQu
           transactionId: message.transactionId,
           sourceOutboxEventId: message.sourceOutboxEventId,
           idempotencyKey: message.idempotencyKey,
+          enforceCallerPermission: false,
+        },
+      );
+    },
+    "inbox.match_suggestions": async (message) => {
+      await generateInboxMatchSuggestions(
+        new DrizzleDawnRepository(),
+        resolveSystemAppRequest({
+          actorId: "system:matching",
+          requestId: message.idempotencyKey,
+          teamId: message.teamId,
+        }),
+        {
+          teamId: message.teamId,
+          inboxItemId: message.inboxItemId,
           enforceCallerPermission: false,
         },
       );

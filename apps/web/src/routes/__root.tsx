@@ -1,7 +1,8 @@
 import { Toaster } from "@dawn/ui/components/sonner";
+import { Button } from "@dawn/ui/components/button";
 import type { QueryClient } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
-import { HeadContent, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
+import { HeadContent, Link, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 
 import { ThemeProvider } from "@/components/theme-provider";
@@ -16,6 +17,7 @@ export interface RouterAppContext {
 
 export const Route = createRootRouteWithContext<RouterAppContext>()({
   component: RootComponent,
+  notFoundComponent: NotFoundComponent,
   head: () => ({
     meta: [
       {
@@ -34,6 +36,23 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
     ],
   }),
 });
+
+function NotFoundComponent() {
+  return (
+    <main className="grid min-h-svh place-items-center bg-background px-4 text-foreground">
+      <div className="w-full max-w-md border border-border bg-card p-6">
+        <p className="text-xs font-medium uppercase text-muted-foreground">404</p>
+        <h1 className="mt-3 font-serif text-4xl leading-none tracking-normal">Page not found</h1>
+        <p className="mt-4 text-sm leading-6 text-muted-foreground">
+          This route is not part of Dawn yet. Return to the dashboard or use the app navigation.
+        </p>
+        <Button className="mt-6" render={<Link to="/dashboard" />} size="sm">
+          Go to dashboard
+        </Button>
+      </div>
+    </main>
+  );
+}
 
 function RootComponent() {
   return (

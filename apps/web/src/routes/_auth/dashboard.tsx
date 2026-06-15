@@ -16,26 +16,52 @@ import {
   UploadIcon,
   WalletCardsIcon,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { authClient } from "@/lib/auth-client";
 import { orpc } from "@/utils/orpc";
 
+import { ensureCurrentTeam } from "../-team-routing";
+
 export const Route = createFileRoute("/_auth/dashboard")({
   component: RouteComponent,
+  loaderDeps: ({ search }) => ({ teamId: search.teamId }),
+  loader: async ({ context, deps }) => {
+    const { currentTeamId } = await ensureCurrentTeam(context, deps.teamId);
+
+    if (!currentTeamId) {
+      return { currentTeamId };
+    }
+
+    await Promise.all([
+      context.queryClient.ensureQueryData(
+        context.orpc.reports.overview.queryOptions({ input: { teamId: currentTeamId } }),
+      ),
+      context.queryClient.ensureQueryData(
+        context.orpc.billing.list.queryOptions({ input: { teamId: currentTeamId } }),
+      ),
+      context.queryClient.ensureQueryData(
+        context.orpc.documents.list.queryOptions({ input: { teamId: currentTeamId } }),
+      ),
+      context.queryClient.ensureQueryData(
+        context.orpc.inbox.list.queryOptions({ input: { teamId: currentTeamId } }),
+      ),
+    ]);
+
+    return { currentTeamId };
+  },
+  head: () => ({
+    meta: [{ title: "Dashboard | Dawn" }],
+  }),
 });
 
 function RouteComponent() {
   const { session, customerState } = Route.useRouteContext();
+  const { currentTeamId } = Route.useLoaderData();
   const queryClient = useQueryClient();
-  const [selectedTeamId, setSelectedTeamId] = useState<string | undefined>(
-    () => localStorage.getItem("dawn:selected-team-id") ?? undefined,
-  );
   const [assistantPrompt, setAssistantPrompt] = useState("");
   const [assistantThreadId, setAssistantThreadId] = useState<string | null>(null);
 
-  const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: selectedTeamId } }));
-  const currentTeamId = selectedTeamId ?? teams.data?.currentTeamId;
   const reports = useQuery({
     ...orpc.reports.overview.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
@@ -52,28 +78,6 @@ function RouteComponent() {
     ...orpc.inbox.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
-
-  useEffect(() => {
-    const teamId = new URLSearchParams(window.location.search).get("teamId");
-
-    if (teamId && teamId !== selectedTeamId) {
-      setSelectedTeamId(teamId);
-      localStorage.setItem("dawn:selected-team-id", teamId);
-    }
-  }, [selectedTeamId]);
-
-  useEffect(() => {
-    if (!teams.data || !selectedTeamId) {
-      return;
-    }
-
-    const selectedTeamExists = teams.data.teams.some((team) => team.id === selectedTeamId);
-
-    if (!selectedTeamExists) {
-      setSelectedTeamId(teams.data.currentTeamId);
-      localStorage.setItem("dawn:selected-team-id", teams.data.currentTeamId);
-    }
-  }, [selectedTeamId, teams.data]);
 
   const assistantAskMutation = useMutation(
     orpc.assistant.ask.mutationOptions({

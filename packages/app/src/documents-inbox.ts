@@ -1,8 +1,11 @@
 import type {
   InboxMatchConfidence,
   InboxMatchCandidate,
+  InboxMatchSignalScores,
   InboxMatchSuggestion,
+  MatchCalibration,
   MatchPolicy,
+  MatchSignals,
   TeamMatchAlias,
   TeamMatchFeedback,
   Transaction,
@@ -81,7 +84,7 @@ export type InboxItem = {
   matchSuggestions?: InboxTransactionMatchSuggestion[];
 };
 
-export type InboxTransactionMatchStatus = "suggested" | "accepted" | "rejected";
+export type InboxTransactionMatchStatus = "suggested" | "accepted" | "rejected" | "expired";
 
 export type InboxTransactionMatchSuggestion = {
   id: string;
@@ -92,6 +95,14 @@ export type InboxTransactionMatchSuggestion = {
   confidence: InboxMatchConfidence;
   explanation: string[];
   status: InboxTransactionMatchStatus;
+  signals?: InboxMatchSignalScores;
+  signalDetails?: MatchSignals;
+  thresholds?: {
+    suggested: number;
+    autoMatch: number;
+  };
+  calibration?: MatchCalibration | null;
+  matchType?: "suggested";
   createdAt: string;
   updatedAt: string;
   transaction?: Transaction | null;
@@ -208,6 +219,7 @@ export type GenerateInboxMatchSuggestionsCommand = {
   inboxItemId: string;
   limit?: number;
   autoMatch?: AutoMatchOptions;
+  enforceCallerPermission?: boolean;
 };
 
 export type GenerateInboxMatchSuggestionsResult = {
@@ -978,18 +990,20 @@ export async function generateInboxMatchSuggestions(
 
     assertCommandTeamMatchesContext(context, command.teamId, "Inbox item not found");
 
-    await resolveTeamAccess(
-      inboxRepository,
-      { ...context, teamId: command.teamId },
-      "documents.read",
-      "You cannot read inbox items for this team",
-    );
-    await resolveTeamAccess(
-      inboxRepository,
-      { ...context, teamId: command.teamId },
-      "transactions.read",
-      "You cannot read transactions for this team",
-    );
+    if (command.enforceCallerPermission !== false) {
+      await resolveTeamAccess(
+        inboxRepository,
+        { ...context, teamId: command.teamId },
+        "documents.read",
+        "You cannot read inbox items for this team",
+      );
+      await resolveTeamAccess(
+        inboxRepository,
+        { ...context, teamId: command.teamId },
+        "transactions.read",
+        "You cannot read transactions for this team",
+      );
+    }
 
     const [inboxItem, aliases, feedback, hardNegatives] = await Promise.all([
       inboxRepository.getInboxItemForTeam(command.teamId, command.inboxItemId),
@@ -1238,8 +1252,8 @@ export async function acceptInboxMatch(
       throw new AppError("NOT_FOUND", "Inbox match not found");
     }
 
-    if (existing.status === "rejected") {
-      throw new AppError("CONFLICT", "Rejected inbox matches cannot be accepted");
+    if (existing.status !== "suggested") {
+      throw new AppError("CONFLICT", "Only suggested inbox matches can be accepted");
     }
 
     const accepted = await inboxRepository.acceptInboxMatchSuggestion({

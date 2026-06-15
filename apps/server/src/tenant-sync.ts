@@ -12,15 +12,35 @@ export type TenantSyncFanoutResult = {
   delivered: number;
   subscribers: number;
 };
+type TenantSyncRuntimeBindings = Partial<Pick<DawnCloudflareBindings, "DAWN_TENANT_COORDINATOR">>;
+type LocalTenantSyncRuntime = {
+  fanout(event: SyncInvalidationEvent): Promise<TenantSyncFanoutResult> | TenantSyncFanoutResult;
+};
+
+let localTenantSyncRuntime: LocalTenantSyncRuntime | null = null;
+
+export function configureLocalTenantSyncRuntime(runtime: LocalTenantSyncRuntime | null) {
+  localTenantSyncRuntime = runtime;
+}
 
 export async function publishTenantSyncInvalidation(
-  env: DawnCloudflareBindings,
+  env: TenantSyncRuntimeBindings,
   input: SyncInvalidationJob | SyncInvalidationEvent,
 ): Promise<TenantSyncFanoutResult> {
   const event = normalizeTenantSyncInvalidation(input);
   const contract = syncCollectionContractForId(event.collection);
-  const id = env.DAWN_TENANT_COORDINATOR.idFromName(event.teamId);
-  const stub = env.DAWN_TENANT_COORDINATOR.get(id);
+  const tenantCoordinator = env.DAWN_TENANT_COORDINATOR;
+
+  if (!tenantCoordinator) {
+    if (localTenantSyncRuntime) {
+      return localTenantSyncRuntime.fanout(event);
+    }
+
+    throw new Error("DAWN_TENANT_COORDINATOR binding is required for tenant sync invalidation");
+  }
+
+  const id = tenantCoordinator.idFromName(event.teamId);
+  const stub = tenantCoordinator.get(id);
   const response = await stub.fetch(
     `https://tenant-coordinator${contract.fanout.coordinatorInvalidationPath}`,
     {

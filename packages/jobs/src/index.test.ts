@@ -317,6 +317,46 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps extracted document outbox events to inbox matching jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "document.extracted",
+        payload: {
+          inboxItemId: "inbox_1",
+          documentId: "doc_1",
+          versionId: "ver_1",
+          extractionId: "extraction_1",
+        },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "document.extracted",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "inbox.match_suggestions",
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "inbox:match-suggestions:outbox_1:inbox_1",
+      },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "document.extracted",
+        idempotencyKey: "automation:run:outbox_1",
+      },
+      webhookDeliveryJob("document.extracted"),
+    ]);
+  });
+
   test("maps recurring invoice due events to generation jobs", () => {
     expect(
       outboxEventToQueueMessages({
@@ -479,6 +519,7 @@ describe("job contracts", () => {
       "outbox.dispatch": record("outbox.dispatch"),
       "sync.invalidate": record("sync.invalidate"),
       "document.extract": record("document.extract"),
+      "inbox.match_suggestions": record("inbox.match_suggestions"),
       "transaction.match_pending_inbox": record("transaction.match_pending_inbox"),
       "invoice.recurring.generate": record("invoice.recurring.generate"),
       "insights.weekly.generate": record("insights.weekly.generate"),

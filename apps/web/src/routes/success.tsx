@@ -1,9 +1,14 @@
 import { createFileRoute, useSearch } from "@tanstack/react-router";
 
+import { optionalStringSearchParam } from "./-team-routing";
+
 export const Route = createFileRoute("/success")({
   component: SuccessPage,
   validateSearch: (search) => ({
-    checkout_id: search.checkout_id as string,
+    checkout_id: optionalStringSearchParam(search.checkout_id),
+  }),
+  head: () => ({
+    meta: [{ title: "Payment successful | Dawn" }],
   }),
 });
 

@@ -12,7 +12,7 @@
     "db:pull": "bun --cwd ../.. db:pull",
     "db:push": "bun --cwd ../.. db:push",
     "db:studio": "bun --cwd ../.. db:studio",
-    "dev": "bun run --hot src/index.ts",
+    "dev": "bun run --hot src/dev.ts",
     "start": "bun run dist/index.mjs"
   },
   "dependencies": {

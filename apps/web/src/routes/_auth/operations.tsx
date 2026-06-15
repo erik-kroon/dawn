@@ -4,7 +4,7 @@ import { Input } from "@dawn/ui/components/input";
 import { Label } from "@dawn/ui/components/label";
 import { formatMoney } from "@dawn/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useBlocker, useNavigate } from "@tanstack/react-router";
 import {
   ActivityIcon,
   ArrowUpRightIcon,
@@ -22,8 +22,27 @@ import { useEffect, useMemo, useState } from "react";
 
 import { orpc } from "@/utils/orpc";
 
+import { ensureCurrentTeam, rememberSelectedTeam } from "../-team-routing";
+
 export const Route = createFileRoute("/_auth/operations")({
   component: OperationsRoute,
+  loaderDeps: ({ search }) => ({ teamId: search.teamId }),
+  loader: async ({ context, deps }) => {
+    const { currentTeamId } = await ensureCurrentTeam(context, deps.teamId);
+
+    if (!currentTeamId) {
+      return { currentTeamId };
+    }
+
+    await context.queryClient.ensureQueryData(
+      context.orpc.transactionReview.list.queryOptions({ input: { teamId: currentTeamId } }),
+    );
+
+    return { currentTeamId };
+  },
+  head: () => ({
+    meta: [{ title: "Operations | Dawn" }],
+  }),
 });
 
 const teamInviteRoles = ["admin", "member", "accountant", "viewer"] as const;
@@ -54,10 +73,9 @@ type CsvImportPreviewData = {
 
 function OperationsRoute() {
   const { session } = Route.useRouteContext();
+  const { currentTeamId } = Route.useLoaderData();
+  const navigate = useNavigate({ from: Route.fullPath });
   const queryClient = useQueryClient();
-  const [selectedTeamId, setSelectedTeamId] = useState<string | undefined>(
-    () => localStorage.getItem("dawn:selected-team-id") ?? undefined,
-  );
   const [newTeamName, setNewTeamName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<TeamInviteRole>("member");
@@ -104,8 +122,7 @@ function OperationsRoute() {
     connectUrl: string;
   } | null>(null);
 
-  const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: selectedTeamId } }));
-  const currentTeamId = selectedTeamId ?? teams.data?.currentTeamId;
+  const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: currentTeamId } }));
   const currentTeam = teams.data?.teams.find((team) => team.id === currentTeamId);
   const transactionReview = useQuery(
     orpc.transactionReview.list.queryOptions({ input: { teamId: currentTeamId } }),
@@ -146,27 +163,16 @@ function OperationsRoute() {
     enabled: Boolean(currentTeamId),
   });
 
-  useEffect(() => {
-    const teamId = new URLSearchParams(window.location.search).get("teamId");
-
-    if (teamId && teamId !== selectedTeamId) {
-      setSelectedTeamId(teamId);
-      localStorage.setItem("dawn:selected-team-id", teamId);
-    }
-  }, [selectedTeamId]);
-
-  useEffect(() => {
-    if (!teams.data || !selectedTeamId) {
-      return;
-    }
-
-    const selectedTeamExists = teams.data.teams.some((team) => team.id === selectedTeamId);
-
-    if (!selectedTeamExists) {
-      setSelectedTeamId(teams.data.currentTeamId);
-      localStorage.setItem("dawn:selected-team-id", teams.data.currentTeamId);
-    }
-  }, [selectedTeamId, teams.data]);
+  function selectTeam(teamId: string) {
+    rememberSelectedTeam(teamId);
+    void navigate({
+      replace: true,
+      search: (previous) => ({
+        ...previous,
+        teamId,
+      }),
+    });
+  }
 
   useEffect(() => {
     const firstAccountId = ledgerSummary.data?.accounts[0]?.id;
@@ -214,8 +220,7 @@ function OperationsRoute() {
   const createTeamMutation = useMutation(
     orpc.teams.create.mutationOptions({
       onSuccess: async (team) => {
-        setSelectedTeamId(team.id);
-        localStorage.setItem("dawn:selected-team-id", team.id);
+        selectTeam(team.id);
         setNewTeamName("");
         await queryClient.invalidateQueries({ queryKey: orpc.teams.list.queryKey() });
         await queryClient.invalidateQueries({ queryKey: orpc.transactionReview.list.queryKey() });
@@ -360,6 +365,25 @@ function OperationsRoute() {
       },
     }),
   );
+  const hasCsvImportDraft =
+    Boolean(csvFileName || csvText.trim() || csvPreviewMutation.data) && !csvCommitMutation.data;
+
+  useBlocker({
+    disabled: !hasCsvImportDraft,
+    enableBeforeUnload: () => hasCsvImportDraft,
+    shouldBlockFn: ({ current, next }) => {
+      const currentSearch = current.search as { teamId?: unknown };
+      const nextSearch = next.search as { teamId?: unknown };
+      const sameOperationsWorkspace =
+        current.pathname === next.pathname && currentSearch.teamId === nextSearch.teamId;
+
+      if (sameOperationsWorkspace) {
+        return false;
+      }
+
+      return !window.confirm("Leave Operations and discard the CSV import draft?");
+    },
+  });
 
   const operationalHealth = useMemo(
     () => [
@@ -422,8 +446,7 @@ function OperationsRoute() {
             className="mt-4 h-9 w-full rounded-none border border-border bg-background px-2 text-sm"
             onChange={(event) => {
               const teamId = event.target.value;
-              setSelectedTeamId(teamId);
-              localStorage.setItem("dawn:selected-team-id", teamId);
+              selectTeam(teamId);
             }}
             value={currentTeamId ?? ""}
           >

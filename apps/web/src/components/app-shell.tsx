@@ -1,6 +1,6 @@
 import { Button } from "@dawn/ui/components/button";
 import { cn } from "@dawn/ui/lib/utils";
-import { useRouterState } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import {
   BarChart3,
   BriefcaseBusiness,
@@ -21,15 +21,15 @@ type AppShellProps = {
 };
 
 const navItems = [
-  { label: "Overview", href: "/dashboard", icon: LayoutGrid },
-  { label: "Reports", href: "/reports", icon: BarChart3 },
-  { label: "Transactions", href: "/transactions", icon: Table2 },
-  { label: "Inbox", href: "/inbox", icon: Inbox },
-  { label: "Invoices", href: "/invoices", icon: FileText },
-  { label: "Tracker", href: "/tracker", icon: Timer },
-  { label: "Customers", href: "/customers", icon: Users },
-  { label: "Projects", href: "/projects", icon: BriefcaseBusiness },
-  { label: "Operations", href: "/operations", icon: Settings },
+  { label: "Overview", to: "/dashboard", icon: LayoutGrid },
+  { label: "Reports", to: "/reports", icon: BarChart3 },
+  { label: "Transactions", to: "/transactions", icon: Table2 },
+  { label: "Inbox", to: "/inbox", icon: Inbox },
+  { label: "Invoices", to: "/invoices", icon: FileText },
+  { label: "Tracker", to: "/tracker", icon: Timer },
+  { label: "Customers", to: "/customers", icon: Users },
+  { label: "Projects", to: "/projects", icon: BriefcaseBusiness },
+  { label: "Operations", to: "/operations", icon: Settings },
 ] as const;
 
 function DawnMark() {
@@ -48,21 +48,26 @@ function DawnMark() {
 
 function AppSidebar() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const teamId = useRouterState({
+    select: (state) =>
+      typeof state.location.search.teamId === "string" ? state.location.search.teamId : undefined,
+  });
+  const teamSearch = teamId ? { teamId } : {};
 
   return (
     <aside className="fixed inset-y-0 left-0 z-40 hidden w-[70px] border-r border-border bg-background md:flex md:flex-col">
-      <a
+      <Link
         aria-label="Dawn overview"
         className="flex h-[70px] items-center justify-center border-b border-border"
-        href="/dashboard"
+        search={teamSearch}
+        to="/dashboard"
       >
         <DawnMark />
-      </a>
+      </Link>
 
       <nav aria-label="Primary" className="flex flex-1 flex-col items-center gap-2 py-7">
-        {navItems.map(({ href, icon: Icon, label }) => {
-          const isActive =
-            pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
+        {navItems.map(({ to, icon: Icon, label }) => {
+          const isActive = pathname === to || (to !== "/dashboard" && pathname.startsWith(to));
 
           return (
             <Button
@@ -71,9 +76,9 @@ function AppSidebar() {
                 "size-10 text-muted-foreground transition-[background-color,border-color,color,transform] duration-150 ease-out hover:border-border hover:bg-card hover:text-foreground active:scale-[0.97]",
                 isActive && "border-border bg-card text-foreground",
               )}
-              key={href}
+              key={to}
               nativeButton={false}
-              render={<a href={href} title={label} />}
+              render={<Link search={teamSearch} title={label} to={to} />}
               size="icon"
               variant="ghost"
             >

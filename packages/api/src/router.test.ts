@@ -21,6 +21,7 @@ import type {
   InvoiceDraft,
   InvoiceLineDraft,
   InvoicePayment,
+  InboxMatchSuggestion,
   Product,
   Project,
   ProjectMember,
@@ -633,21 +634,56 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     return this.aliases.filter((alias) => alias.teamId === teamId);
   }
 
+  async listTeamMatchFeedback() {
+    return [];
+  }
+
   async listHardNegativeMatches(teamId: string, inboxItemId: string) {
     return this.hardNegatives.filter(
       (match) => match.teamId === teamId && match.inboxItemId === inboxItemId,
     );
   }
 
+  async listTransactionMatchCandidatesForInboxItem(input: {
+    teamId: string;
+    inboxItem: InboxItem;
+    limit: number;
+  }) {
+    return [...this.transactions.values()]
+      .filter((transaction) => transaction.teamId === input.teamId)
+      .filter(
+        (transaction) =>
+          !this.attachments.some(
+            (attachment) =>
+              attachment.documentId === input.inboxItem.documentId ||
+              attachment.transactionId === transaction.id,
+          ),
+      )
+      .filter(
+        (transaction) =>
+          ![...this.matchSuggestions.values()].some(
+            (suggestion) =>
+              suggestion.teamId === input.teamId &&
+              suggestion.inboxItemId === input.inboxItem.id &&
+              suggestion.transactionId === transaction.id &&
+              (suggestion.status === "suggested" || suggestion.status === "accepted"),
+          ),
+      )
+      .sort(
+        (left, right) =>
+          right.postedAt.localeCompare(left.postedAt) || left.id.localeCompare(right.id),
+      )
+      .slice(0, input.limit)
+      .map((transaction) => ({
+        transaction,
+        providerReference: transaction.providerTransactionId,
+      }));
+  }
+
   async upsertInboxMatchSuggestions(input: {
     teamId: string;
     inboxItemId: string;
-    suggestions: {
-      transactionId: string;
-      score: number;
-      confidence: InboxTransactionMatchSuggestion["confidence"];
-      explanation: string[];
-    }[];
+    suggestions: InboxMatchSuggestion[];
   }) {
     const persisted = input.suggestions.map((suggestion, index) => {
       const existing = [...this.matchSuggestions.values()].find(
@@ -664,6 +700,11 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
         score: suggestion.score,
         confidence: suggestion.confidence,
         explanation: suggestion.explanation,
+        signals: suggestion.signals,
+        signalDetails: suggestion.signalDetails,
+        thresholds: suggestion.thresholds,
+        calibration: suggestion.calibration ?? null,
+        matchType: suggestion.matchType,
         status: existing?.status ?? "suggested",
         createdAt: existing?.createdAt ?? "2026-06-15T10:04:00.000Z",
         updatedAt: "2026-06-15T10:04:00.000Z",
@@ -705,6 +746,20 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
 
     const accepted = { ...suggestion, status: "accepted" as const };
     this.matchSuggestions.set(accepted.id, accepted);
+    for (const [id, candidate] of this.matchSuggestions) {
+      if (
+        candidate.teamId === input.teamId &&
+        candidate.inboxItemId === accepted.inboxItemId &&
+        candidate.id !== accepted.id &&
+        candidate.status === "suggested"
+      ) {
+        this.matchSuggestions.set(id, {
+          ...candidate,
+          status: "expired",
+          updatedAt: "2026-06-15T10:04:00.000Z",
+        });
+      }
+    }
     this.attachments.push({
       transactionId: accepted.transactionId,
       documentId: item.documentId,

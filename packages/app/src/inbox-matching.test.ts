@@ -11,7 +11,7 @@ import {
   type InboxTransactionMatchSuggestion,
   type TeamAlias,
 } from "./index";
-import type { Actor, TeamRole, Transaction } from "@dawn/domain";
+import type { Actor, InboxMatchSuggestion, TeamRole, Transaction } from "@dawn/domain";
 
 class MemoryMatchingRepository {
   role: TeamRole = "member";
@@ -203,12 +203,7 @@ class MemoryMatchingRepository {
   async upsertInboxMatchSuggestions(input: {
     teamId: string;
     inboxItemId: string;
-    suggestions: {
-      transactionId: string;
-      score: number;
-      confidence: InboxTransactionMatchSuggestion["confidence"];
-      explanation: string[];
-    }[];
+    suggestions: InboxMatchSuggestion[];
   }) {
     const persisted = input.suggestions.map((suggestion, index) => {
       const existing = [...this.suggestions.values()].find(
@@ -225,6 +220,11 @@ class MemoryMatchingRepository {
         score: suggestion.score,
         confidence: suggestion.confidence,
         explanation: suggestion.explanation,
+        signals: suggestion.signals,
+        signalDetails: suggestion.signalDetails,
+        thresholds: suggestion.thresholds,
+        calibration: suggestion.calibration ?? null,
+        matchType: suggestion.matchType,
         status: existing?.status ?? "suggested",
         createdAt: existing?.createdAt ?? "2026-06-14T00:00:00.000Z",
         updatedAt: "2026-06-14T00:00:00.000Z",
@@ -253,6 +253,20 @@ class MemoryMatchingRepository {
 
     const accepted = { ...suggestion, status: "accepted" as const };
     this.suggestions.set(accepted.id, accepted);
+    for (const [id, candidate] of this.suggestions) {
+      if (
+        candidate.teamId === input.teamId &&
+        candidate.inboxItemId === accepted.inboxItemId &&
+        candidate.id !== accepted.id &&
+        candidate.status === "suggested"
+      ) {
+        this.suggestions.set(id, {
+          ...candidate,
+          status: "expired",
+          updatedAt: "2026-06-14T00:00:00.000Z",
+        });
+      }
+    }
     this.attachments.push({
       transactionId: accepted.transactionId,
       documentId: this.inboxItem.documentId,
@@ -475,6 +489,43 @@ describe("inbox matching use cases", () => {
     ]);
     expect(result.suggestions[0]?.score).toBeGreaterThan(result.suggestions[1]?.score ?? 0);
     expect(repository.listTransactionsForReportCalls).toBe(0);
+  });
+
+  test("expires competing suggestions after accepting one match", async () => {
+    const repository = new MemoryMatchingRepository();
+    repository.transactions = [
+      repository.transactions[0]!,
+      {
+        ...repository.transactions[0]!,
+        id: "txn_2",
+        providerTransactionId: "provider_2",
+      },
+    ];
+    const generated = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      { teamId: "team_1", inboxItemId: "inbox_1", limit: 2 },
+    );
+
+    expect(generated.suggestions).toHaveLength(2);
+
+    await acceptInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: generated.suggestions[0]?.id ?? "",
+      idempotencyKey: "accept_match_1",
+    });
+
+    const competingSuggestionId = generated.suggestions[1]?.id ?? "";
+
+    expect(repository.suggestions.get(competingSuggestionId)?.status).toBe("expired");
+    await expect(
+      acceptInboxMatch(repository as unknown as DawnRepository, context, {
+        teamId: "team_1",
+        suggestionId: competingSuggestionId,
+        idempotencyKey: "accept_match_2",
+      }),
+    ).rejects.toThrow("Only suggested inbox matches can be accepted");
+    expect(repository.attachments).toEqual([{ transactionId: "txn_1", documentId: "doc_1" }]);
   });
 
   test("matches a pending inbox item when a transaction arrives later", async () => {

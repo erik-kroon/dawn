@@ -18,7 +18,7 @@ import {
 } from "@dawn/ui/components/table";
 import { formatMoney, type Money } from "@dawn/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -28,26 +28,58 @@ import {
   SearchIcon,
   TimerIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { useProjectSync } from "@/sync/projects";
 import { orpc } from "@/utils/orpc";
 
-export const Route = createFileRoute("/_auth/tracker")({
-  component: TrackerRoute,
-});
+import { ensureCurrentTeam, optionalStringSearchParam } from "../-team-routing";
 
 type CalendarView = "week" | "month";
 
+type TrackerSearch = {
+  date?: string;
+  month?: string;
+  q?: string;
+  view?: CalendarView;
+};
+
+export const Route = createFileRoute("/_auth/tracker")({
+  component: TrackerRoute,
+  validateSearch: (search: Record<string, unknown>): TrackerSearch => ({
+    date: dateSearchParam(search.date),
+    month: monthSearchParam(search.month),
+    q: optionalStringSearchParam(search.q),
+    view: search.view === "week" ? "week" : undefined,
+  }),
+  loaderDeps: ({ search }) => ({ teamId: search.teamId }),
+  loader: async ({ context, deps }) => {
+    const { currentTeamId } = await ensureCurrentTeam(context, deps.teamId);
+
+    if (!currentTeamId) {
+      return { currentTeamId };
+    }
+
+    await context.queryClient.ensureQueryData(
+      context.orpc.projects.list.queryOptions({ input: { teamId: currentTeamId } }),
+    );
+
+    return { currentTeamId };
+  },
+  head: () => ({
+    meta: [{ title: "Tracker | Dawn" }],
+  }),
+});
+
 function TrackerRoute() {
+  const { currentTeamId } = Route.useLoaderData();
+  const search = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
   const queryClient = useQueryClient();
-  const [selectedTeamId, setSelectedTeamId] = useState<string | undefined>(
-    () => localStorage.getItem("dawn:selected-team-id") ?? undefined,
-  );
-  const [currentMonth, setCurrentMonth] = useState(() => startOfMonth(new Date()));
-  const [calendarView, setCalendarView] = useState<CalendarView>("month");
-  const [selectedDate, setSelectedDate] = useState(() => dateKey(new Date()));
-  const [projectQuery, setProjectQuery] = useState("");
+  const currentMonth = parseMonthSearchParam(search.month) ?? startOfMonth(new Date());
+  const calendarView = search.view ?? "month";
+  const selectedDate = search.date ?? dateKey(new Date());
+  const projectQuery = search.q ?? "";
   const [projectDraft, setProjectDraft] = useState({
     customerId: "",
     name: "",
@@ -61,22 +93,21 @@ function TrackerRoute() {
     billableStatus: "billable" as "billable" | "non_billable",
   });
 
-  const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: selectedTeamId } }));
-  const currentTeamId = selectedTeamId ?? teams.data?.currentTeamId;
   const projects = useQuery({
     ...orpc.projects.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
   const projectSync = useProjectSync(currentTeamId);
 
-  useEffect(() => {
-    const teamId = new URLSearchParams(window.location.search).get("teamId");
-
-    if (teamId && teamId !== selectedTeamId) {
-      setSelectedTeamId(teamId);
-      localStorage.setItem("dawn:selected-team-id", teamId);
-    }
-  }, [selectedTeamId]);
+  function updateSearch(next: TrackerSearch) {
+    void navigate({
+      replace: true,
+      search: (previous) => ({
+        ...previous,
+        ...next,
+      }),
+    });
+  }
 
   const syncedProjects = useMemo(
     () =>
@@ -173,7 +204,7 @@ function TrackerRoute() {
               <Button
                 aria-label="Previous month"
                 className="border-0"
-                onClick={() => setCurrentMonth((month) => addMonths(month, -1))}
+                onClick={() => updateSearch({ month: monthKey(addMonths(currentMonth, -1)) })}
                 size="icon-sm"
                 variant="ghost"
               >
@@ -183,7 +214,7 @@ function TrackerRoute() {
               <Button
                 aria-label="Next month"
                 className="border-0"
-                onClick={() => setCurrentMonth((month) => addMonths(month, 1))}
+                onClick={() => updateSearch({ month: monthKey(addMonths(currentMonth, 1)) })}
                 size="icon-sm"
                 variant="ghost"
               >
@@ -194,7 +225,7 @@ function TrackerRoute() {
               <button
                 className="min-w-20 border-r border-border px-4 text-sm text-muted-foreground transition-colors hover:bg-muted/30 data-[active=true]:bg-card data-[active=true]:text-foreground"
                 data-active={calendarView === "week"}
-                onClick={() => setCalendarView("week")}
+                onClick={() => updateSearch({ view: "week" })}
                 type="button"
               >
                 Week
@@ -202,7 +233,7 @@ function TrackerRoute() {
               <button
                 className="min-w-24 px-4 text-sm text-muted-foreground transition-colors hover:bg-muted/30 data-[active=true]:bg-card data-[active=true]:text-foreground"
                 data-active={calendarView === "month"}
-                onClick={() => setCalendarView("month")}
+                onClick={() => updateSearch({ view: undefined })}
                 type="button"
               >
                 Month
@@ -235,7 +266,7 @@ function TrackerRoute() {
                 data-muted={!isCurrentMonth}
                 data-selected={isSelected}
                 key={key}
-                onClick={() => setSelectedDate(key)}
+                onClick={() => updateSearch({ date: key, month: monthKey(day) })}
                 type="button"
               >
                 <span
@@ -285,7 +316,9 @@ function TrackerRoute() {
                 />
                 <Input
                   className="h-10 border-border pl-10 pr-10"
-                  onChange={(event) => setProjectQuery(event.target.value)}
+                  onChange={(event) =>
+                    updateSearch({ q: optionalStringSearchParam(event.target.value) })
+                  }
                   placeholder="Search or type filter"
                   type="search"
                   value={projectQuery}
@@ -631,12 +664,47 @@ function addMonths(date: Date, amount: number) {
   return new Date(date.getFullYear(), date.getMonth() + amount, 1);
 }
 
+function dateSearchParam(value: unknown) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return undefined;
+  }
+
+  const parsed = new Date(`${value}T12:00:00.000Z`);
+  return Number.isNaN(parsed.getTime()) ? undefined : value;
+}
+
 function dateKey(date: Date) {
   const year = date.getFullYear();
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
   const day = `${date.getDate()}`.padStart(2, "0");
 
   return `${year}-${month}-${day}`;
+}
+
+function monthKey(date: Date) {
+  return dateKey(date).slice(0, 7);
+}
+
+function monthSearchParam(value: unknown) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}$/.test(value)) {
+    return undefined;
+  }
+
+  return parseMonthSearchParam(value) ? value : undefined;
+}
+
+function parseMonthSearchParam(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  const [year, month] = value.split("-").map(Number);
+
+  if (!year || !month || month < 1 || month > 12) {
+    return undefined;
+  }
+
+  return new Date(year, month - 1, 1);
 }
 
 function selectedDateToIso(value: string) {

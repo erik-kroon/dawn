@@ -3,8 +3,11 @@ import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
 import { AppShell } from "@/components/app-shell";
 import { authClient } from "@/lib/auth-client";
 
+import { validateTeamSearch } from "../-team-routing";
+
 export const Route = createFileRoute("/_auth")({
   component: AuthLayout,
+  validateSearch: validateTeamSearch,
   beforeLoad: async () => {
     let session: Awaited<ReturnType<typeof authClient.getSession>>;
 

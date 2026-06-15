@@ -41,12 +41,14 @@ describe("Dawn worker runtime", () => {
       "automation.run",
       "bank.sync",
       "document.extract",
+      "inbox.match_suggestions",
       "insights.weekly.generate",
       "invoice.recurring.generate",
       "outbox.dispatch",
       "sync.invalidate",
       "team_data.delete",
       "team_data.export",
+      "transaction.match_pending_inbox",
       "webhook.deliver",
     ]);
   });

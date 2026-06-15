@@ -150,11 +150,12 @@ describe("dispatchOutboxEvents", () => {
       dispatched: 1,
       failed: 0,
       skipped: 0,
-      queuedMessages: 4,
+      queuedMessages: 5,
     });
     expect(publisher.messages.map((message) => message.type)).toEqual([
       "outbox.dispatch",
       "sync.invalidate",
+      "transaction.match_pending_inbox",
       "automation.run",
       "webhook.deliver",
     ]);
@@ -177,6 +178,13 @@ describe("dispatchOutboxEvents", () => {
         status: "queued",
         attempt: 1,
         idempotencyKey: "sync:transactions:outbox_1",
+      },
+      {
+        outboxEventId: "outbox_1",
+        jobType: "transaction.match_pending_inbox",
+        status: "queued",
+        attempt: 1,
+        idempotencyKey: "inbox:match-pending:outbox_1:txn_1",
       },
       {
         outboxEventId: "outbox_1",

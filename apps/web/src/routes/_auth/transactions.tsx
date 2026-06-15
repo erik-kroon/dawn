@@ -19,7 +19,7 @@ import {
 import { formatMoney, type Transaction } from "@dawn/domain";
 import type { TransactionSyncRecord } from "@dawn/sync";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   CheckIcon,
   ChevronDownIcon,
@@ -30,16 +30,44 @@ import {
   SlidersHorizontalIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { useTransactionSync } from "@/sync/transactions";
 import { orpc } from "@/utils/orpc";
 
-export const Route = createFileRoute("/_auth/transactions")({
-  component: TransactionsRoute,
-});
+import { ensureCurrentTeam, optionalStringSearchParam } from "../-team-routing";
 
 type TransactionTab = "all" | "review";
+
+type TransactionsSearch = {
+  q?: string;
+  tab?: TransactionTab;
+};
+
+export const Route = createFileRoute("/_auth/transactions")({
+  component: TransactionsRoute,
+  validateSearch: (search: Record<string, unknown>): TransactionsSearch => ({
+    q: optionalStringSearchParam(search.q),
+    tab: search.tab === "review" ? "review" : undefined,
+  }),
+  loaderDeps: ({ search }) => ({ teamId: search.teamId }),
+  loader: async ({ context, deps }) => {
+    const { currentTeamId } = await ensureCurrentTeam(context, deps.teamId);
+
+    if (!currentTeamId) {
+      return { currentTeamId };
+    }
+
+    await context.queryClient.ensureQueryData(
+      context.orpc.transactionReview.list.queryOptions({ input: { teamId: currentTeamId } }),
+    );
+
+    return { currentTeamId };
+  },
+  head: () => ({
+    meta: [{ title: "Transactions | Dawn" }],
+  }),
+});
 
 const categorySwatches = [
   "bg-lime-300",
@@ -52,12 +80,12 @@ const categorySwatches = [
 ] as const;
 
 function TransactionsRoute() {
+  const { currentTeamId } = Route.useLoaderData();
+  const search = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
   const queryClient = useQueryClient();
-  const [selectedTeamId, setSelectedTeamId] = useState<string | undefined>(
-    () => localStorage.getItem("dawn:selected-team-id") ?? undefined,
-  );
-  const [query, setQuery] = useState("");
-  const [tab, setTab] = useState<TransactionTab>("all");
+  const query = search.q ?? "";
+  const tab = search.tab ?? "all";
   const [selectedTransactionIds, setSelectedTransactionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -65,8 +93,7 @@ function TransactionsRoute() {
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
-  const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: selectedTeamId } }));
-  const currentTeamId = selectedTeamId ?? teams.data?.currentTeamId;
+  const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: currentTeamId } }));
   const transactionSync = useTransactionSync(currentTeamId);
   const transactionReview = useQuery(
     orpc.transactionReview.list.queryOptions({ input: { teamId: currentTeamId } }),
@@ -85,14 +112,15 @@ function TransactionsRoute() {
     }),
   );
 
-  useEffect(() => {
-    const teamId = new URLSearchParams(window.location.search).get("teamId");
-
-    if (teamId && teamId !== selectedTeamId) {
-      setSelectedTeamId(teamId);
-      localStorage.setItem("dawn:selected-team-id", teamId);
-    }
-  }, [selectedTeamId]);
+  function updateSearch(next: TransactionsSearch) {
+    void navigate({
+      replace: true,
+      search: (previous) => ({
+        ...previous,
+        ...next,
+      }),
+    });
+  }
 
   const syncedTransactions = useMemo(
     () =>
@@ -205,7 +233,9 @@ function TransactionsRoute() {
             />
             <Input
               className="h-10 border-border bg-transparent pl-11 pr-11 text-sm"
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={(event) =>
+                updateSearch({ q: optionalStringSearchParam(event.target.value) })
+              }
               placeholder="Search or filter"
               type="search"
               value={query}
@@ -245,7 +275,7 @@ function TransactionsRoute() {
             <button
               className="min-w-16 border-r border-border px-4 text-sm text-foreground transition-colors hover:bg-muted/30 data-[active=true]:bg-card active:scale-[0.98]"
               data-active={tab === "all"}
-              onClick={() => setTab("all")}
+              onClick={() => updateSearch({ tab: undefined })}
               type="button"
             >
               All
@@ -253,7 +283,7 @@ function TransactionsRoute() {
             <button
               className="min-w-32 px-4 text-sm text-muted-foreground transition-colors hover:bg-muted/30 data-[active=true]:bg-card data-[active=true]:text-foreground active:scale-[0.98]"
               data-active={tab === "review"}
-              onClick={() => setTab("review")}
+              onClick={() => updateSearch({ tab: "review" })}
               type="button"
             >
               In review ({reviewCount})

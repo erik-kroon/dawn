@@ -11,7 +11,7 @@ import { Input } from "@dawn/ui/components/input";
 import { Label } from "@dawn/ui/components/label";
 import { formatMoney } from "@dawn/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   CheckIcon,
   FileTextIcon,
@@ -30,11 +30,46 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 import { useTransactionSync } from "@/sync/transactions";
 import { client, orpc } from "@/utils/orpc";
 
-export const Route = createFileRoute("/_auth/inbox")({
-  component: InboxRoute,
-});
+import { ensureCurrentTeam, optionalStringSearchParam } from "../-team-routing";
 
 type InboxTab = "all" | "review";
+
+type InboxSearch = {
+  itemId?: string;
+  q?: string;
+  tab?: InboxTab;
+};
+
+export const Route = createFileRoute("/_auth/inbox")({
+  component: InboxRoute,
+  validateSearch: (search: Record<string, unknown>): InboxSearch => ({
+    itemId: optionalStringSearchParam(search.itemId),
+    q: optionalStringSearchParam(search.q),
+    tab: search.tab === "review" ? "review" : undefined,
+  }),
+  loaderDeps: ({ search }) => ({ teamId: search.teamId }),
+  loader: async ({ context, deps }) => {
+    const { currentTeamId } = await ensureCurrentTeam(context, deps.teamId);
+
+    if (!currentTeamId) {
+      return { currentTeamId };
+    }
+
+    await Promise.all([
+      context.queryClient.ensureQueryData(
+        context.orpc.documents.list.queryOptions({ input: { teamId: currentTeamId } }),
+      ),
+      context.queryClient.ensureQueryData(
+        context.orpc.inbox.list.queryOptions({ input: { teamId: currentTeamId } }),
+      ),
+    ]);
+
+    return { currentTeamId };
+  },
+  head: () => ({
+    meta: [{ title: "Inbox | Dawn" }],
+  }),
+});
 
 type ExtractionCorrectionState = {
   merchantName: string;
@@ -46,21 +81,19 @@ type ExtractionCorrectionState = {
 type ExtractionCorrectionField = keyof ExtractionCorrectionState;
 
 function InboxRoute() {
+  const { currentTeamId } = Route.useLoaderData();
+  const search = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [selectedTeamId, setSelectedTeamId] = useState<string | undefined>(
-    () => localStorage.getItem("dawn:selected-team-id") ?? undefined,
-  );
-  const [query, setQuery] = useState("");
-  const [tab, setTab] = useState<InboxTab>("all");
-  const [selectedInboxItemId, setSelectedInboxItemId] = useState<string | null>(null);
+  const query = search.q ?? "";
+  const tab = search.tab ?? "all";
+  const selectedInboxItemId = search.itemId ?? null;
   const [documentFile, setDocumentFile] = useState<File | null>(null);
   const [extractionCorrections, setExtractionCorrections] = useState<
     Record<string, ExtractionCorrectionState>
   >({});
 
-  const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: selectedTeamId } }));
-  const currentTeamId = selectedTeamId ?? teams.data?.currentTeamId;
   const transactionSync = useTransactionSync(currentTeamId);
   const documents = useQuery({
     ...orpc.documents.list.queryOptions({ input: { teamId: currentTeamId } }),
@@ -71,14 +104,15 @@ function InboxRoute() {
     enabled: Boolean(currentTeamId),
   });
 
-  useEffect(() => {
-    const teamId = new URLSearchParams(window.location.search).get("teamId");
-
-    if (teamId && teamId !== selectedTeamId) {
-      setSelectedTeamId(teamId);
-      localStorage.setItem("dawn:selected-team-id", teamId);
-    }
-  }, [selectedTeamId]);
+  function updateSearch(next: InboxSearch) {
+    void navigate({
+      replace: true,
+      search: (previous) => ({
+        ...previous,
+        ...next,
+      }),
+    });
+  }
 
   const documentUploadMutation = useMutation({
     mutationFn: async (input: { teamId: string; file: File }) => {
@@ -192,7 +226,13 @@ function InboxRoute() {
       return;
     }
 
-    setSelectedInboxItemId(filteredInboxItems[0]?.id ?? null);
+    const nextItemId = filteredInboxItems[0]?.id;
+
+    if ((selectedInboxItemId ?? undefined) === nextItemId) {
+      return;
+    }
+
+    updateSearch({ itemId: nextItemId });
   }, [filteredInboxItems, selectedInboxItemId]);
 
   const selectedItem =
@@ -246,7 +286,9 @@ function InboxRoute() {
               />
               <Input
                 className="h-10 border-border bg-transparent pl-11 pr-11 text-sm"
-                onChange={(event) => setQuery(event.target.value)}
+                onChange={(event) =>
+                  updateSearch({ q: optionalStringSearchParam(event.target.value) })
+                }
                 placeholder="Search"
                 type="search"
                 value={query}
@@ -257,7 +299,7 @@ function InboxRoute() {
                 tab === "all" ? `Show ${reviewCount} inbox items in review` : "Show all inbox items"
               }
               className="border-border"
-              onClick={() => setTab((current) => (current === "all" ? "review" : "all"))}
+              onClick={() => updateSearch({ tab: tab === "all" ? "review" : undefined })}
               size="icon-lg"
               variant={tab === "review" ? "secondary" : "outline"}
             >
@@ -310,7 +352,7 @@ function InboxRoute() {
                     data-desktop-record-type="inbox_item"
                     data-selected={selectedItem?.id === item.id}
                     key={item.id}
-                    onClick={() => setSelectedInboxItemId(item.id)}
+                    onClick={() => updateSearch({ itemId: item.id })}
                     type="button"
                   >
                     <div className="flex min-w-0 items-start justify-between gap-3">

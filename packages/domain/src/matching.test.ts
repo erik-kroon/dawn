@@ -164,7 +164,10 @@ describe("inbox transaction matching", () => {
       baseInput,
       [
         {
-          transaction: transaction({ id: "txn_feedback_override", description: "Figma subscription" }),
+          transaction: transaction({
+            id: "txn_feedback_override",
+            description: "Figma subscription",
+          }),
           counterpartyName: "Figma",
         },
       ],

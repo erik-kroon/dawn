@@ -167,6 +167,11 @@ export type InboxMatchSuggestion = {
   explanation: string[];
   signals: InboxMatchSignalScores;
   signalDetails: MatchSignals;
+  thresholds: {
+    suggested: number;
+    autoMatch: number;
+  };
+  calibration?: MatchCalibration;
   matchType: Extract<MatchType, "suggested">;
 };
 
@@ -320,7 +325,10 @@ export function evaluateAutoMatch(input: AutoMatchEvaluationInput): AutoMatchEva
     .map((alternative) => alternative.score)
     .sort((left, right) => right - left)[0];
 
-  if (closestAlternativeScore != null && candidate.score - closestAlternativeScore < minimumScoreGap) {
+  if (
+    closestAlternativeScore != null &&
+    candidate.score - closestAlternativeScore < minimumScoreGap
+  ) {
     reasons.push("A competing candidate is too close");
   }
 
@@ -420,18 +428,16 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
   );
   const baseCurrenciesMatch = Boolean(
     documentBaseMoney &&
-      transactionBaseMoney &&
-      documentBaseMoney.currency === transactionBaseMoney.currency,
+    transactionBaseMoney &&
+    documentBaseMoney.currency === transactionBaseMoney.currency,
   );
   const baseCurrenciesDiffer = Boolean(
     documentBaseMoney &&
-      transactionBaseMoney &&
-      documentBaseMoney.currency !== transactionBaseMoney.currency,
+    transactionBaseMoney &&
+    documentBaseMoney.currency !== transactionBaseMoney.currency,
   );
-  const currencyMatches =
-    inputCurrency.length > 0 && transactionCurrency === inputCurrency;
-  const currencyMismatches =
-    inputCurrency.length > 0 && transactionCurrency !== inputCurrency;
+  const currencyMatches = inputCurrency.length > 0 && transactionCurrency === inputCurrency;
+  const currencyMismatches = inputCurrency.length > 0 && transactionCurrency !== inputCurrency;
   const canUseBaseCurrency = currencyMismatches && baseCurrenciesMatch;
   const amountSignal = currencyMismatches
     ? null
@@ -454,7 +460,12 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
         currency: inputCurrency,
       },
     });
-  } else if (currencyMismatches && canUseBaseCurrency && documentBaseMoney && transactionBaseMoney) {
+  } else if (
+    currencyMismatches &&
+    canUseBaseCurrency &&
+    documentBaseMoney &&
+    transactionBaseMoney
+  ) {
     addSignal(signals, explanation, "baseCurrency", {
       score: 0.06,
       matched: true,
@@ -487,7 +498,12 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
         transactionBaseCurrency: transactionBaseMoney.currency,
       },
     });
-  } else if (currencyMismatches && baseCurrenciesMatch && documentBaseMoney && transactionBaseMoney) {
+  } else if (
+    currencyMismatches &&
+    baseCurrenciesMatch &&
+    documentBaseMoney &&
+    transactionBaseMoney
+  ) {
     addSignal(
       signals,
       explanation,
@@ -654,6 +670,8 @@ function inboxSuggestionFromDecision(decision: MatchDecision): InboxMatchSuggest
     explanation: decision.explanation,
     signals: legacySignalScores(decision.signals),
     signalDetails: decision.signals,
+    thresholds: decision.thresholds,
+    calibration: decision.calibration,
     matchType: "suggested",
   };
 }
@@ -985,10 +1003,7 @@ function dateMatchSignal(fields: DocumentMatchFields, transactionDate: string): 
     return {
       score: signedDays <= 3 ? 0.12 : 0.06,
       matched: true,
-      reason:
-        signedDays <= 3
-          ? "Transaction date is close"
-          : "Receipt date is before bank posting",
+      reason: signedDays <= 3 ? "Transaction date is close" : "Receipt date is before bank posting",
       evidence: { ...evidence, signedDays },
     };
   }
@@ -1268,11 +1283,11 @@ function addConservativeRiskSignals(
   const hasAmountEvidence = Boolean(signals.amount || signals.baseAmount);
   const hasNameLikeEvidence = Boolean(
     signals.name ||
-      signals.reference ||
-      signals.sender ||
-      signals.senderDomain ||
-      signals.documentText ||
-      signals.alias,
+    signals.reference ||
+    signals.sender ||
+    signals.senderDomain ||
+    signals.documentText ||
+    signals.alias,
   );
 
   if (hasAmountEvidence && !hasNameLikeEvidence && !signals.date) {

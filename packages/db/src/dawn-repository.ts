@@ -68,6 +68,7 @@ import type {
   WebhookDelivery,
   WebhookSubscription,
   InboxMatchCandidate,
+  InboxMatchSuggestion,
 } from "@dawn/domain";
 import { calculateInvoiceTotals, ledgerDuplicateKey } from "@dawn/domain";
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
@@ -1426,46 +1427,51 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         ? Math.abs(extraction.fields.baseAmountMinor)
         : null;
     const hasBaseMoneyEvidence = Boolean(baseCurrency && baseAmountMinor != null);
-
-    if (currency) {
-      conditions.push(
-        hasBaseMoneyEvidence
-          ? sql`(
-              ${schema.transaction.currency} = ${currency}
-              or (
-                ${schema.transaction.baseCurrency} = ${baseCurrency}
-                and abs(${schema.transaction.baseAmountMinor}) = ${baseAmountMinor}
-              )
-            )`
-          : eq(schema.transaction.currency, currency),
-      );
-    }
+    const signalConditions: SQL[] = [];
 
     if (extraction.fields.totalAmountMinor != null) {
       const amountMinor = Math.abs(extraction.fields.totalAmountMinor);
-      conditions.push(
-        hasBaseMoneyEvidence
+      const amountTolerance = Math.max(1, Math.ceil(amountMinor * 0.25));
+
+      signalConditions.push(
+        currency
           ? sql`(
-              abs(${schema.transaction.amountMinor}) = ${amountMinor}
-              or (
-                ${schema.transaction.baseCurrency} = ${baseCurrency}
-                and abs(${schema.transaction.baseAmountMinor}) = ${baseAmountMinor}
-              )
+              ${schema.transaction.currency} = ${currency}
+              and abs(abs(${schema.transaction.amountMinor}) - ${amountMinor}) <= ${amountTolerance}
             )`
-          : sql`abs(${schema.transaction.amountMinor}) = ${amountMinor}`,
+          : sql`abs(abs(${schema.transaction.amountMinor}) - ${amountMinor}) <= ${amountTolerance}`,
       );
-    } else if (hasBaseMoneyEvidence) {
-      conditions.push(sql`
+    }
+
+    if (hasBaseMoneyEvidence) {
+      const baseTolerance = Math.max(50, Math.ceil((baseAmountMinor ?? 0) * 0.15));
+
+      signalConditions.push(sql`
         ${schema.transaction.baseCurrency} = ${baseCurrency}
-        and abs(${schema.transaction.baseAmountMinor}) = ${baseAmountMinor}
+        and abs(abs(${schema.transaction.baseAmountMinor}) - ${baseAmountMinor}) <= ${baseTolerance}
       `);
     }
+
+    for (const term of normalizedSearchTerms(
+      extraction.fields.merchantName,
+      extraction.fields.invoiceNumber,
+    )) {
+      signalConditions.push(transactionTextIncludesTerm(term));
+    }
+
+    if (signalConditions.length === 0) {
+      return [];
+    }
+
+    conditions.push(or(...signalConditions) ?? sql`false`);
 
     const issuedAt = parseCandidateDate(extraction.fields.issuedAt);
 
     if (issuedAt) {
-      conditions.push(gte(schema.transaction.postedAt, daysFrom(issuedAt, -14)));
-      conditions.push(lte(schema.transaction.postedAt, daysFrom(issuedAt, 14)));
+      const window = matchCandidateDateWindow(extraction.fields.documentType);
+
+      conditions.push(gte(schema.transaction.postedAt, daysFrom(issuedAt, window.beforeDays)));
+      conditions.push(lte(schema.transaction.postedAt, daysFrom(issuedAt, window.afterDays)));
     }
 
     const rows = await this.client
@@ -1501,6 +1507,39 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         ? Math.abs(input.transaction.baseMoney.amountMinor)
         : null;
     const hasBaseMoneyEvidence = Boolean(baseCurrency && baseAmountMinor != null);
+    const signalConditions: SQL[] = [];
+    const amountTolerance = Math.max(1, Math.ceil(amountMinor * 0.25));
+
+    signalConditions.push(sql`
+      (
+        ${schema.documentExtraction.fields}->>'totalAmountMinor' is not null
+        and (
+          ${schema.documentExtraction.fields}->>'currency' is null
+          or upper(${schema.documentExtraction.fields}->>'currency') = ${currency}
+        )
+        and abs(abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::integer) - ${amountMinor}) <= ${amountTolerance}
+      )
+    `);
+
+    if (hasBaseMoneyEvidence) {
+      const baseTolerance = Math.max(50, Math.ceil((baseAmountMinor ?? 0) * 0.15));
+
+      signalConditions.push(sql`
+        (
+          upper(${schema.documentExtraction.fields}->>'baseCurrency') = ${baseCurrency}
+          and ${schema.documentExtraction.fields}->>'baseAmountMinor' is not null
+          and abs(abs((${schema.documentExtraction.fields}->>'baseAmountMinor')::integer) - ${baseAmountMinor}) <= ${baseTolerance}
+        )
+      `);
+    }
+
+    for (const term of normalizedSearchTerms(
+      input.transaction.description,
+      input.transaction.providerTransactionId,
+    )) {
+      signalConditions.push(extractionTextIncludesTerm(term));
+    }
+
     const rows = await this.client
       .select({
         item: schema.inboxItem,
@@ -1531,33 +1570,25 @@ export class DrizzleDawnRepository implements DrizzleRepository {
           eq(schema.inboxItem.teamId, input.teamId),
           eq(schema.inboxItem.status, "needs_review"),
           eq(schema.inboxItem.extractionStatus, "completed"),
-          hasBaseMoneyEvidence
-            ? sql`(
-                ${schema.documentExtraction.fields}->>'currency' is null
-                or upper(${schema.documentExtraction.fields}->>'currency') = ${currency}
-                or upper(${schema.documentExtraction.fields}->>'baseCurrency') = ${baseCurrency}
-              )`
-            : sql`(
-                ${schema.documentExtraction.fields}->>'currency' is null
-                or upper(${schema.documentExtraction.fields}->>'currency') = ${currency}
-              )`,
-          hasBaseMoneyEvidence
-            ? sql`(
-                ${schema.documentExtraction.fields}->>'totalAmountMinor' is null
-                or abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::integer) = ${amountMinor}
-                or abs((${schema.documentExtraction.fields}->>'baseAmountMinor')::integer) = ${baseAmountMinor}
-              )`
-            : sql`(
-                ${schema.documentExtraction.fields}->>'totalAmountMinor' is null
-                or abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::integer) = ${amountMinor}
-              )`,
           hasPostedAt
             ? sql`(
                 ${schema.documentExtraction.fields}->>'issuedAt' is null
                 or (${schema.documentExtraction.fields}->>'issuedAt')::timestamptz
-                  between ${daysFrom(postedAt, -14)} and ${daysFrom(postedAt, 14)}
+                  between
+                    case
+                      when ${schema.documentExtraction.fields}->>'documentType' in ('invoice_received', 'invoice_sent')
+                        then ${daysFrom(postedAt, -123)}
+                      else ${daysFrom(postedAt, -30)}
+                    end
+                    and
+                    case
+                      when ${schema.documentExtraction.fields}->>'documentType' in ('invoice_received', 'invoice_sent')
+                        then ${daysFrom(postedAt, 90)}
+                      else ${daysFrom(postedAt, 90)}
+                    end
               )`
             : sql`true`,
+          or(...signalConditions) ?? sql`false`,
           sql`not exists (
             select 1
             from ${schema.transactionAttachment}
@@ -1608,13 +1639,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
   async upsertInboxMatchSuggestions(input: {
     teamId: string;
     inboxItemId: string;
-    suggestions: {
-      inboxItemId: string;
-      transactionId: string;
-      score: number;
-      confidence: InboxTransactionMatchSuggestion["confidence"];
-      explanation: string[];
-    }[];
+    suggestions: InboxMatchSuggestion[];
   }): Promise<InboxTransactionMatchSuggestion[]> {
     if (input.suggestions.length === 0) {
       return [];
@@ -1631,6 +1656,11 @@ export class DrizzleDawnRepository implements DrizzleRepository {
           score: Math.round(suggestion.score * 1_000),
           confidence: suggestion.confidence,
           explanation: suggestion.explanation,
+          signalScores: suggestion.signals,
+          signalDetails: suggestion.signalDetails,
+          thresholds: suggestion.thresholds,
+          calibration: suggestion.calibration ?? null,
+          matchType: suggestion.matchType,
           status: "suggested",
         })),
       )
@@ -1644,6 +1674,11 @@ export class DrizzleDawnRepository implements DrizzleRepository {
           score: sql`excluded.score`,
           confidence: sql`excluded.confidence`,
           explanation: sql`excluded.explanation`,
+          signalScores: sql`excluded.signal_scores`,
+          signalDetails: sql`excluded.signal_details`,
+          thresholds: sql`excluded.thresholds`,
+          calibration: sql`excluded.calibration`,
+          matchType: sql`excluded.match_type`,
           updatedAt: new Date(),
         },
         setWhere: eq(schema.inboxMatchSuggestion.status, "suggested"),
@@ -1721,17 +1756,40 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       throw new Error("Inbox item not found");
     }
 
-    await this.client
-      .insert(schema.transactionAttachment)
-      .values({
-        id: crypto.randomUUID(),
-        teamId: input.teamId,
-        transactionId: suggestion.transactionId,
-        documentId: item.documentId,
-        inboxItemId: item.id,
-        createdByActorId: input.actorId,
-      })
-      .onConflictDoNothing();
+    if (suggestion.status !== "suggested") {
+      throw new Error("Inbox match suggestion is not suggestable");
+    }
+
+    if (item.status === "resolved") {
+      throw new Error("Inbox item is already resolved");
+    }
+
+    const [existingAttachment] = await this.client
+      .select()
+      .from(schema.transactionAttachment)
+      .where(
+        and(
+          eq(schema.transactionAttachment.teamId, input.teamId),
+          or(
+            eq(schema.transactionAttachment.documentId, item.documentId),
+            eq(schema.transactionAttachment.inboxItemId, item.id),
+          ),
+        ),
+      )
+      .limit(1);
+
+    if (existingAttachment) {
+      throw new Error("Document is already attached to a transaction");
+    }
+
+    await this.client.insert(schema.transactionAttachment).values({
+      id: crypto.randomUUID(),
+      teamId: input.teamId,
+      transactionId: suggestion.transactionId,
+      documentId: item.documentId,
+      inboxItemId: item.id,
+      createdByActorId: input.actorId,
+    });
 
     if (item.latestExtraction?.fields.merchantName && suggestion.transaction?.description) {
       await this.client
@@ -1756,6 +1814,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         and(
           eq(schema.inboxMatchSuggestion.teamId, input.teamId),
           eq(schema.inboxMatchSuggestion.id, input.suggestionId),
+          eq(schema.inboxMatchSuggestion.status, "suggested"),
         ),
       )
       .returning();
@@ -1763,6 +1822,20 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     if (!accepted) {
       throw new Error("Inbox match suggestion was not accepted");
     }
+
+    await this.client
+      .update(schema.inboxMatchSuggestion)
+      .set({
+        status: "expired",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.inboxMatchSuggestion.teamId, input.teamId),
+          eq(schema.inboxMatchSuggestion.inboxItemId, suggestion.inboxItemId),
+          eq(schema.inboxMatchSuggestion.status, "suggested"),
+        ),
+      );
 
     const [updatedItem] = await this.client
       .update(schema.inboxItem)
@@ -3889,8 +3962,52 @@ function parseCandidateDate(value: string | null | undefined) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function matchCandidateDateWindow(documentType: unknown) {
+  return documentType === "invoice_received" || documentType === "invoice_sent"
+    ? { beforeDays: -90, afterDays: 123 }
+    : { beforeDays: -90, afterDays: 30 };
+}
+
 function daysFrom(date: Date, days: number) {
   return new Date(date.getTime() + days * 86_400_000);
+}
+
+function normalizedSearchTerms(...values: unknown[]) {
+  const terms = new Set<string>();
+
+  for (const value of values) {
+    if (typeof value !== "string") {
+      continue;
+    }
+
+    for (const term of value.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []) {
+      terms.add(term);
+    }
+  }
+
+  return [...terms].slice(0, 5);
+}
+
+function transactionTextIncludesTerm(term: string): SQL {
+  return sql`
+    lower(concat_ws(
+      ' ',
+      ${schema.transaction.description},
+      ${schema.counterparty.name},
+      ${schema.transaction.providerTransactionId}
+    )) like ${`%${term}%`}
+  `;
+}
+
+function extractionTextIncludesTerm(term: string): SQL {
+  return sql`
+    lower(concat_ws(
+      ' ',
+      ${schema.documentExtraction.fields}->>'merchantName',
+      ${schema.documentExtraction.fields}->>'invoiceNumber',
+      ${schema.documentExtraction.rawText}
+    )) like ${`%${term}%`}
+  `;
 }
 
 function mapBusinessDocument(
@@ -3988,6 +4105,11 @@ function mapInboxMatchSuggestion(
     confidence: suggestion.confidence as InboxTransactionMatchSuggestion["confidence"],
     explanation: suggestion.explanation,
     status: suggestion.status as InboxTransactionMatchSuggestion["status"],
+    signals: suggestion.signalScores as InboxTransactionMatchSuggestion["signals"],
+    signalDetails: suggestion.signalDetails as InboxTransactionMatchSuggestion["signalDetails"],
+    thresholds: suggestion.thresholds as InboxTransactionMatchSuggestion["thresholds"],
+    calibration: suggestion.calibration as InboxTransactionMatchSuggestion["calibration"],
+    matchType: suggestion.matchType as InboxTransactionMatchSuggestion["matchType"],
     createdAt: suggestion.createdAt.toISOString(),
     updatedAt: suggestion.updatedAt.toISOString(),
     transaction: transaction ? mapTransaction(transaction) : null,

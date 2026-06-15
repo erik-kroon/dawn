@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { createProjectSyncInvalidation, createTransactionSyncInvalidation } from "@dawn/sync";
 
 import { TenantRealtimeHub } from "./tenant-coordinator";
-import { normalizeTenantSyncInvalidation } from "./tenant-sync";
+import {
+  configureLocalTenantSyncRuntime,
+  normalizeTenantSyncInvalidation,
+  publishTenantSyncInvalidation,
+} from "./tenant-sync";
 
 class FakeRealtimeSocket {
   messages: string[] = [];
@@ -143,5 +147,32 @@ describe("TenantRealtimeHub", () => {
       cursor: null,
       changedIds: ["project_1"],
     });
+  });
+
+  test("uses configured local fanout when Durable Object binding is absent", async () => {
+    const event = createTransactionSyncInvalidation({
+      teamId: "team_1",
+      changedIds: ["txn_1"],
+    });
+
+    configureLocalTenantSyncRuntime({
+      fanout(input) {
+        expect(input).toEqual(event);
+
+        return {
+          delivered: 0,
+          subscribers: 0,
+        };
+      },
+    });
+
+    try {
+      await expect(publishTenantSyncInvalidation({}, event)).resolves.toEqual({
+        delivered: 0,
+        subscribers: 0,
+      });
+    } finally {
+      configureLocalTenantSyncRuntime(null);
+    }
   });
 });

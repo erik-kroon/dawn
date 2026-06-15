@@ -81,6 +81,11 @@ const identifyUser = createAuthMiddleware(auth as BetterAuthInstance, {
 type ServerHonoEnv = EvlogVariables & {
   Bindings: DawnCloudflareBindings;
 };
+type LocalSyncSubscriptionHandler = (input: {
+  context: HonoContext<ServerHonoEnv>;
+  contract: SyncCollectionContract;
+  teamId: string;
+}) => Promise<Response> | Response;
 type PublicApiPermission = Parameters<typeof resolveTeamAccess>[2];
 type PublicApiMethod = "get" | "post";
 type PublicApiIdempotencyPolicy = "none" | "required";
@@ -136,6 +141,14 @@ type PublicApiOpenApiDocument = {
   security: Array<Record<string, unknown>>;
   paths: Record<string, Record<string, unknown>>;
 };
+
+let localSyncSubscriptionHandler: LocalSyncSubscriptionHandler | null = null;
+
+export function configureLocalSyncSubscriptionHandler(
+  handler: LocalSyncSubscriptionHandler | null,
+) {
+  localSyncSubscriptionHandler = handler;
+}
 
 const app = new Hono<ServerHonoEnv>();
 
@@ -303,8 +316,21 @@ async function handleSyncSubscription(
     throw error;
   }
 
-  const id = c.env.DAWN_TENANT_COORDINATOR.idFromName(teamId);
-  const stub = c.env.DAWN_TENANT_COORDINATOR.get(id);
+  const tenantCoordinator = c.env.DAWN_TENANT_COORDINATOR;
+
+  if (!tenantCoordinator) {
+    if (localSyncSubscriptionHandler) {
+      return localSyncSubscriptionHandler({ context: c, contract, teamId });
+    }
+
+    return c.json(
+      { error: "Realtime sync is unavailable: DAWN_TENANT_COORDINATOR binding is missing" },
+      503,
+    );
+  }
+
+  const id = tenantCoordinator.idFromName(teamId);
+  const stub = tenantCoordinator.get(id);
   const url = new URL(c.req.url);
   url.pathname = contract.subscription.coordinatorPath;
   url.search = syncSubscriptionSearchParams({
