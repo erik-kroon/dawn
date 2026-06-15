@@ -23,6 +23,7 @@ describe("public API contract", () => {
       "/products",
       "/projects",
       "/time-entries",
+      "/reports/overview",
       "/webhook-subscriptions",
     ]);
     expect(document.paths["/invoices"]).toMatchObject({
@@ -41,6 +42,9 @@ describe("public API contract", () => {
     });
     expect(document.paths["/documents/{documentId}/download"]).toMatchObject({
       post: { summary: "Create a signed document download" },
+    });
+    expect(document.paths["/reports/overview"]).toMatchObject({
+      get: { summary: "Read business report overview" },
     });
     expect(document.components.securitySchemes.bearerApiKey).toMatchObject({
       type: "http",

@@ -23,6 +23,7 @@ import {
   generateRecurringInvoice,
   generateWeeklyInsights,
   listBillingWorkspace,
+  listBusinessReport,
   listDocuments,
   listProjectWorkspace,
   listTransactionReviewWorkspace,
@@ -707,6 +708,36 @@ app.post("/api/v1/time-entries", async (c) => {
   }
 });
 
+app.get("/api/v1/reports/overview", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+  const teamId = c.req.query("teamId");
+
+  if (!teamId) {
+    return c.json({ error: "teamId is required" }, 400);
+  }
+
+  try {
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "transactions.read");
+    const workspace = await listBusinessReport(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        from: optionalString(c.req.query("from")),
+        to: optionalString(c.req.query("to")),
+      },
+    );
+
+    return c.json(workspace);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
 app.post("/api/v1/webhook-subscriptions", async (c) => {
   const repository = new DrizzleTransactionReviewRepository();
 
@@ -1059,6 +1090,16 @@ export function publicApiOpenApiDocument(requestUrl: string) {
         post: {
           summary: "Create a time entry",
           parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
+        },
+      },
+      "/reports/overview": {
+        get: {
+          summary: "Read business report overview",
+          parameters: [
+            { name: "teamId", in: "query", required: true },
+            { name: "from", in: "query", required: false },
+            { name: "to", in: "query", required: false },
+          ],
         },
       },
       "/webhook-subscriptions": {

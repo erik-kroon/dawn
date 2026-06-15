@@ -235,6 +235,9 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 23           | `bun --filter server check-types`                                                                                                                                                                                                                                                                                            | Pass    | Server typecheck passed after adding public document list, signed upload, and signed download handlers.                                                                                                |
 | 2026-06-15 slice 23           | `bun --filter web check-types`                                                                                                                                                                                                                                                                                               | Pass    | Web build/typecheck passed after adding document scopes to OAuth consent parsing; Vite reported the existing large chunk warning.                                                                      |
 | 2026-06-15 slice 23           | `bun run release:gate`                                                                                                                                                                                                                                                                                                       | Pass    | Full release gate passed: ignored TypeScript/secrets/migration checks, workspace typecheck/build, 213 tests passed with 1 opt-in DB integration skip, deterministic AI eval, check, and server build.  |
+| 2026-06-15 slice 23           | `bun test apps/server/src/public-api.test.ts`                                                                                                                                                                                                                                                                                | Pass    | Public OpenAPI contract test passed with the report overview resource path.                                                                                                                            |
+| 2026-06-15 slice 23           | `bun --filter server check-types`                                                                                                                                                                                                                                                                                            | Pass    | Server typecheck passed after adding the public report overview handler.                                                                                                                               |
+| 2026-06-15 slice 23           | `bun run release:gate`                                                                                                                                                                                                                                                                                                       | Pass    | Full release gate passed: ignored TypeScript/secrets/migration checks, workspace typecheck/build, 213 tests passed with 1 opt-in DB integration skip, deterministic AI eval, check, and server build.  |
 | 2026-06-15 slice 24           | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0018_worried_ink.sql` for generic integration connections and sync runs.                                                                                         |
 | 2026-06-15 slice 24           | `bun test packages/integrations/src/providers.test.ts packages/integrations/src/banking.test.ts packages/integrations/src/invoice-delivery.test.ts packages/app/src/integrations.test.ts packages/api/src/router.test.ts`                                                                                                    | Pass    | 29 tests passed for adapter capabilities, token metadata, integration connect/sync/failure/disable use cases, and protected routes.                                                                    |
 | 2026-06-15 slice 24           | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                                                      |
@@ -298,6 +301,8 @@ pass, and the implementing agent has inspected the diff.
 | `04811d5` | Automation rules foundation          | Added event-triggered automation rules, run logs, queue job contracts, protected routes, dashboard panel, tests, and migration.  |
 | `18f24d7` | Public developer platform            | Added scoped API keys, OAuth app/grant records, public REST routes, webhook subscriptions/delivery logs, tests, and migration.   |
 | `04e74e1` | Public project resources             | Added project and time-entry public REST handlers, project public API scopes, OpenAPI paths, tests, and release-gate evidence.   |
+| `efa2376` | Public billing resources             | Added customer, product, invoice draft, and stricter parsing public REST handlers with OpenAPI and release-gate evidence.        |
+| `5e3c12a` | Public document resources            | Added document scopes, public signed upload/download handlers, OAuth consent parsing, OpenAPI paths, and release-gate evidence.  |
 | `b08cfdd` | Integration adapter foundation       | Added generic provider contracts, integration connection/sync persistence, protected routes, dashboard status UI, and migration. |
 | `c8e1d92` | Desktop quick capture shell          | Added Dawn deep links, tray quick capture, file association metadata, dashboard capture handoff, and shell helper tests.         |
 | `3a040c7` | Observability workspace              | Added operations permission, request tracing, redacted logs, operations read model/API/UI, and controlled failure tests.         |
@@ -551,10 +556,11 @@ auditable webhook delivery attempts. The app layer resolves API keys into
 team-scoped actors with permissions derived from public scopes, developer
 settings are managed through protected API routes, and public REST endpoints now
 cover transactions, documents, customers, products, invoice drafts, projects,
-time entries, webhook subscription creation, and OpenAPI discovery. Outbox
-dispatch now emits `webhook.deliver` jobs, the server queue handler records
-delivery success/failure and retries failed webhook jobs through the queue, and
-Postgres stores API key/OAuth/webhook state via migration `0017_demonic_fenris`.
+time entries, report overviews, webhook subscription creation, and OpenAPI
+discovery. Outbox dispatch now emits `webhook.deliver` jobs, the server queue
+handler records delivery success/failure and retries failed webhook jobs through
+the queue, and Postgres stores API key/OAuth/webhook state via migration
+`0017_demonic_fenris`.
 
 Slice 23 follow-up added protected OAuth app creation and consent grant
 contracts. The app layer validates registered HTTPS redirect URIs, enforces
@@ -716,9 +722,9 @@ provider cleanup, and compliance rules.
   covers hashed scoped API keys, one-time credential replay behavior, OAuth
   app/consent grant route contracts, protected developer routes, browser consent
   route build/helper tests, public OpenAPI shape for transaction, document,
-  customer, product, invoice, project, time-entry, and webhook resources, queue
-  retry signaling, delivery audit records, migration generation, typecheck/check,
-  and focused tests.
+  customer, product, invoice, project, time-entry, report, and webhook resources,
+  queue retry signaling, delivery audit records, migration generation,
+  typecheck/check, and focused tests.
 - Slice 24 still needs real provider selection/credentials, sandbox contract
   runs where provider SDKs are chosen, and authenticated dashboard review against
   a migrated local or preview database. Current verification covers adapter
