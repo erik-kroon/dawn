@@ -1,11 +1,14 @@
 import { env } from "@dawn/env/server";
 import type { DawnCloudflareBindings } from "@dawn/infra/cloudflare";
+import type { DawnQueueMessage } from "@dawn/jobs";
 import type { SyncCollectionContract } from "@dawn/sync";
 import { upgradeWebSocket, websocket, type BunWebSocketData } from "hono/bun";
 
 import dawnServer, { configureLocalSyncSubscriptionHandler } from "./index";
+import { createMemoryDocumentObjectStorage } from "./document-storage";
 import { TenantRealtimeHub } from "./tenant-coordinator";
 import { configureLocalTenantSyncRuntime } from "./tenant-sync";
+import { createDawnWorkerRuntime } from "./worker-runtime";
 
 type LocalBindings = Partial<DawnCloudflareBindings> & {
   server: Bun.Server<BunWebSocketData>;
@@ -13,8 +16,15 @@ type LocalBindings = Partial<DawnCloudflareBindings> & {
 type LocalRealtimeSocket = {
   send(message: string): void;
 };
+type LocalR2PutOptions = {
+  httpMetadata?: {
+    contentType?: string;
+  };
+};
 
 const localSyncHub = new TenantRealtimeHub();
+const localDocumentObjectStorage = createMemoryDocumentObjectStorage();
+const localDocumentBucket = createLocalDocumentBucket();
 
 configureLocalTenantSyncRuntime({
   fanout(event) {
@@ -47,7 +57,7 @@ const server = Bun.serve({
 console.log(`Started development server: ${server.url}`);
 
 function localBindings(server: Bun.Server<BunWebSocketData>): LocalBindings {
-  return {
+  const bindings: LocalBindings = {
     server,
     ENVIRONMENT: "preview",
     NODE_ENV: env.NODE_ENV,
@@ -57,7 +67,11 @@ function localBindings(server: Bun.Server<BunWebSocketData>): LocalBindings {
     POLAR_ACCESS_TOKEN: env.POLAR_ACCESS_TOKEN ?? "",
     POLAR_SUCCESS_URL: env.POLAR_SUCCESS_URL ?? "",
     DATABASE_URL: env.DATABASE_URL,
+    DAWN_DOCUMENTS: localDocumentBucket,
+    DAWN_JOBS: createLocalQueue(() => bindings as DawnCloudflareBindings),
   };
+
+  return bindings;
 }
 
 function syncSubscription(contract: SyncCollectionContract, teamId: string) {
@@ -97,4 +111,66 @@ function resolvePort() {
   }
 
   return port;
+}
+
+function createLocalDocumentBucket(): R2Bucket {
+  return {
+    async put(objectKey: string, value: unknown, options?: LocalR2PutOptions) {
+      await localDocumentObjectStorage.put({
+        objectKey,
+        body: await toArrayBuffer(value),
+        contentType: options?.httpMetadata?.contentType ?? "application/octet-stream",
+      });
+
+      return null;
+    },
+    async get(objectKey: string) {
+      const object = await localDocumentObjectStorage.get(objectKey);
+
+      if (!object) {
+        return null;
+      }
+
+      return {
+        httpMetadata: { contentType: object.contentType },
+        size: object.byteSize,
+        async arrayBuffer() {
+          return object.body.slice(0);
+        },
+      };
+    },
+    async delete(objectKey: string) {
+      await localDocumentObjectStorage.delete(objectKey);
+    },
+  } as R2Bucket;
+}
+
+function createLocalQueue(resolveBindings: () => DawnCloudflareBindings): Queue<DawnQueueMessage> {
+  return {
+    async send(message: DawnQueueMessage) {
+      await createDawnWorkerRuntime(resolveBindings()).handleMessage(message);
+    },
+  } as unknown as Queue<DawnQueueMessage>;
+}
+
+async function toArrayBuffer(value: unknown): Promise<ArrayBuffer> {
+  if (value instanceof ArrayBuffer) {
+    return value.slice(0);
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    const copy = new Uint8Array(value.byteLength);
+    copy.set(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    return copy.buffer;
+  }
+
+  if (typeof value === "string") {
+    return toArrayBuffer(new TextEncoder().encode(value));
+  }
+
+  if (value instanceof Blob) {
+    return value.arrayBuffer();
+  }
+
+  throw new Error("Unsupported local document object body");
 }

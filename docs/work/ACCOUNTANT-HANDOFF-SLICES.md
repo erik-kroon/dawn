@@ -28,7 +28,7 @@ The full goal is done when all of these are true:
 
 - [x] A user can import a company bank CSV through a polished mapped preview flow.
 - [x] Imported transactions feed the review/export queue without duplicates.
-- [ ] Gmail can be connected, synced, and used to create inbox/document evidence in the accountant workflow.
+- [x] Gmail/email inbox can be connected, synced, and used to create inbox/document evidence in the accountant workflow; local proof uses the mock email inbox provider because live Google credentials are absent.
 - [x] Receipt matching works in both directions and exposes accept/reject review controls.
 - [x] Transactions have a clear accountant lifecycle from needs work to ready, exporting, exported, failed, excluded, or archived.
 - [x] A user can generate an accountant packet containing transaction CSV, manifest, and matched receipt/invoice files.
@@ -44,16 +44,16 @@ Live Gmail OAuth and email delivery should not block completion of local product
 
 ## Progress Tracker
 
-| Slice                                                   | Status      | Notes                                                                                                                                                                                                                                                                                                        |
-| ------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1. Accountant Packet Tracer                             | Completed   | Local tracer exports reviewed transactions to a ZIP with `transactions.csv`, `manifest.json`, optional resolved attachments, idempotency, audit, outbox, API, and transactions-page download wiring. Authenticated browser smoke now reaches the transactions screen; click/download smoke still needs ready export fixture data. |
-| 2. Midday-Parity Transaction Lifecycle And Review Queue | Completed   | Added accountant lifecycle status, derived receipt/export readiness, DB persistence, audited/idempotent status transitions, sync invalidation, ready-only export semantics, and transactions-page queue filters/actions. Authenticated browser smoke reached the review queue. |
-| 3. CSV Import Wizard Parity Plus                        | Completed   | Added header auto-detection, mapped column selectors, sign inversion, richer preview metadata, duplicate visibility, synchronous commit, queued large-import sessions, R2-backed payload handoff, worker execution, payload cleanup, and operations-page queued feedback.                                    |
-| 4. Gmail Connector Production Readiness                 | Local backend/runtime hardening completed | Gmail config health, scheduled/manual sync locking, skipped-count reporting, and deterministic provider-boundary tests landed. Live OAuth smoke remains blocked on Google credentials and a test mailbox.                                                                                                    |
-| 5. Receipt Matching Parity Plus                         | Completed   | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Authenticated browser smoke reaches inbox and transactions; accept/reject click smoke still needs a seeded suggestion fixture. |
-| 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, signed download links, skipped attachment counts, exported-after-storage status, packet download token policy, accountant email-link delivery, failed export telemetry, and visible export history landed. Live email provider setup remains open. |
+| Slice                                                   | Status                           | Notes                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Accountant Packet Tracer                             | Completed                        | Local tracer exports reviewed transactions to a ZIP with `transactions.csv`, `manifest.json`, optional resolved attachments, idempotency, audit, outbox, API, and transactions-page download wiring. Authenticated browser smoke now reaches the transactions screen; click/download smoke still needs ready export fixture data.                                                                  |
+| 2. Midday-Parity Transaction Lifecycle And Review Queue | Completed                        | Added accountant lifecycle status, derived receipt/export readiness, DB persistence, audited/idempotent status transitions, sync invalidation, ready-only export semantics, and transactions-page queue filters/actions. Authenticated browser smoke reached the review queue.                                                                                                                     |
+| 3. CSV Import Wizard Parity Plus                        | Completed                        | Added header auto-detection, mapped column selectors, sign inversion, richer preview metadata, duplicate visibility, synchronous commit, queued large-import sessions, R2-backed payload handoff, worker execution, payload cleanup, and operations-page queued feedback.                                                                                                                          |
+| 4. Gmail Connector Production Readiness                 | Local product behavior completed | Gmail config health, scheduled/manual sync locking, skipped-count reporting, deterministic provider-boundary tests, and local Bun dev queue/R2 dispatch for mock email inbox sync landed. Live OAuth smoke remains blocked on Google credentials and a test mailbox.                                                                                                                               |
+| 5. Receipt Matching Parity Plus                         | Completed                        | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Authenticated browser smoke reaches inbox and transactions; accept/reject click smoke still needs a seeded suggestion fixture.                                                                                                                           |
+| 6. Accountant Export Package Depth                      | Local product behavior completed | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, signed download links, skipped attachment counts, exported-after-storage status, packet download token policy, accountant email-link delivery, failed export telemetry, and visible export history landed. Live email provider setup remains a deployment prerequisite.              |
 | 7. Accountant Access And Handoff Audit                  | Local product behavior completed | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Stored packet records, export history API/UI, signed download/email success and failure audits, revocable packet links, and email-only handoff API exist. Authenticated owner page smoke works; accountant-role browser smoke still needs a dedicated account/session fixture. |
-| 8. Operational Hardening And Accountant Close Loop      | Local product behavior completed | Operations API/UI now return selected-period accountant close readiness, date-range close controls, job-run retry/dead-letter guidance with redacted actionable errors, packet access history, and deterministic CSV-to-export close-loop fixture coverage. Live Gmail close smoke remains open. |
+| 8. Operational Hardening And Accountant Close Loop      | Local product behavior completed | Operations API/UI now return selected-period accountant close readiness, date-range close controls, job-run retry/dead-letter guidance with redacted actionable errors, packet access history, and deterministic CSV-to-export close-loop fixture coverage. Live Gmail close smoke remains open.                                                                                                   |
 
 ## Outcome
 
@@ -294,8 +294,8 @@ Status: Completed on 2026-06-15.
 
 Make Gmail ingestion reliable enough for accountant workflows, not just a local connector demo.
 
-Status: Local backend/runtime hardening completed on 2026-06-15. Live Gmail smoke
-remains blocked until Google OAuth credentials and a test mailbox are available.
+Status: Local product behavior completed on 2026-06-15. Live Gmail smoke remains
+blocked until Google OAuth credentials and a test mailbox are available.
 
 ## Scope
 
@@ -346,6 +346,19 @@ remains blocked until Google OAuth credentials and a test mailbox are available.
 - `bunx oxfmt --check` passed on this slice's touched files after targeted
   formatting of `packages/app/src/email-inbox.test.ts` and
   `packages/db/src/repositories/integrations.ts`.
+- Bun dev now binds local in-memory document storage and an inline local queue
+  dispatcher, so `/internal/outbox/dispatch` can exercise the existing worker
+  handlers without Cloudflare R2/Queue bindings.
+- Playwright/system Chrome authenticated smoke reached the Inbox page,
+  connected the Mock Email Inbox through the OAuth callback, requested sync,
+  dispatched local outbox jobs, and rendered both synced evidence items:
+  `mock-receipt.pdf` for USD 12.45 and `Coffee Shop` for USD 8.50.
+- Local dispatch drain after the smoke returned
+  `{"scanned":7,"dispatched":6,"failed":1,"skipped":0,"queuedMessages":22}`,
+  then `{"scanned":1,"dispatched":1,"failed":0,"skipped":0,"queuedMessages":4}`,
+  then zero remaining dispatchable events. The one failed event was an older
+  `bank_connection.synced` dev row on a different team; the mock email inbox
+  evidence for the smoke team imported and rendered successfully.
 - Manual live Gmail smoke remains blocked until deployment has Google OAuth
   credentials and a test mailbox.
 
@@ -420,14 +433,14 @@ click smoke still needs a seeded suggestion fixture.
 
 Match or exceed Midday's file export: ZIP with CSV, optional XLSX, attachments, accountant email, retryable jobs, and export history.
 
-Status: Partially completed on 2026-06-15 for synchronous package format depth:
+Status: Local product behavior completed on 2026-06-15 for package format depth:
 CSV/XLSX selection, CSV delimiter, manifest hashes, attachments, skipped
 attachment counts, exported transaction state, and queued object-storage export
 processing, durable packet records, signed download link creation, scoped
 accountant packet download token policy, accountant email-link delivery through
 a provider boundary, and failed export telemetry that leaves transactions
 retryable. Visible export history UI now exists; live email provider setup
-remains open.
+remains a deployment prerequisite.
 
 ## Scope
 
@@ -640,7 +653,7 @@ remains open.
 - [x] Operations UI can explain the latest import, sync, match, and export runs.
 - [x] Operations API can report whether a selected month is ready to send to an accountant.
 - [x] Failed jobs have retry affordances and actionable error messages in the
-  Operations API.
+      Operations API.
 - [x] A representative monthly close fixture exercises CSV import, receipt evidence, review, and export.
 - [x] The system can rerun the close flow without duplicate transactions, documents, or exports.
 
