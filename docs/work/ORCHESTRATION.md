@@ -66,7 +66,7 @@ pass, and the implementing agent has inspected the diff.
 | 22  | Automation Rules                                             | Verified foundation, live/manual automation review blocked  | Slices 8, 20             | Rule/action tests; protected API tests; job contract tests; migration; typecheck/check.                                  |
 | 23  | Public API, OAuth Apps, API Keys, And Webhooks               | Verified foundation, live integration review blocked        | Slices 3, 8              | API contract tests; scope tests; webhook retry/failure tests; migration; typecheck/check.                                |
 | 24  | Accounting, Payments, Messaging, And Email Provider Adapters | Verified foundation, live provider review blocked           | Slices 16, 23            | Adapter contract tests; app/API tests; migration; typecheck/check; manual status review blocked.                         |
-| 25  | Desktop Quick Capture And Native Shell Deepening             | Not started                                                 | Slices 12, 13            | Desktop build/smoke; file capture test.                                                                                  |
+| 25  | Desktop Quick Capture And Native Shell Deepening             | Verified foundation, installed desktop review blocked       | Slices 12, 13            | Desktop build/smoke; file capture test.                                                                                  |
 | 26  | Observability, Admin Tools, And Operations                   | Not started                                                 | Slices 8, 11, 16, 20     | Controlled failure; redaction review; data workflow tests.                                                               |
 | 27  | Security Hardening And Release Gates                         | Not started                                                 | Broad product foundation | Full check suite; integration tests; ignored-error review.                                                               |
 
@@ -228,7 +228,14 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 24     | `bun test packages/integrations/src/providers.test.ts packages/integrations/src/banking.test.ts packages/integrations/src/invoice-delivery.test.ts packages/app/src/integrations.test.ts packages/api/src/router.test.ts`                                                                                                    | Pass    | 29 tests passed for adapter capabilities, token metadata, integration connect/sync/failure/disable use cases, and protected routes.                              |
 | 2026-06-15 slice 24     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
 | 2026-06-15 slice 24     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 261 files.                                                                                                         |
-| 2026-06-15 slice 24     | `bun test packages/integrations/src/providers.test.ts packages/integrations/src/banking.test.ts packages/integrations/src/invoice-delivery.test.ts packages/app/src/integrations.test.ts packages/api/src/router.test.ts`                                                                                                    | Pass    | Final focused rerun after formatting: 29 tests passed.                                                                                                          |
+| 2026-06-15 slice 24     | `bun test packages/integrations/src/providers.test.ts packages/integrations/src/banking.test.ts packages/integrations/src/invoice-delivery.test.ts packages/app/src/integrations.test.ts packages/api/src/router.test.ts`                                                                                                    | Pass    | Final focused rerun after formatting: 29 tests passed.                                                                                                           |
+| 2026-06-15 slice 25     | `bun test apps/desktop/src/bun/shell.test.ts`                                                                                                                                                                                                                                                                                | Pass    | 4 tests passed for deep-link parsing, dashboard URL construction, capture payload encoding, unsupported file rejection, and notification copy.                   |
+| 2026-06-15 slice 25     | `bun run --filter desktop check-types`                                                                                                                                                                                                                                                                                       | Pass    | Desktop package typecheck passed after matching Electrobun tray menu item types.                                                                                 |
+| 2026-06-15 slice 25     | `bun run --filter desktop build`                                                                                                                                                                                                                                                                                             | Pass    | Desktop bundle/build passed; Vite reported the existing large chunk warning and Electrobun skipped codesign/notarization.                                        |
+| 2026-06-15 slice 25     | `bun test packages/app/src/documents.test.ts packages/api/src/router.test.ts apps/desktop/src/bun/shell.test.ts`                                                                                                                                                                                                             | Pass    | 28 tests passed for document upload/download use cases, protected routes, and desktop shell helpers.                                                             |
+| 2026-06-15 slice 25     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
+| 2026-06-15 slice 25     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 263 files.                                                                                                         |
+| 2026-06-15 slice 25     | Browser smoke: local server on `3000`, existing web server on `3001`, open `/dashboard?desktopFocusType=document&desktopFocusId=doc_1#documents`                                                                                                                                                                             | Partial | Protected dashboard deep link redirected to `/login` with auth-session checks returning 200; authenticated desktop upload/manual review remains blocked.         |
 
 ## Commit Log
 
@@ -260,6 +267,7 @@ pass, and the implementing agent has inspected the diff.
 | `04811d5` | Automation rules foundation          | Added event-triggered automation rules, run logs, queue job contracts, protected routes, dashboard panel, tests, and migration.  |
 | `18f24d7` | Public developer platform            | Added scoped API keys, OAuth app/grant records, public REST routes, webhook subscriptions/delivery logs, tests, and migration.   |
 | `b08cfdd` | Integration adapter foundation       | Added generic provider contracts, integration connection/sync persistence, protected routes, dashboard status UI, and migration. |
+| `c8e1d92` | Desktop quick capture shell          | Added Dawn deep links, tray quick capture, file association metadata, dashboard capture handoff, and shell helper tests.         |
 
 ## Implementation Notes
 
@@ -485,6 +493,17 @@ exposes list/connect/sync/disable routes, and the dashboard shows provider
 capabilities, token metadata, latest sync status, failure messages, and disable
 controls.
 
+Slice 25 foundation deepened the existing Electrobun shell without adding
+desktop-only business rules. The desktop app now registers the `dawn` URL scheme
+and capture-friendly file associations, parses `dawn://open/...`,
+`dawn://capture?...`, dashboard, and `file://` entry points through tested helper
+functions, exposes tray actions for opening Dawn and quick file capture, and
+turns supported local files into base64 payloads for the web dashboard. The
+dashboard reuses the existing document upload mutation to receive
+`dawn:desktop-capture` events, applies `teamId` from desktop deep links when
+present, and scrolls to addressable transaction, invoice, document, and inbox
+records by desktop focus parameters.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -578,3 +597,9 @@ controls.
   preservation, idempotent sync logging, provider failure surfacing,
   non-destructive disable behavior, protected API routes, migration generation,
   typecheck/check, and focused tests.
+- Slice 25 still needs installed-app/manual review of OS file association,
+  custom URL scheme launch behavior, tray capture, native notifications, and an
+  authenticated desktop upload against a migrated local or preview database.
+  Current verification covers shell helper behavior, desktop package typecheck,
+  desktop build, protected document/API contracts, workspace checks, and
+  unauthenticated browser redirect through the deep-link dashboard URL.
