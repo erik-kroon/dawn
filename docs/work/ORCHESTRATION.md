@@ -60,7 +60,7 @@ pass, and the implementing agent has inspected the diff.
 | 16  | Invoice Delivery, PDF, Payments, And Recurrence              | Verified foundation, manual sandbox send blocked            | Slices 15, 8             | Lifecycle/app/API/job tests; migration; typecheck/check; HTTP web smoke.                                                 |
 | 17  | Projects And Time Tracking                                   | Verified foundation, manual time flow blocked               | Slice 15                 | Time totals/conversion tests; project/time API tests; migration; typecheck/check; HTTP web smoke.                        |
 | 18  | Reporting And Weekly Insights                                | Verified foundation, authenticated dashboard review blocked | Slices 4, 14, 16, 17     | Report fixture tests; mocked insight tests; job/API tests; typecheck/check; HTTP/browser smoke.                          |
-| 19  | TanStack AI Assistant Read And Suggest Tools                 | Not started                                                 | Slice 18                 | Tool schema tests; permission/refusal tests; manual grounded questions.                                                  |
+| 19  | TanStack AI Assistant Read And Suggest Tools                 | Verified foundation, authenticated assistant review blocked | Slice 18                 | Tool schema tests; app/API permission tests; migration; typecheck/check; HTTP/browser smoke.                             |
 | 20  | AI Draft, Mutate, And Approval Gates                         | Not started                                                 | Slice 19                 | Approval tests; AI actor permission tests; manual approval flow.                                                         |
 | 21  | AI Evaluation Harness                                        | Not started                                                 | Slices 19, 20            | Eval runner with deterministic fixtures.                                                                                 |
 | 22  | Automation Rules                                             | Not started                                                 | Slices 8, 20             | Trigger/action tests; manual event-driven automation.                                                                    |
@@ -203,6 +203,10 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 18     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                                   |
 | 2026-06-15 slice 18     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 246 files.                                                                                                 |
 | 2026-06-15 slice 18     | `curl -I http://localhost:3001/` and `/dashboard`; Browser reload with local API server                                                                                                                                                                                                                                      | Partial | Vite served both routes with 200 responses; Browser reached `/login` after auth check, so authenticated dashboard review remains blocked.                |
+| 2026-06-15 slice 19     | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0014_damp_clea.sql` for assistant threads, messages, and tool calls.                                               |
+| 2026-06-15 slice 19     | `bun test packages/ai/src/insights.test.ts packages/app/src/assistant.test.ts packages/app/src/reporting.test.ts packages/api/src/router.test.ts`                                                                                                                                                                            | Pass    | 27 tests passed for assistant tool schemas, grounded answers, permission denial, non-mutating suggestions, reports, and protected routes.                |
+| 2026-06-15 slice 19     | `bun run check && bun run check-types`                                                                                                                                                                                                                                                                                       | Pass    | `oxlint`/`oxfmt` passed on 248 files; full workspace typecheck/build passed with the existing large chunk warning.                                       |
+| 2026-06-15 slice 19     | `curl -I http://localhost:3001/` and `/dashboard`; Browser reload with local API server                                                                                                                                                                                                                                      | Partial | Vite served both routes with 200 responses; Browser redirected `/dashboard` to `/login` with no new warnings/errors.                                     |
 
 ## Commit Log
 
@@ -227,7 +231,8 @@ pass, and the implementing agent has inspected the diff.
 | `abdb187` | Billing draft foundation             | Added customers, contacts, products/services, exact invoice totals, draft invoice API/UI, and migration.                      |
 | `8499997` | Invoice delivery foundation          | Added invoice PDF preview, confirmed send, payment recording, recurrence jobs, mock email delivery, and dashboard controls.   |
 | `a639988` | Project time foundation              | Added customer-linked projects, time entries, billable reports, invoice conversion, sync contracts, and dashboard controls.   |
-| `d9ecab3` | Reporting and insight foundation     | Added source-cited report queries, weekly insight jobs, persisted insights, protected API route, and dashboard overview.       |
+| `d9ecab3` | Reporting and insight foundation     | Added source-cited report queries, weekly insight jobs, persisted insights, protected API route, and dashboard overview.      |
+| `4a9aaf3` | Assistant read and suggest tools     | Added permissioned assistant tool schemas, persisted conversations/tool calls, protected routes, and dashboard assistant UI.  |
 
 ## Implementation Notes
 
@@ -389,6 +394,18 @@ maps weekly insight due events into generation jobs, and the API exposes a
 protected `reports.overview` route. The dashboard Overview card reads the route
 and links insight sources back to the relevant workflow sections.
 
+Slice 19 foundation added a permissioned assistant read/suggest runtime.
+`packages/ai` now defines tool metadata, zod input schemas, risk levels,
+permission requirements, and deterministic planning/response providers for read
+and suggest tools. The app layer creates or loads assistant threads, persists
+user and assistant messages, executes only permission-allowed read/suggest tools,
+records refused tool calls when required permissions are missing, audits
+assistant messages, and never mutates authoritative business state from suggest
+tools. Postgres stores `assistant_thread`, `assistant_message`, and
+`assistant_tool_call`, the API exposes protected assistant list/thread/ask
+routes, and the dashboard includes a compact assistant panel with cited sources
+and tool-call visibility.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -449,3 +466,8 @@ and links insight sources back to the relevant workflow sections.
   and generated insight rows against a migrated local or preview database.
   Current verification covers report/insight/app/API/job contracts, migration
   generation, typecheck/check, HTTP smoke, and Browser unauthenticated redirect.
+- Slice 19 still needs authenticated assistant questions against known seeded
+  data in a migrated local or preview database. Current verification covers tool
+  schemas, permission denial, grounded citations, persistence, non-mutating
+  suggestions, protected routes, migration generation, typecheck/check, HTTP
+  smoke, and Browser unauthenticated redirect.
