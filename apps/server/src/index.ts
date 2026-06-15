@@ -39,7 +39,9 @@ import { processDocumentExtractionJob } from "./document-extraction";
 import { createR2DocumentObjectStorage } from "./document-storage";
 import { logServerError, requestIdFromHeaders } from "./observability";
 import { createCloudflareOutboxQueuePublisher } from "./outbox-queue";
+import { enforcePublicApiRateLimit } from "./rate-limit";
 import { publishTenantSyncInvalidation } from "./tenant-sync";
+import { RateLimitError } from "@dawn/app/rate-limit";
 
 export { TenantCoordinator } from "./tenant-coordinator";
 
@@ -81,6 +83,21 @@ app.use(
 );
 
 app.on(["POST", "GET"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+
+app.use("/api/v1/*", async (c, next) => {
+  try {
+    enforcePublicApiRateLimit({ headers: c.req.raw.headers, path: c.req.path });
+  } catch (error) {
+    if (error instanceof RateLimitError) {
+      c.header("retry-after", String(error.retryAfterSeconds));
+      return c.json({ error: error.message }, 429);
+    }
+
+    throw error;
+  }
+
+  await next();
+});
 
 app.put("/documents/upload/:token", async (c) => {
   let payload: Awaited<ReturnType<typeof verifyDocumentUrlToken>>;

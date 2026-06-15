@@ -14,6 +14,9 @@ export type SignedDocumentUrlPayload = {
   expiresAt: string;
 };
 
+const maxUploadTtlSeconds = 15 * 60;
+const maxDownloadTtlSeconds = 5 * 60;
+
 export function createDocumentUrlSigner(input: {
   baseUrl: string;
   secret: string;
@@ -22,7 +25,7 @@ export function createDocumentUrlSigner(input: {
 }): DocumentUrlSigner {
   return {
     async createUploadUrl(payload) {
-      const expiresAt = expiresAtIso(input.uploadTtlSeconds ?? 900);
+      const expiresAt = expiresAtIso(Math.min(input.uploadTtlSeconds ?? 900, maxUploadTtlSeconds));
       const token = await signDocumentUrlPayload(input.secret, {
         kind: "upload",
         ...payload,
@@ -35,7 +38,9 @@ export function createDocumentUrlSigner(input: {
       };
     },
     async createDownloadUrl(payload) {
-      const expiresAt = expiresAtIso(input.downloadTtlSeconds ?? 300);
+      const expiresAt = expiresAtIso(
+        Math.min(input.downloadTtlSeconds ?? 300, maxDownloadTtlSeconds),
+      );
       const token = await signDocumentUrlPayload(input.secret, {
         kind: "download",
         ...payload,
@@ -68,6 +73,7 @@ export async function verifyDocumentUrlToken(input: {
   }
 
   const payload = JSON.parse(base64UrlDecode(encodedPayload)) as SignedDocumentUrlPayload;
+  assertDocumentUrlPayloadPolicy(payload);
 
   if (payload.kind !== input.kind) {
     throw new Error("Invalid document URL token");
@@ -78,6 +84,32 @@ export async function verifyDocumentUrlToken(input: {
   }
 
   return payload;
+}
+
+export function assertDocumentUrlPayloadPolicy(payload: SignedDocumentUrlPayload) {
+  const expectedPrefix = `teams/${payload.teamId}/documents/${payload.documentId}/versions/${payload.versionId}/`;
+
+  if (
+    !payload.teamId ||
+    !payload.documentId ||
+    !payload.versionId ||
+    !payload.objectKey.startsWith(expectedPrefix)
+  ) {
+    throw new Error("Document URL object key is out of scope");
+  }
+
+  const segments = payload.objectKey.split("/");
+
+  if (
+    segments.some((segment) => !segment || segment === "." || segment === "..") ||
+    payload.objectKey.includes("\\")
+  ) {
+    throw new Error("Document URL object key is out of scope");
+  }
+
+  if (payload.kind === "upload" && (!payload.actorId || !payload.requestId || !payload.byteSize)) {
+    throw new Error("Upload URL is missing required actor metadata");
+  }
 }
 
 async function signDocumentUrlPayload(secret: string, payload: SignedDocumentUrlPayload) {

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { createDocumentUrlSigner, verifyDocumentUrlToken } from "./document-url";
+import {
+  assertDocumentUrlPayloadPolicy,
+  createDocumentUrlSigner,
+  verifyDocumentUrlToken,
+} from "./document-url";
 
 describe("document URL signer", () => {
   test("creates and verifies signed upload tokens", async () => {
@@ -64,5 +68,68 @@ describe("document URL signer", () => {
         kind: "download",
       }),
     ).rejects.toThrow("Invalid document URL token");
+  });
+
+  test("enforces scoped object keys and upload actor metadata", () => {
+    expect(() =>
+      assertDocumentUrlPayloadPolicy({
+        kind: "download",
+        teamId: "team_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        objectKey: "teams/team_2/documents/doc_1/versions/ver_1/receipt.pdf",
+        fileName: "receipt.pdf",
+        contentType: "application/pdf",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ).toThrow("Document URL object key is out of scope");
+    expect(() =>
+      assertDocumentUrlPayloadPolicy({
+        kind: "download",
+        teamId: "team_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        objectKey: "teams/team_1/documents/doc_1/versions/ver_1/../secret.pdf",
+        fileName: "receipt.pdf",
+        contentType: "application/pdf",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ).toThrow("Document URL object key is out of scope");
+    expect(() =>
+      assertDocumentUrlPayloadPolicy({
+        kind: "upload",
+        teamId: "team_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        objectKey: "teams/team_1/documents/doc_1/versions/ver_1/receipt.pdf",
+        fileName: "receipt.pdf",
+        contentType: "application/pdf",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ).toThrow("Upload URL is missing required actor metadata");
+  });
+
+  test("caps signed URL TTLs", async () => {
+    const signer = createDocumentUrlSigner({
+      baseUrl: "https://files.example.com",
+      secret: "test_secret",
+      downloadTtlSeconds: 60 * 60,
+    });
+    const signed = await signer.createDownloadUrl({
+      teamId: "team_1",
+      documentId: "doc_1",
+      versionId: "ver_1",
+      objectKey: "teams/team_1/documents/doc_1/versions/ver_1/receipt.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+    });
+    const token = new URL(signed.url).pathname.split("/").pop() ?? "";
+    const payload = await verifyDocumentUrlToken({
+      secret: "test_secret",
+      token,
+      kind: "download",
+    });
+
+    expect(new Date(payload.expiresAt).getTime() - Date.now()).toBeLessThanOrEqual(5 * 60 * 1_000);
   });
 });

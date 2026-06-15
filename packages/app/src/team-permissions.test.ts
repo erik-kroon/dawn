@@ -272,9 +272,16 @@ describe("team permissions", () => {
         "transactions.categorize",
         "documents.read",
         "documents.write",
+        "projects.read",
+        "projects.write",
         "invoices.read",
         "invoices.write",
+        "integrations.read",
+        "integrations.write",
         "assistant.use",
+        "automations.read",
+        "automations.write",
+        "automations.run",
       ],
     });
     expect(repository.defaultWorkspaceCalls).toBe(0);

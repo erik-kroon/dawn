@@ -1119,11 +1119,11 @@ Raise confidence before production use of sensitive business data.
 
 ## Acceptance Criteria
 
-- [ ] CI or local verification command gates type, lint, format, and tests.
-- [ ] Tenant isolation tests exist for critical resources.
-- [ ] Public and assistant endpoints are rate-limited.
-- [ ] File access is permission-scoped.
-- [ ] Webhook verification is tested.
+- [x] CI or local verification command gates type, lint, format, and tests.
+- [x] Tenant isolation tests exist for critical resources.
+- [x] Public and assistant endpoints are rate-limited.
+- [x] File access is permission-scoped.
+- [x] Webhook verification is tested.
 
 ## Verification
 

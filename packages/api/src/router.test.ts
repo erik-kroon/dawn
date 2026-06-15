@@ -2210,6 +2210,80 @@ describe("appRouter", () => {
     });
   });
 
+  test("rejects cross-team reads for critical protected resources", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Owned Team");
+    repository.teams.set("team_2", "Other Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    repository.documents.set("doc_other", {
+      id: "doc_other",
+      teamId: "team_2",
+      title: "Other team receipt",
+      status: "uploaded",
+      currentVersionId: "ver_other",
+      createdByActorId: "user_2",
+      createdAt: "2026-06-15T00:00:00.000Z",
+      updatedAt: "2026-06-15T00:00:00.000Z",
+    });
+    repository.customers.set("customer_other", {
+      id: "customer_other",
+      teamId: "team_2",
+      name: "Other Customer",
+      email: "other@example.com",
+      billingAddress: null,
+      createdAt: "2026-06-15T00:00:00.000Z",
+      updatedAt: "2026-06-15T00:00:00.000Z",
+    });
+    repository.apiKeys.set("api_key_other", {
+      id: "api_key_other",
+      teamId: "team_2",
+      name: "Other key",
+      keyPrefix: "dawn_other",
+      keyHash: "hash_other",
+      scopes: ["transactions.read"],
+      createdByActorId: "user_2",
+      lastUsedAt: null,
+      revokedAt: null,
+      createdAt: "2026-06-15T00:00:00.000Z",
+    });
+    repository.jobRuns.set("job_other", {
+      id: "job_other",
+      teamId: "team_2",
+      outboxEventId: "outbox_other",
+      jobType: "webhook.deliver",
+      queueName: "dawn-jobs",
+      status: "failed",
+      attempt: 1,
+      idempotencyKey: "webhook:deliver:outbox_other",
+      error: "other team failure",
+      createdAt: "2026-06-15T00:00:00.000Z",
+      updatedAt: "2026-06-15T00:00:00.000Z",
+    });
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+
+    await expect(call(router.documents.list, { teamId: "team_2" }, context)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: "You cannot read documents for this team",
+    });
+    await expect(call(router.billing.list, { teamId: "team_2" }, context)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: "You cannot read billing data for this team",
+    });
+    await expect(call(router.developers.list, { teamId: "team_2" }, context)).rejects.toMatchObject(
+      {
+        code: "FORBIDDEN",
+        message: "You cannot manage developer settings for this team",
+      },
+    );
+    await expect(call(router.operations.list, { teamId: "team_2" }, context)).rejects.toMatchObject(
+      {
+        code: "FORBIDDEN",
+        message: "You cannot read operations for this team",
+      },
+    );
+  });
+
   test("returns team directory data for team managers", async () => {
     const repository = new MemoryTransactionReviewRepository();
     repository.teams.set("team_1", "Test Team");

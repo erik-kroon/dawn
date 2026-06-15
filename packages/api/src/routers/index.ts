@@ -62,6 +62,7 @@ import {
   updateDraftInvoice,
   updateTeamMemberRole,
 } from "@dawn/app";
+import { RateLimitError } from "@dawn/app/rate-limit";
 import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
 import { env } from "@dawn/env/server";
 import {
@@ -76,6 +77,7 @@ import { z } from "zod";
 
 import { protectedProcedure, publicProcedure } from "../index";
 import { createDocumentUrlSigner } from "../document-url";
+import { enforceAssistantRateLimit } from "../rate-limit";
 
 export type AppRouterDependencies = {
   transactionReviewRepository: DawnRepository;
@@ -513,6 +515,10 @@ const updateTeamMemberRoleInput = z.object({
 });
 
 function mapAppError(error: unknown): never {
+  if (error instanceof RateLimitError) {
+    throw new ORPCError("TOO_MANY_REQUESTS", { message: error.message });
+  }
+
   if (error instanceof AppError) {
     throw new ORPCError(error.code, { message: error.message });
   }
@@ -804,6 +810,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         }),
       ask: protectedProcedure.input(assistantAskInput).handler(async ({ context, input }) => {
         try {
+          enforceAssistantRateLimit({
+            actorId: context.session.user.id,
+            teamId: input.teamId,
+          });
           return await sendAssistantMessage(
             transactionReviewRepository,
             {
