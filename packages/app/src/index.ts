@@ -1115,6 +1115,24 @@ export type DataWorkflowRequestResult = {
   replayed?: boolean;
 };
 
+export type TeamDataExportSnapshot = {
+  schemaVersion: 1;
+  teamId: string;
+  format: "json";
+  generatedAt: string;
+  sourceOutboxEventId: string;
+  ledger: ReviewWorkspaceData;
+  operations: {
+    auditEvents: AuditLogEntry[];
+    outboxEvents: OutboxEvent[];
+    jobRuns: JobRun[];
+    providerSyncRuns: ProviderSyncRun[];
+    integrationSyncRuns: IntegrationSyncRun[];
+    automationRuns: AutomationRun[];
+    webhookDeliveries: WebhookDelivery[];
+  };
+};
+
 export type OperationsWorkspace = {
   teamId: string;
   requestTrace: {
@@ -2477,6 +2495,10 @@ function normalizeOperationsLimit(limit?: number) {
   return Math.min(Math.max(Number.isInteger(limit) ? (limit ?? 20) : 20, 1), 50);
 }
 
+function normalizeExportLimit(limit?: number) {
+  return Math.min(Math.max(Number.isInteger(limit) ? (limit ?? 500) : 500, 1), 1_000);
+}
+
 function operationsMetrics(input: {
   outboxEvents: OutboxEvent[];
   jobRuns: JobRun[];
@@ -2783,6 +2805,56 @@ export async function requestTeamDataExport(
 
     return result;
   });
+}
+
+export async function buildTeamDataExportSnapshot(
+  repository: DawnRepository,
+  input: {
+    teamId: string;
+    sourceOutboxEventId: string;
+    generatedAt?: string;
+    limit?: number;
+  },
+): Promise<TeamDataExportSnapshot> {
+  const limit = normalizeExportLimit(input.limit);
+  const systemActor: Actor = { id: "system:data-export", type: "system" };
+  const [
+    ledger,
+    auditEvents,
+    outboxEvents,
+    jobRuns,
+    providerSyncRuns,
+    integrationSyncRuns,
+    automationRuns,
+    webhookDeliveries,
+  ] = await Promise.all([
+    repository.listWorkspace(systemActor, input.teamId),
+    repository.listAuditEvents({ teamId: input.teamId, limit }),
+    repository.listOutboxEvents(input.teamId, limit),
+    repository.listJobRuns(input.teamId, limit),
+    repository.listProviderSyncRuns(input.teamId, limit),
+    repository.listIntegrationSyncRuns(input.teamId, limit),
+    repository.listAutomationRuns(input.teamId, limit),
+    repository.listWebhookDeliveries(input.teamId, limit),
+  ]);
+
+  return {
+    schemaVersion: 1,
+    teamId: input.teamId,
+    format: "json",
+    generatedAt: input.generatedAt ?? new Date().toISOString(),
+    sourceOutboxEventId: input.sourceOutboxEventId,
+    ledger,
+    operations: {
+      auditEvents: auditEvents.map(redactAuditLogEntry),
+      outboxEvents: outboxEvents.map(redactOutboxEvent),
+      jobRuns: jobRuns.map(redactJobRun),
+      providerSyncRuns: providerSyncRuns.map(redactProviderSyncRun),
+      integrationSyncRuns: integrationSyncRuns.map(redactIntegrationSyncRun),
+      automationRuns: automationRuns.map(redactAutomationRun),
+      webhookDeliveries: webhookDeliveries.map(redactWebhookDelivery),
+    },
+  };
 }
 
 export async function requestTeamDataDeletion(

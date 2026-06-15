@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   AppError,
+  buildTeamDataExportSnapshot,
   listOperationsWorkspace,
   redactOperationalText,
   redactOperationalValue,
@@ -61,6 +62,44 @@ class MemoryOperationsRepository {
       .filter((event) => !input.entityId || event.entityId === input.entityId)
       .filter((event) => !input.requestId || event.requestId === input.requestId)
       .slice(0, input.limit);
+  }
+
+  async listWorkspace() {
+    return {
+      teamId: "team_1",
+      teamName: "Acme Studio",
+      categories: [
+        {
+          id: "category_1",
+          teamId: "team_1",
+          name: "Software",
+        },
+      ],
+      transactions: [
+        {
+          id: "transaction_1",
+          teamId: "team_1",
+          accountId: "account_1",
+          description: "Figma subscription",
+          postedAt: "2026-06-14T00:00:00.000Z",
+          money: { amountMinor: -1200, currency: "USD" },
+          type: "expense",
+          source: "manual",
+          reviewState: "needs_review",
+          categoryId: "category_1",
+          counterpartyId: null,
+          transferGroupId: null,
+          tagIds: [],
+          createdAt: "2026-06-14T00:00:00.000Z",
+          updatedAt: "2026-06-14T00:00:00.000Z",
+        },
+      ],
+      sync: {
+        collection: "transactions",
+        cursor: "2026-06-14T00:00:00.000Z",
+        conflictPolicy: "server_wins_for_financial_state",
+      },
+    };
   }
 
   async listOutboxEvents(teamId: string, limit: number) {
@@ -316,6 +355,60 @@ describe("operations workspace", () => {
     expect(workspace.dataWorkflows[0]).toMatchObject({
       type: "team_data_export",
       status: "queued",
+    });
+  });
+
+  test("builds redacted team data export snapshots", async () => {
+    const repository = new MemoryOperationsRepository();
+    repository.outboxEvents.push({
+      id: "outbox_1",
+      teamId: "team_1",
+      type: "team_data.export_requested",
+      version: 1,
+      payload: { accessToken: "secret", email: "owner@example.com" },
+      dispatchAttempts: 0,
+      status: "dispatched",
+      lastError: null,
+      nextAttemptAt: null,
+      occurredAt: "2026-06-15T00:00:00.000Z",
+      processedAt: "2026-06-15T00:00:01.000Z",
+    });
+    repository.auditEvents.push({
+      id: "audit_1",
+      teamId: "team_1",
+      actorId: "user_1",
+      requestId: "request_1",
+      action: "team_data.export_requested",
+      entityType: "team",
+      entityId: "team_1",
+      metadata: { email: "owner@example.com", token: "secret" },
+      occurredAt: "2026-06-15T00:00:00.000Z",
+    });
+
+    const snapshot = await buildTeamDataExportSnapshot(repository as unknown as DawnRepository, {
+      teamId: "team_1",
+      sourceOutboxEventId: "outbox_1",
+      generatedAt: "2026-06-15T00:00:02.000Z",
+    });
+
+    expect(snapshot).toMatchObject({
+      schemaVersion: 1,
+      teamId: "team_1",
+      format: "json",
+      generatedAt: "2026-06-15T00:00:02.000Z",
+      sourceOutboxEventId: "outbox_1",
+      ledger: {
+        teamName: "Acme Studio",
+        transactions: [{ id: "transaction_1" }],
+      },
+    });
+    expect(snapshot.operations.auditEvents[0]?.metadata).toEqual({
+      email: "[redacted]",
+      token: "[redacted]",
+    });
+    expect(snapshot.operations.outboxEvents[0]?.payload).toEqual({
+      accessToken: "[redacted]",
+      email: "[redacted]",
     });
   });
 

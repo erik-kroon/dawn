@@ -44,6 +44,7 @@ import { Hono, type Context as HonoContext } from "hono";
 import { cors } from "hono/cors";
 
 import { resolveCorsOrigin } from "./cors";
+import { processTeamDataExportJob } from "./data-export";
 import { processDocumentExtractionJob } from "./document-extraction";
 import { createR2DocumentObjectStorage } from "./document-storage";
 import { logServerError, requestIdFromHeaders } from "./observability";
@@ -667,18 +668,10 @@ async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnC
   }
 
   if (message.body.type === "team_data.export") {
-    await new DrizzleTransactionReviewRepository().appendAuditEvent({
-      teamId: message.body.teamId,
-      actorId: "system:data-workflow",
-      requestId: message.body.idempotencyKey,
-      action: "team_data.export_job_staged",
-      entityType: "team",
-      entityId: message.body.teamId,
-      metadata: {
-        format: message.body.format,
-        sourceOutboxEventId: message.body.sourceOutboxEventId,
-        nextStep: "write_signed_r2_archive",
-      },
+    await processTeamDataExportJob({
+      repository: new DrizzleTransactionReviewRepository(),
+      storage: createR2DocumentObjectStorage(env.DAWN_DOCUMENTS),
+      message: message.body,
     });
   }
 
