@@ -411,6 +411,7 @@ describe("inbox transaction matching", () => {
     const suggestions = suggestInboxTransactionMatches(
       {
         ...baseInput,
+        documentText: null,
         fields: {
           ...baseInput.fields,
           merchantName: null,
@@ -481,6 +482,139 @@ describe("inbox transaction matching", () => {
     expect(suggestions[0]?.score ?? 0).toBeLessThan(0.75);
     expect(suggestions[0]?.confidence).not.toBe("high");
     expect(suggestions[0]?.signals.risk).toBeLessThan(0);
+  });
+
+  test("uses shared base amount as cross-currency evidence without outranking same-currency matches", () => {
+    const crossCurrencySuggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        documentText: null,
+        fields: {
+          ...baseInput.fields,
+          totalAmountMinor: 1000,
+          currency: "EUR",
+          baseAmountMinor: 1200,
+          baseCurrency: "USD",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_cross_currency",
+            description: "Figma subscription",
+            money: { amountMinor: -1200, currency: "USD" },
+            baseMoney: { amountMinor: -1200, currency: "USD" },
+          }),
+          counterpartyName: "Figma Inc",
+        },
+      ],
+    );
+    const sameCurrencySuggestions = suggestInboxTransactionMatches(baseInput, [
+      {
+        transaction: transaction({ id: "txn_same_currency" }),
+        counterpartyName: "Figma Inc",
+      },
+    ]);
+
+    expect(crossCurrencySuggestions[0]?.transactionId).toBe("txn_cross_currency");
+    expect(crossCurrencySuggestions[0]?.confidence).toBe("medium");
+    expect(crossCurrencySuggestions[0]?.signals.baseAmount).toBe(0.28);
+    expect(crossCurrencySuggestions[0]?.signals.baseCurrency).toBe(0.06);
+    expect(crossCurrencySuggestions[0]?.score ?? 0).toBeLessThan(
+      sameCurrencySuggestions[0]?.score ?? 0,
+    );
+  });
+
+  test("keeps cross-currency matches without base amount evidence below suggestion thresholds", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        fields: {
+          ...baseInput.fields,
+          totalAmountMinor: 1000,
+          currency: "EUR",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_missing_base",
+            description: "Figma subscription",
+            money: { amountMinor: -1200, currency: "USD" },
+          }),
+          counterpartyName: "Figma Inc",
+        },
+      ],
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_missing_base");
+    expect(suggestions[0]?.score ?? 0).toBeLessThan(0.35);
+    expect(suggestions[0]?.confidence).toBe("low");
+    expect(suggestions[0]?.signals.baseAmount).toBeUndefined();
+  });
+
+  test("rejects cross-currency matches with different base currencies", () => {
+    const decision = scoreDocumentTransactionMatch({
+      document: {
+        id: baseInput.documentId,
+        inboxItemId: baseInput.inboxItemId,
+        documentText: baseInput.documentText,
+        fields: {
+          ...baseInput.fields,
+          totalAmountMinor: 1000,
+          currency: "EUR",
+          baseAmountMinor: 1200,
+          baseCurrency: "SEK",
+        },
+      },
+      transaction: {
+        transaction: transaction({
+          id: "txn_base_currency_mismatch",
+          description: "Figma subscription",
+          money: { amountMinor: -1200, currency: "USD" },
+          baseMoney: { amountMinor: -1200, currency: "USD" },
+        }),
+        counterpartyName: "Figma Inc",
+      },
+    });
+
+    expect(decision.matchType).toBe("none");
+    expect(decision.signals.baseCurrency).toMatchObject({
+      matched: false,
+      reason: "Base currency differs",
+    });
+  });
+
+  test("rejects cross-currency matches with large base amount mismatches", () => {
+    const decision = scoreDocumentTransactionMatch({
+      document: {
+        id: baseInput.documentId,
+        inboxItemId: baseInput.inboxItemId,
+        documentText: baseInput.documentText,
+        fields: {
+          ...baseInput.fields,
+          totalAmountMinor: 1000,
+          currency: "EUR",
+          baseAmountMinor: 9000,
+          baseCurrency: "USD",
+        },
+      },
+      transaction: {
+        transaction: transaction({
+          id: "txn_base_amount_mismatch",
+          description: "Figma subscription",
+          money: { amountMinor: -1200, currency: "USD" },
+          baseMoney: { amountMinor: -1200, currency: "USD" },
+        }),
+        counterpartyName: "Figma Inc",
+      },
+    });
+
+    expect(decision.matchType).toBe("none");
+    expect(decision.signals.baseAmount).toMatchObject({
+      matched: false,
+      reason: "Base amount differs",
+    });
   });
 
   test("keeps name-only false positives below safe thresholds", () => {

@@ -208,6 +208,7 @@ export class MemoryAppRepository implements LedgerRepository {
       description: input.draft.description,
       postedAt: input.draft.postedAt,
       money: input.draft.money,
+      baseMoney: input.draft.baseMoney ?? null,
       type: input.draft.type,
       source: input.draft.source,
       counterpartyId: input.draft.counterpartyId ?? null,

@@ -20,6 +20,7 @@ export type Transaction = {
   description: string;
   postedAt: string;
   money: Money;
+  baseMoney?: Money | null;
   type?: TransactionType;
   source?: TransactionSource;
   counterpartyId?: string | null;
@@ -71,6 +72,7 @@ export type LedgerTransactionDraft = {
   description: string;
   postedAt: string;
   money: Money;
+  baseMoney?: Money | null;
   type: TransactionType;
   source: TransactionSource;
   categoryId?: string | null;
@@ -154,6 +156,9 @@ export function applyTransactionReview(
 
 export function assertLedgerTransactionDraft(draft: LedgerTransactionDraft) {
   assertValidMoney(draft.money);
+  if (draft.baseMoney) {
+    assertValidMoney(draft.baseMoney);
+  }
 
   if (!draft.teamId || !draft.accountId) {
     throw new Error("Ledger transaction requires team and account");

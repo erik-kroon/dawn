@@ -129,6 +129,8 @@ export type DocumentExtractionFields = {
   invoiceNumber?: string | null;
   totalAmountMinor?: number | null;
   currency?: string | null;
+  baseAmountMinor?: number | null;
+  baseCurrency?: string | null;
   taxAmountMinor?: number | null;
 };
 
@@ -1454,6 +1456,11 @@ function normalizeDocumentExtractionFields(
         ? fields.totalAmountMinor
         : null,
     currency: normalizedOptionalText(fields.currency)?.toUpperCase() ?? null,
+    baseAmountMinor:
+      typeof fields.baseAmountMinor === "number" && Number.isSafeInteger(fields.baseAmountMinor)
+        ? fields.baseAmountMinor
+        : null,
+    baseCurrency: normalizedOptionalText(fields.baseCurrency)?.toUpperCase() ?? null,
     taxAmountMinor:
       typeof fields.taxAmountMinor === "number" && Number.isSafeInteger(fields.taxAmountMinor)
         ? fields.taxAmountMinor

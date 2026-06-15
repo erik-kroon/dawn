@@ -2163,6 +2163,7 @@ function normalizeLedgerTransactionDraft(
     description: command.description.trim(),
     postedAt: new Date(command.postedAt).toISOString(),
     money: command.money,
+    baseMoney: command.baseMoney ?? null,
     type: command.type,
     source: command.source,
     categoryId: command.categoryId ?? null,

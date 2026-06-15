@@ -2,7 +2,7 @@
 
 Triage: ready-for-agent
 Publication: Local repo artifact. No project issue tracker or remote is assumed.
-Status: Slice 6 implemented; Slice 7 next
+Status: Slice 7 implemented; Slice 8 next
 Date: 2026-06-15
 Source material: `docs/PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, Dawn matching code, and Midday reference matching docs/code under `ref/midday`.
 
@@ -394,17 +394,26 @@ Support currency/base-currency matching without using JavaScript floating point 
 
 ## Acceptance Criteria
 
-- [ ] Same-currency exact matches remain strongest.
-- [ ] Cross-currency matches require shared base currency evidence or stay low confidence.
-- [ ] Small, medium, and large cross-currency tolerances are bounded and deterministic.
-- [ ] Large base-amount mismatches are rejected.
-- [ ] Base amount fields use exact minor units and do not weaken authoritative money rules.
+- [x] Same-currency exact matches remain strongest.
+- [x] Cross-currency matches require shared base currency evidence or stay low confidence.
+- [x] Small, medium, and large cross-currency tolerances are bounded and deterministic.
+- [x] Large base-amount mismatches are rejected.
+- [x] Base amount fields use exact minor units and do not weaken authoritative money rules.
+
+## Implementation Notes
+
+- Added optional `baseMoney` to transaction domain types and ledger drafts, validating it with the existing exact minor-unit `Money` value object.
+- Added nullable `base_amount_minor` and `base_currency` transaction columns plus Drizzle migration `0021_free_ogun.sql`.
+- Added optional extraction/matching fields for `baseAmountMinor` and `baseCurrency`.
+- Domain scoring now keeps same-currency exact matches strongest, uses base amount only as supporting evidence, and rejects conflicting base-currency or large base-amount mismatches.
+- DB candidate retrieval admits cross-currency candidates only when both sides expose matching base-money evidence; final ranking remains in the domain scorer.
 
 ## Verification
 
-- Domain tests for exact same-currency, plausible cross-currency, missing base amount, different base currency, and large base mismatch.
-- `bun test packages/domain/src/matching.test.ts packages/domain/src/money.test.ts`
-- `bun run check-types`
+- [x] Domain tests for exact same-currency, plausible cross-currency, missing base amount, different base currency, and large base mismatch.
+- [x] `bun test packages/domain/src/matching.test.ts packages/domain/src/money.test.ts`
+- [x] `bun test packages/app/src/inbox-matching.test.ts packages/db/src/dawn-repository.pglite.test.ts`
+- [x] `bun run check-types`
 
 ## Dependencies
 

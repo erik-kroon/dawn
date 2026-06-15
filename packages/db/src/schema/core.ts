@@ -218,6 +218,8 @@ export const transaction = pgTable(
     postedAt: timestamp("posted_at").notNull(),
     amountMinor: integer("amount_minor").notNull(),
     currency: text("currency").notNull(),
+    baseAmountMinor: integer("base_amount_minor"),
+    baseCurrency: text("base_currency"),
     type: text("type").default("expense").notNull(),
     source: text("source").default("manual").notNull(),
     counterpartyId: text("counterparty_id").references(() => counterparty.id, {

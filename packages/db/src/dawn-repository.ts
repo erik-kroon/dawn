@@ -1419,14 +1419,46 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       )`,
     ];
     const currency = extraction.fields.currency?.trim().toUpperCase();
+    const baseCurrency = extraction.fields.baseCurrency?.trim().toUpperCase();
+    const baseAmountMinor =
+      typeof extraction.fields.baseAmountMinor === "number" &&
+      Number.isSafeInteger(extraction.fields.baseAmountMinor)
+        ? Math.abs(extraction.fields.baseAmountMinor)
+        : null;
+    const hasBaseMoneyEvidence = Boolean(baseCurrency && baseAmountMinor != null);
 
     if (currency) {
-      conditions.push(eq(schema.transaction.currency, currency));
+      conditions.push(
+        hasBaseMoneyEvidence
+          ? sql`(
+              ${schema.transaction.currency} = ${currency}
+              or (
+                ${schema.transaction.baseCurrency} = ${baseCurrency}
+                and abs(${schema.transaction.baseAmountMinor}) = ${baseAmountMinor}
+              )
+            )`
+          : eq(schema.transaction.currency, currency),
+      );
     }
 
     if (extraction.fields.totalAmountMinor != null) {
       const amountMinor = Math.abs(extraction.fields.totalAmountMinor);
-      conditions.push(sql`abs(${schema.transaction.amountMinor}) = ${amountMinor}`);
+      conditions.push(
+        hasBaseMoneyEvidence
+          ? sql`(
+              abs(${schema.transaction.amountMinor}) = ${amountMinor}
+              or (
+                ${schema.transaction.baseCurrency} = ${baseCurrency}
+                and abs(${schema.transaction.baseAmountMinor}) = ${baseAmountMinor}
+              )
+            )`
+          : sql`abs(${schema.transaction.amountMinor}) = ${amountMinor}`,
+      );
+    } else if (hasBaseMoneyEvidence) {
+      conditions.push(sql`
+        ${schema.transaction.baseCurrency} = ${baseCurrency}
+        and abs(${schema.transaction.baseAmountMinor}) = ${baseAmountMinor}
+      `);
     }
 
     const issuedAt = parseCandidateDate(extraction.fields.issuedAt);
@@ -1463,6 +1495,12 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     const hasPostedAt = !Number.isNaN(postedAt.getTime());
     const amountMinor = Math.abs(input.transaction.money.amountMinor);
     const currency = input.transaction.money.currency.toUpperCase();
+    const baseCurrency = input.transaction.baseMoney?.currency.toUpperCase();
+    const baseAmountMinor =
+      input.transaction.baseMoney && Number.isSafeInteger(input.transaction.baseMoney.amountMinor)
+        ? Math.abs(input.transaction.baseMoney.amountMinor)
+        : null;
+    const hasBaseMoneyEvidence = Boolean(baseCurrency && baseAmountMinor != null);
     const rows = await this.client
       .select({
         item: schema.inboxItem,
@@ -1493,14 +1531,26 @@ export class DrizzleDawnRepository implements DrizzleRepository {
           eq(schema.inboxItem.teamId, input.teamId),
           eq(schema.inboxItem.status, "needs_review"),
           eq(schema.inboxItem.extractionStatus, "completed"),
-          sql`(
-            ${schema.documentExtraction.fields}->>'currency' is null
-            or upper(${schema.documentExtraction.fields}->>'currency') = ${currency}
-          )`,
-          sql`(
-            ${schema.documentExtraction.fields}->>'totalAmountMinor' is null
-            or abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::integer) = ${amountMinor}
-          )`,
+          hasBaseMoneyEvidence
+            ? sql`(
+                ${schema.documentExtraction.fields}->>'currency' is null
+                or upper(${schema.documentExtraction.fields}->>'currency') = ${currency}
+                or upper(${schema.documentExtraction.fields}->>'baseCurrency') = ${baseCurrency}
+              )`
+            : sql`(
+                ${schema.documentExtraction.fields}->>'currency' is null
+                or upper(${schema.documentExtraction.fields}->>'currency') = ${currency}
+              )`,
+          hasBaseMoneyEvidence
+            ? sql`(
+                ${schema.documentExtraction.fields}->>'totalAmountMinor' is null
+                or abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::integer) = ${amountMinor}
+                or abs((${schema.documentExtraction.fields}->>'baseAmountMinor')::integer) = ${baseAmountMinor}
+              )`
+            : sql`(
+                ${schema.documentExtraction.fields}->>'totalAmountMinor' is null
+                or abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::integer) = ${amountMinor}
+              )`,
           hasPostedAt
             ? sql`(
                 ${schema.documentExtraction.fields}->>'issuedAt' is null
@@ -3197,6 +3247,8 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         postedAt: new Date(input.draft.postedAt),
         amountMinor: input.draft.money.amountMinor,
         currency: input.draft.money.currency,
+        baseAmountMinor: input.draft.baseMoney?.amountMinor ?? null,
+        baseCurrency: input.draft.baseMoney?.currency ?? null,
         type: input.draft.type,
         source: input.draft.source,
         counterpartyId: input.draft.counterpartyId ?? null,
@@ -4307,6 +4359,13 @@ function mapTransaction(transaction: typeof schema.transaction.$inferSelect): Tr
       amountMinor: transaction.amountMinor,
       currency: transaction.currency,
     },
+    baseMoney:
+      transaction.baseAmountMinor != null && transaction.baseCurrency
+        ? {
+            amountMinor: transaction.baseAmountMinor,
+            currency: transaction.baseCurrency,
+          }
+        : null,
     type: transaction.type as Transaction["type"],
     source: transaction.source as Transaction["source"],
     counterpartyId: transaction.counterpartyId,

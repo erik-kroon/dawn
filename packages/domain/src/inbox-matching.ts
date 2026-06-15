@@ -1,3 +1,4 @@
+import type { Money } from "./money";
 import type { Transaction } from "./transactions";
 
 export type DocumentMatchFields = {
@@ -17,6 +18,8 @@ export type DocumentMatchFields = {
   invoiceNumber?: string | null;
   totalAmountMinor?: number | null;
   currency?: string | null;
+  baseAmountMinor?: number | null;
+  baseCurrency?: string | null;
   taxAmountMinor?: number | null;
 };
 
@@ -30,6 +33,7 @@ export type DocumentMatchSubject = {
 
 export type TransactionMatchSubject = {
   transaction: Transaction;
+  baseMoney?: Money | null;
   counterpartyName?: string | null;
   providerReference?: string | null;
 };
@@ -44,6 +48,8 @@ export type MatchSignal = {
 export type MatchSignals = {
   amount?: MatchSignal;
   currency?: MatchSignal;
+  baseAmount?: MatchSignal;
+  baseCurrency?: MatchSignal;
   date?: MatchSignal;
   name?: MatchSignal;
   reference?: MatchSignal;
@@ -138,6 +144,8 @@ export type InboxMatchConfidence = "low" | "medium" | "high";
 export type InboxMatchSignalScores = {
   amount?: number;
   currency?: number;
+  baseAmount?: number;
+  baseCurrency?: number;
   date?: number;
   counterparty?: number;
   name?: number;
@@ -322,17 +330,33 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
   const merchantName = normalizeSearchText(candidate.document.fields.merchantName ?? "");
   const invoiceNumber = normalizeSearchText(candidate.document.fields.invoiceNumber ?? "");
   const inputCurrency = candidate.document.fields.currency?.trim().toUpperCase() ?? "";
+  const transactionCurrency = transaction.money.currency.toUpperCase();
+  const documentBaseMoney = documentBaseMoneyFromFields(candidate.document.fields);
+  const transactionBaseMoney = normalizeEvidenceMoney(
+    candidate.transaction.baseMoney ?? transaction.baseMoney,
+  );
+  const baseCurrenciesMatch = Boolean(
+    documentBaseMoney &&
+      transactionBaseMoney &&
+      documentBaseMoney.currency === transactionBaseMoney.currency,
+  );
+  const baseCurrenciesDiffer = Boolean(
+    documentBaseMoney &&
+      transactionBaseMoney &&
+      documentBaseMoney.currency !== transactionBaseMoney.currency,
+  );
   const currencyMatches =
-    inputCurrency.length > 0 && transaction.money.currency.toUpperCase() === inputCurrency;
+    inputCurrency.length > 0 && transactionCurrency === inputCurrency;
   const currencyMismatches =
-    inputCurrency.length > 0 && transaction.money.currency.toUpperCase() !== inputCurrency;
-
-  const amountSignal = amountMatchSignal({
-    documentAmountMinor: candidate.document.fields.totalAmountMinor,
-    documentTaxAmountMinor: candidate.document.fields.taxAmountMinor,
-    transactionAmountMinor: transaction.money.amountMinor,
-    currencyMismatches,
-  });
+    inputCurrency.length > 0 && transactionCurrency !== inputCurrency;
+  const canUseBaseCurrency = currencyMismatches && baseCurrenciesMatch;
+  const amountSignal = currencyMismatches
+    ? null
+    : amountMatchSignal({
+        documentAmountMinor: candidate.document.fields.totalAmountMinor,
+        documentTaxAmountMinor: candidate.document.fields.taxAmountMinor,
+        transactionAmountMinor: transaction.money.amountMinor,
+      });
 
   if (amountSignal) {
     addSignal(signals, explanation, "amount", amountSignal);
@@ -347,16 +371,49 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
         currency: inputCurrency,
       },
     });
+  } else if (currencyMismatches && canUseBaseCurrency && documentBaseMoney && transactionBaseMoney) {
+    addSignal(signals, explanation, "baseCurrency", {
+      score: 0.06,
+      matched: true,
+      reason: "Base currency matches",
+      evidence: {
+        documentCurrency: inputCurrency,
+        transactionCurrency,
+        baseCurrency: documentBaseMoney.currency,
+      },
+    });
   } else if (currencyMismatches) {
     addSignal(signals, explanation, "currency", {
       score: -0.35,
       matched: false,
-      reason: "Currency differs",
+      reason: "Currency differs without base-currency evidence",
       evidence: {
         documentCurrency: inputCurrency,
-        transactionCurrency: transaction.money.currency.toUpperCase(),
+        transactionCurrency,
       },
     });
+  }
+
+  if (currencyMismatches && baseCurrenciesDiffer && documentBaseMoney && transactionBaseMoney) {
+    addSignal(signals, explanation, "baseCurrency", {
+      score: -0.6,
+      matched: false,
+      reason: "Base currency differs",
+      evidence: {
+        documentBaseCurrency: documentBaseMoney.currency,
+        transactionBaseCurrency: transactionBaseMoney.currency,
+      },
+    });
+  } else if (currencyMismatches && baseCurrenciesMatch && documentBaseMoney && transactionBaseMoney) {
+    addSignal(
+      signals,
+      explanation,
+      "baseAmount",
+      baseAmountMatchSignal({
+        documentBaseMoney,
+        transactionBaseMoney,
+      }),
+    );
   }
 
   const dateSignal = dateMatchSignal(candidate.document.fields, transaction.postedAt);
@@ -470,10 +527,13 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
   }
 
   addConservativeRiskSignals(signals, explanation, candidate.document.fields);
+  addCrossCurrencyRiskSignals(signals, explanation, currencyMismatches);
 
   const score = clampMatchScore(
     Object.values(signals).reduce((total, signal) => total + signal.score, 0),
   );
+  const decisiveMismatch =
+    signals.baseAmount?.matched === false || signals.baseCurrency?.matched === false;
 
   return {
     document: candidate.document,
@@ -481,7 +541,7 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
     transactionId: transaction.id,
     score,
     confidence: confidenceForScore(score, policy),
-    matchType: score > policy.minimumScore ? "suggested" : "none",
+    matchType: !decisiveMismatch && score > policy.minimumScore ? "suggested" : "none",
     explanation,
     signals,
     thresholds: {
@@ -519,6 +579,8 @@ function legacySignalScores(signals: MatchSignals): InboxMatchSignalScores {
   return {
     amount: signals.amount?.score,
     currency: signals.currency?.score,
+    baseAmount: signals.baseAmount?.score,
+    baseCurrency: signals.baseCurrency?.score,
     date: signals.date?.score,
     counterparty: signals.name?.score,
     name: signals.name?.score,
@@ -618,9 +680,8 @@ function amountMatchSignal(input: {
   documentAmountMinor?: number | null;
   documentTaxAmountMinor?: number | null;
   transactionAmountMinor: number;
-  currencyMismatches: boolean;
 }): MatchSignal | null {
-  if (input.documentAmountMinor == null || input.currencyMismatches) {
+  if (input.documentAmountMinor == null) {
     return null;
   }
 
@@ -710,6 +771,74 @@ function amountMatchSignal(input: {
   }
 
   return null;
+}
+
+function baseAmountMatchSignal(input: {
+  documentBaseMoney: Money;
+  transactionBaseMoney: Money;
+}): MatchSignal {
+  const documentAmount = Math.abs(input.documentBaseMoney.amountMinor);
+  const transactionAmount = Math.abs(input.transactionBaseMoney.amountMinor);
+  const difference = Math.abs(documentAmount - transactionAmount);
+  const maxAmount = Math.max(documentAmount, transactionAmount);
+  const percentageDifference = maxAmount > 0 ? difference / maxAmount : 0;
+  const evidence = {
+    documentBaseAmountMinor: input.documentBaseMoney.amountMinor,
+    transactionBaseAmountMinor: input.transactionBaseMoney.amountMinor,
+    baseCurrency: input.documentBaseMoney.currency,
+  };
+
+  if (difference === 0) {
+    return {
+      score: 0.28,
+      matched: true,
+      reason: "Base amount matches exactly",
+      evidence,
+    };
+  }
+
+  if (difference <= 1) {
+    return {
+      score: 0.26,
+      matched: true,
+      reason: "Base amount is within rounding tolerance",
+      evidence: { ...evidence, differenceMinor: difference },
+    };
+  }
+
+  if (percentageDifference <= 0.01) {
+    return {
+      score: 0.23,
+      matched: true,
+      reason: "Base amount is within 1 percent",
+      evidence: { ...evidence, percentageDifference },
+    };
+  }
+
+  if (percentageDifference <= 0.02) {
+    return {
+      score: 0.18,
+      matched: true,
+      reason: "Base amount is close",
+      evidence: { ...evidence, percentageDifference },
+    };
+  }
+
+  if (percentageDifference <= 0.05) {
+    return {
+      score: 0.12,
+      matched: true,
+      reason: "Base amount is within broad tolerance",
+      evidence: { ...evidence, percentageDifference },
+    };
+  }
+
+  return {
+    score: -0.6,
+    matched: false,
+    reason: "Base amount differs",
+    evidence: { ...evidence, percentageDifference },
+  };
 }
 
 function dateMatchSignal(fields: DocumentMatchFields, transactionDate: string): MatchSignal | null {
@@ -898,6 +1027,32 @@ function normalizeNameTokens(value: string | null | undefined) {
     .filter((token) => token.length > 0 && !companySuffixes.has(token));
 }
 
+function documentBaseMoneyFromFields(fields: DocumentMatchFields): Money | null {
+  return normalizeEvidenceMoney({
+    amountMinor: fields.baseAmountMinor ?? Number.NaN,
+    currency: fields.baseCurrency ?? "",
+  });
+}
+
+function normalizeEvidenceMoney(money: Money | null | undefined): Money | null {
+  if (
+    !money ||
+    !Number.isSafeInteger(money.amountMinor) ||
+    !isIsoCurrencyCode(money.currency.toUpperCase())
+  ) {
+    return null;
+  }
+
+  return {
+    amountMinor: money.amountMinor,
+    currency: money.currency.toUpperCase(),
+  };
+}
+
+function isIsoCurrencyCode(value: string) {
+  return /^[A-Z]{3}$/.test(value);
+}
+
 function teamFeedbackSignal(input: {
   merchantName: string | null | undefined;
   searchText: string;
@@ -1022,6 +1177,7 @@ function addConservativeRiskSignals(
   explanation: string[],
   fields: DocumentMatchFields,
 ) {
+  const hasAmountEvidence = Boolean(signals.amount || signals.baseAmount);
   const hasNameLikeEvidence = Boolean(
     signals.name ||
       signals.reference ||
@@ -1031,7 +1187,7 @@ function addConservativeRiskSignals(
       signals.alias,
   );
 
-  if (signals.amount && !hasNameLikeEvidence && !signals.date) {
+  if (hasAmountEvidence && !hasNameLikeEvidence && !signals.date) {
     addSignal(signals, explanation, "risk", {
       score: -0.1,
       matched: true,
@@ -1047,6 +1203,30 @@ function addConservativeRiskSignals(
       reason: "Document date is stale",
     });
   }
+}
+
+function addCrossCurrencyRiskSignals(
+  signals: MatchSignals,
+  explanation: string[],
+  currencyMismatches: boolean,
+) {
+  if (!currencyMismatches) {
+    return;
+  }
+
+  const hasUsableBaseEvidence = Boolean(
+    (signals.baseAmount?.score ?? 0) > 0 && (signals.baseCurrency?.score ?? 0) > 0,
+  );
+
+  if (!hasUsableBaseEvidence || (signals.date && signals.name)) {
+    return;
+  }
+
+  addSignal(signals, explanation, "risk", {
+    score: -0.25,
+    matched: true,
+    reason: "Cross-currency evidence needs date and name support",
+  });
 }
 
 function searchTextIncludesTerm(text: string, term: string) {

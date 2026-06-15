@@ -56,6 +56,7 @@ describe("DrizzleDawnRepository PGlite contracts", () => {
         description: "Acme subscription",
         postedAt: "2026-06-16T00:00:00.000Z",
         money: { amountMinor: -2500, currency: "USD" },
+        baseMoney: { amountMinor: -2350, currency: "EUR" },
         type: "expense",
         source: "manual",
         counterpartyId: counterparty.counterparty.id,
@@ -133,6 +134,7 @@ describe("DrizzleDawnRepository PGlite contracts", () => {
       const tagAssignments = await kit.db.select().from(schema.transactionTagAssignment);
 
       expect(replayed).toEqual({ ...created, replayed: true });
+      expect(created.transaction.baseMoney).toEqual({ amountMinor: -2350, currency: "EUR" });
       expect(transferReplay).toEqual({ ...transfer, replayed: true });
       expect(summary.transactionCount).toBe(4);
       expect(summary.totals.expenses).toEqual({ amountMinor: -8700, currency: "USD" });
