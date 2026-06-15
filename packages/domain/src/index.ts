@@ -421,6 +421,7 @@ export type TimeEntryReport = {
 export type ReportSourceType =
   | "transaction"
   | "invoice"
+  | "document"
   | "customer"
   | "project"
   | "time_entry"
@@ -486,6 +487,45 @@ export type BusinessInsight = {
   severity: BusinessInsightSeverity;
   periodStart: string;
   periodEnd: string;
+  sourceRefs: ReportSourceRef[];
+  createdAt: string;
+};
+
+export type AssistantMessageRole = "user" | "assistant";
+
+export type AssistantToolRisk = "read" | "suggest";
+
+export type AssistantToolCallStatus = "completed" | "refused";
+
+export type AssistantThread = {
+  id: string;
+  teamId: string;
+  title: string;
+  createdByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AssistantMessage = {
+  id: string;
+  threadId: string;
+  teamId: string;
+  role: AssistantMessageRole;
+  content: string;
+  sourceRefs: ReportSourceRef[];
+  createdAt: string;
+};
+
+export type AssistantToolCall = {
+  id: string;
+  threadId: string;
+  messageId: string;
+  teamId: string;
+  toolName: string;
+  risk: AssistantToolRisk;
+  status: AssistantToolCallStatus;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
   sourceRefs: ReportSourceRef[];
   createdAt: string;
 };

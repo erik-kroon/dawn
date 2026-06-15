@@ -93,6 +93,8 @@ function RouteComponent() {
     timeEntryId: "",
     invoiceNumber: "",
   });
+  const [assistantPrompt, setAssistantPrompt] = useState("");
+  const [assistantThreadId, setAssistantThreadId] = useState<string | null>(null);
   const [syncReviewError, setSyncReviewError] = useState<string | null>(null);
   const [syncReviewingId, setSyncReviewingId] = useState<string | null>(null);
 
@@ -145,6 +147,10 @@ function RouteComponent() {
   });
   const reports = useQuery({
     ...orpc.reports.overview.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
+  const assistant = useQuery({
+    ...orpc.assistant.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
   const teamDirectory = useQuery({
@@ -404,6 +410,15 @@ function RouteComponent() {
         });
         await queryClient.invalidateQueries({ queryKey: orpc.ledger.summary.queryKey() });
         await transactionSync.refetch();
+      },
+    }),
+  );
+  const assistantAskMutation = useMutation(
+    orpc.assistant.ask.mutationOptions({
+      onSuccess: async (result) => {
+        setAssistantPrompt("");
+        setAssistantThreadId(result.thread.id);
+        await queryClient.invalidateQueries({ queryKey: orpc.assistant.list.queryKey() });
       },
     }),
   );
@@ -724,6 +739,107 @@ function RouteComponent() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Assistant</CardTitle>
+          <CardDescription>
+            Grounded answers run through permissioned read and suggestion tools.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4">
+            <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+              <Input
+                aria-label="Assistant question"
+                onChange={(event) => setAssistantPrompt(event.target.value)}
+                placeholder="Ask about cashflow, invoices, documents, projects, or suggestions"
+                value={assistantPrompt}
+              />
+              <Button
+                disabled={
+                  !currentTeamId || !assistantPrompt.trim() || assistantAskMutation.isPending
+                }
+                onClick={() => {
+                  if (!currentTeamId) {
+                    return;
+                  }
+
+                  assistantAskMutation.mutate({
+                    teamId: currentTeamId,
+                    threadId: assistantThreadId,
+                    message: assistantPrompt,
+                  });
+                }}
+              >
+                Ask
+              </Button>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-[1fr_220px]">
+              <div className="grid gap-3">
+                {assistantAskMutation.data ? (
+                  assistantAskMutation.data.messages.slice(-2).map((message) => (
+                    <div className="grid gap-2 border p-3 text-sm" key={message.id}>
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-medium">
+                          {message.role === "user" ? "You" : "Dawn assistant"}
+                        </p>
+                        <span className="text-xs text-muted-foreground">
+                          {new Date(message.createdAt).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <p className="whitespace-pre-wrap text-muted-foreground">{message.content}</p>
+                      {message.sourceRefs.length ? (
+                        <div className="flex flex-wrap gap-2">
+                          {message.sourceRefs.slice(0, 6).map((source) => (
+                            <a
+                              className="text-xs underline"
+                              href={sourceHref(source.type)}
+                              key={`${source.type}:${source.id}`}
+                            >
+                              {source.label}
+                            </a>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    Ask a question to create a persisted assistant thread.
+                  </p>
+                )}
+                {assistantAskMutation.error ? (
+                  <p className="text-sm text-destructive">
+                    {errorMessage(assistantAskMutation.error)}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="grid gap-3 border p-3 text-sm">
+                <div>
+                  <p className="font-medium">Threads</p>
+                  <p className="text-muted-foreground">
+                    {assistant.data?.threads.length ?? 0} persisted
+                  </p>
+                </div>
+                <div>
+                  <p className="font-medium">Tool calls</p>
+                  <div className="mt-2 grid gap-1">
+                    {assistantAskMutation.data?.toolCalls.slice(-5).map((toolCall) => (
+                      <div className="flex items-center justify-between gap-2" key={toolCall.id}>
+                        <span className="truncate">{toolCall.toolName}</span>
+                        <span className="text-xs text-muted-foreground">{toolCall.risk}</span>
+                      </div>
+                    )) ?? <p className="text-muted-foreground">No calls yet</p>}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Bank connections</CardTitle>
           <CardDescription>
             Mock provider sync normalizes accounts and transactions through the same ledger,
@@ -815,7 +931,7 @@ function RouteComponent() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card id="documents">
         <CardHeader>
           <CardTitle>Documents</CardTitle>
           <CardDescription>
@@ -2478,6 +2594,10 @@ function sourceHref(type: string) {
 
   if (type === "invoice" || type === "customer") {
     return "#billing";
+  }
+
+  if (type === "document") {
+    return "#documents";
   }
 
   if (type === "project" || type === "time_entry") {

@@ -986,6 +986,75 @@ export const businessInsight = pgTable(
   ],
 );
 
+export const assistantThread = pgTable(
+  "assistant_thread",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("assistant_thread_team_updated_idx").on(table.teamId, table.updatedAt),
+    index("assistant_thread_creator_idx").on(table.teamId, table.createdByActorId),
+  ],
+);
+
+export const assistantMessage = pgTable(
+  "assistant_message",
+  {
+    id: text("id").primaryKey(),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => assistantThread.id, { onDelete: "cascade" }),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    content: text("content").notNull(),
+    sourceRefs: jsonb("source_refs").$type<Record<string, unknown>[]>().notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("assistant_message_thread_created_idx").on(table.threadId, table.createdAt),
+    index("assistant_message_team_created_idx").on(table.teamId, table.createdAt),
+  ],
+);
+
+export const assistantToolCall = pgTable(
+  "assistant_tool_call",
+  {
+    id: text("id").primaryKey(),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => assistantThread.id, { onDelete: "cascade" }),
+    messageId: text("message_id")
+      .notNull()
+      .references(() => assistantMessage.id, { onDelete: "cascade" }),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    toolName: text("tool_name").notNull(),
+    risk: text("risk").notNull(),
+    status: text("status").notNull(),
+    input: jsonb("input").$type<Record<string, unknown>>().notNull(),
+    output: jsonb("output").$type<Record<string, unknown>>().notNull(),
+    sourceRefs: jsonb("source_refs").$type<Record<string, unknown>[]>().notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("assistant_tool_call_thread_created_idx").on(table.threadId, table.createdAt),
+    index("assistant_tool_call_team_tool_idx").on(table.teamId, table.toolName),
+  ],
+);
+
 export const idempotencyKey = pgTable(
   "idempotency_key",
   {

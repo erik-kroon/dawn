@@ -3,6 +3,9 @@ import { call } from "@orpc/server";
 import { createDeterministicInvoicePdfRenderer } from "@dawn/app";
 import type {
   Actor,
+  AssistantMessage,
+  AssistantThread,
+  AssistantToolCall,
   BusinessInsight,
   Category,
   Customer,
@@ -79,6 +82,9 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   projectMembers = new Map<string, ProjectMember>();
   timeEntries = new Map<string, TimeEntry>();
   businessInsights = new Map<string, BusinessInsight>();
+  assistantThreads = new Map<string, AssistantThread>();
+  assistantMessages = new Map<string, AssistantMessage>();
+  assistantToolCalls = new Map<string, AssistantToolCall>();
   aliases: TeamAlias[] = [];
   hardNegatives: HardNegativeTransactionMatch[] = [];
   attachments: { transactionId: string; documentId: string }[] = [];
@@ -1303,6 +1309,118 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return insights;
   }
 
+  async listAssistantThreads(teamId: string) {
+    return [...this.assistantThreads.values()]
+      .filter((thread) => thread.teamId === teamId)
+      .sort(
+        (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+      );
+  }
+
+  async getAssistantThreadForTeam(teamId: string, threadId: string) {
+    const thread = this.assistantThreads.get(threadId);
+    return thread?.teamId === teamId ? thread : null;
+  }
+
+  async listAssistantMessages(threadId: string) {
+    return [...this.assistantMessages.values()]
+      .filter((message) => message.threadId === threadId)
+      .sort(
+        (left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime(),
+      );
+  }
+
+  async listAssistantToolCalls(threadId: string) {
+    return [...this.assistantToolCalls.values()]
+      .filter((toolCall) => toolCall.threadId === threadId)
+      .sort(
+        (left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime(),
+      );
+  }
+
+  async createAssistantThread(input: {
+    threadId: string;
+    teamId: string;
+    title: string;
+    createdByActorId: string;
+    createdAt: string;
+  }) {
+    const thread = {
+      id: input.threadId,
+      teamId: input.teamId,
+      title: input.title,
+      createdByActorId: input.createdByActorId,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt,
+    };
+    this.assistantThreads.set(thread.id, thread);
+    return thread;
+  }
+
+  async createAssistantMessage(input: {
+    messageId: string;
+    threadId: string;
+    teamId: string;
+    role: AssistantMessage["role"];
+    content: string;
+    sourceRefs: ReportSourceRef[];
+    createdAt: string;
+  }) {
+    const message = {
+      id: input.messageId,
+      threadId: input.threadId,
+      teamId: input.teamId,
+      role: input.role,
+      content: input.content,
+      sourceRefs: input.sourceRefs,
+      createdAt: input.createdAt,
+    };
+    const thread = this.assistantThreads.get(input.threadId);
+
+    if (thread) {
+      this.assistantThreads.set(thread.id, { ...thread, updatedAt: input.createdAt });
+    }
+
+    this.assistantMessages.set(message.id, message);
+    return message;
+  }
+
+  async createAssistantToolCalls(input: {
+    toolCalls: Array<{
+      toolCallId: string;
+      threadId: string;
+      messageId: string;
+      teamId: string;
+      toolName: string;
+      risk: AssistantToolCall["risk"];
+      status: AssistantToolCall["status"];
+      input: Record<string, unknown>;
+      output: Record<string, unknown>;
+      sourceRefs: ReportSourceRef[];
+      createdAt: string;
+    }>;
+  }) {
+    const toolCalls = input.toolCalls.map((toolCall) => ({
+      id: toolCall.toolCallId,
+      threadId: toolCall.threadId,
+      messageId: toolCall.messageId,
+      teamId: toolCall.teamId,
+      toolName: toolCall.toolName,
+      risk: toolCall.risk,
+      status: toolCall.status,
+      input: toolCall.input,
+      output: toolCall.output,
+      sourceRefs: toolCall.sourceRefs,
+      createdAt: toolCall.createdAt,
+    }));
+
+    for (const toolCall of toolCalls) {
+      this.assistantToolCalls.set(toolCall.id, toolCall);
+    }
+
+    return toolCalls;
+  }
+
   private invoiceFromInput(
     invoiceId: string,
     input: {
@@ -2090,6 +2208,83 @@ describe("appRouter", () => {
       invoiceNumber: "INV-001",
       amountDue: { amountMinor: 125_00, currency: "USD" },
     });
+  });
+
+  test("answers assistant questions with persisted cited messages through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    repository.accounts.set("acct_1", {
+      id: "acct_1",
+      teamId: "team_1",
+      name: "Operating",
+      currency: "USD",
+      type: "bank",
+    });
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+    const customer = await call(
+      router.billing.createCustomer,
+      {
+        teamId: "team_1",
+        name: "Acme Co",
+        idempotencyKey: "assistant_customer_1",
+      },
+      context,
+    );
+    await call(
+      router.ledger.createTransaction,
+      {
+        teamId: "team_1",
+        accountId: "acct_1",
+        description: "Client payment",
+        postedAt: "2026-06-10T00:00:00.000Z",
+        money: { amountMinor: 500_00, currency: "USD" },
+        type: "income",
+        source: "manual",
+        idempotencyKey: "assistant_txn_1",
+      },
+      context,
+    );
+    await call(
+      router.billing.createDraftInvoice,
+      {
+        teamId: "team_1",
+        customerId: customer.customer.id,
+        invoiceNumber: "INV-AI-001",
+        issueDate: "2026-06-12T00:00:00.000Z",
+        currency: "USD",
+        lines: [
+          {
+            description: "Consulting",
+            quantityMilli: 1_000,
+            unitPrice: { amountMinor: 100_00, currency: "USD" },
+          },
+        ],
+        idempotencyKey: "assistant_invoice_1",
+      },
+      context,
+    );
+
+    const answer = await call(
+      router.assistant.ask,
+      {
+        teamId: "team_1",
+        message: "Explain cashflow and unpaid invoices",
+      },
+      context,
+    );
+    const thread = await call(
+      router.assistant.thread,
+      { teamId: "team_1", threadId: answer.thread.id },
+      context,
+    );
+
+    expect(answer.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(answer.toolCalls.map((toolCall) => toolCall.toolName)).toContain("get_report_overview");
+    expect(answer.messages[1]?.sourceRefs.length).toBeGreaterThan(0);
+    expect(thread.messages).toHaveLength(2);
+    expect(thread.toolCalls.length).toBeGreaterThan(0);
   });
 
   test("creates and signs document uploads and downloads through protected routes", async () => {

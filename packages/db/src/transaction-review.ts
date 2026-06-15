@@ -27,6 +27,9 @@ import type {
 } from "@dawn/app";
 import type {
   Actor,
+  AssistantMessage,
+  AssistantThread,
+  AssistantToolCall,
   BusinessInsight,
   Category,
   Customer,
@@ -2094,6 +2097,158 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return insights.map(mapBusinessInsight);
   }
 
+  async listAssistantThreads(teamId: string): Promise<AssistantThread[]> {
+    const threads = await this.client
+      .select()
+      .from(schema.assistantThread)
+      .where(eq(schema.assistantThread.teamId, teamId))
+      .orderBy(desc(schema.assistantThread.updatedAt));
+
+    return threads.map(mapAssistantThread);
+  }
+
+  async getAssistantThreadForTeam(
+    teamId: string,
+    threadId: string,
+  ): Promise<AssistantThread | null> {
+    const [thread] = await this.client
+      .select()
+      .from(schema.assistantThread)
+      .where(
+        and(eq(schema.assistantThread.teamId, teamId), eq(schema.assistantThread.id, threadId)),
+      )
+      .limit(1);
+
+    return thread ? mapAssistantThread(thread) : null;
+  }
+
+  async listAssistantMessages(threadId: string): Promise<AssistantMessage[]> {
+    const messages = await this.client
+      .select()
+      .from(schema.assistantMessage)
+      .where(eq(schema.assistantMessage.threadId, threadId))
+      .orderBy(asc(schema.assistantMessage.createdAt));
+
+    return messages.map(mapAssistantMessage);
+  }
+
+  async listAssistantToolCalls(threadId: string): Promise<AssistantToolCall[]> {
+    const toolCalls = await this.client
+      .select()
+      .from(schema.assistantToolCall)
+      .where(eq(schema.assistantToolCall.threadId, threadId))
+      .orderBy(asc(schema.assistantToolCall.createdAt));
+
+    return toolCalls.map(mapAssistantToolCall);
+  }
+
+  async createAssistantThread(input: {
+    threadId: string;
+    teamId: string;
+    title: string;
+    createdByActorId: string;
+    createdAt: string;
+  }): Promise<AssistantThread> {
+    const [thread] = await this.client
+      .insert(schema.assistantThread)
+      .values({
+        id: input.threadId,
+        teamId: input.teamId,
+        title: input.title,
+        createdByActorId: input.createdByActorId,
+        createdAt: new Date(input.createdAt),
+        updatedAt: new Date(input.createdAt),
+      })
+      .returning();
+
+    if (!thread) {
+      throw new Error("Failed to create assistant thread");
+    }
+
+    return mapAssistantThread(thread);
+  }
+
+  async createAssistantMessage(input: {
+    messageId: string;
+    threadId: string;
+    teamId: string;
+    role: AssistantMessage["role"];
+    content: string;
+    sourceRefs: ReportSourceRef[];
+    createdAt: string;
+  }): Promise<AssistantMessage> {
+    const createdAt = new Date(input.createdAt);
+    const [message] = await this.client
+      .insert(schema.assistantMessage)
+      .values({
+        id: input.messageId,
+        threadId: input.threadId,
+        teamId: input.teamId,
+        role: input.role,
+        content: input.content,
+        sourceRefs: input.sourceRefs,
+        createdAt,
+      })
+      .returning();
+
+    await this.client
+      .update(schema.assistantThread)
+      .set({ updatedAt: createdAt })
+      .where(
+        and(
+          eq(schema.assistantThread.teamId, input.teamId),
+          eq(schema.assistantThread.id, input.threadId),
+        ),
+      );
+
+    if (!message) {
+      throw new Error("Failed to create assistant message");
+    }
+
+    return mapAssistantMessage(message);
+  }
+
+  async createAssistantToolCalls(input: {
+    toolCalls: Array<{
+      toolCallId: string;
+      threadId: string;
+      messageId: string;
+      teamId: string;
+      toolName: string;
+      risk: AssistantToolCall["risk"];
+      status: AssistantToolCall["status"];
+      input: Record<string, unknown>;
+      output: Record<string, unknown>;
+      sourceRefs: ReportSourceRef[];
+      createdAt: string;
+    }>;
+  }): Promise<AssistantToolCall[]> {
+    if (input.toolCalls.length === 0) {
+      return [];
+    }
+
+    const toolCalls = await this.client
+      .insert(schema.assistantToolCall)
+      .values(
+        input.toolCalls.map((toolCall) => ({
+          id: toolCall.toolCallId,
+          threadId: toolCall.threadId,
+          messageId: toolCall.messageId,
+          teamId: toolCall.teamId,
+          toolName: toolCall.toolName,
+          risk: toolCall.risk,
+          status: toolCall.status,
+          input: toolCall.input,
+          output: toolCall.output,
+          sourceRefs: toolCall.sourceRefs,
+          createdAt: new Date(toolCall.createdAt),
+        })),
+      )
+      .returning();
+
+    return toolCalls.map(mapAssistantToolCall);
+  }
+
   private async insertInvoiceLines(input: {
     teamId: string;
     invoiceId: string;
@@ -3027,6 +3182,49 @@ function mapBusinessInsight(insight: typeof schema.businessInsight.$inferSelect)
     periodEnd: insight.periodEnd.toISOString(),
     sourceRefs: insight.sourceRefs as ReportSourceRef[],
     createdAt: insight.createdAt.toISOString(),
+  };
+}
+
+function mapAssistantThread(thread: typeof schema.assistantThread.$inferSelect): AssistantThread {
+  return {
+    id: thread.id,
+    teamId: thread.teamId,
+    title: thread.title,
+    createdByActorId: thread.createdByActorId,
+    createdAt: thread.createdAt.toISOString(),
+    updatedAt: thread.updatedAt.toISOString(),
+  };
+}
+
+function mapAssistantMessage(
+  message: typeof schema.assistantMessage.$inferSelect,
+): AssistantMessage {
+  return {
+    id: message.id,
+    threadId: message.threadId,
+    teamId: message.teamId,
+    role: message.role as AssistantMessage["role"],
+    content: message.content,
+    sourceRefs: message.sourceRefs as ReportSourceRef[],
+    createdAt: message.createdAt.toISOString(),
+  };
+}
+
+function mapAssistantToolCall(
+  toolCall: typeof schema.assistantToolCall.$inferSelect,
+): AssistantToolCall {
+  return {
+    id: toolCall.id,
+    threadId: toolCall.threadId,
+    messageId: toolCall.messageId,
+    teamId: toolCall.teamId,
+    toolName: toolCall.toolName,
+    risk: toolCall.risk as AssistantToolCall["risk"],
+    status: toolCall.status as AssistantToolCall["status"],
+    input: toolCall.input,
+    output: toolCall.output,
+    sourceRefs: toolCall.sourceRefs as ReportSourceRef[],
+    createdAt: toolCall.createdAt.toISOString(),
   };
 }
 

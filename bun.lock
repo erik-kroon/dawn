@@ -110,6 +110,7 @@
       "name": "@dawn/ai",
       "dependencies": {
         "@dawn/domain": "workspace:*",
+        "zod": "catalog:",
       },
       "devDependencies": {
         "@dawn/config": "workspace:*",

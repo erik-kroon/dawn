@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { createMockInsightGenerationProvider } from "./index";
+import {
+  assistantTools,
+  createMockAssistantResponseProvider,
+  createMockInsightGenerationProvider,
+  getAssistantTool,
+  planAssistantTools,
+} from "./index";
 import type { BusinessReport } from "@dawn/domain";
 
 const report: BusinessReport = {
@@ -74,5 +80,77 @@ describe("mock insight generation provider", () => {
       "Inbox backlog is building",
     ]);
     expect(insights[0]?.sourceRefs).toEqual([{ type: "transaction", id: "txn_1", label: "Figma" }]);
+  });
+});
+
+describe("assistant tool registry", () => {
+  test("defines permissioned read and suggest tools that never mutate state", () => {
+    expect(assistantTools.length).toBeGreaterThanOrEqual(9);
+    expect(assistantTools.every((tool) => tool.approvalRequired === false)).toBe(true);
+    expect(assistantTools.every((tool) => tool.mutatesState === false)).toBe(true);
+    expect(getAssistantTool("search_transactions")).toMatchObject({
+      requiredPermission: "transactions.read",
+      risk: "read",
+    });
+    expect(getAssistantTool("suggest_invoice_email_copy")).toMatchObject({
+      requiredPermission: "invoices.read",
+      risk: "suggest",
+    });
+  });
+
+  test("validates tool inputs through schemas", () => {
+    expect(
+      getAssistantTool("search_transactions").inputSchema.parse({ query: "cashflow" }),
+    ).toEqual({
+      query: "cashflow",
+    });
+    expect(() =>
+      getAssistantTool("get_report_overview").inputSchema.parse({ from: "not-a-date" }),
+    ).toThrow();
+  });
+
+  test("plans grounded tools from natural language questions", () => {
+    expect(planAssistantTools("Explain cashflow and unpaid invoices")).toEqual([
+      "get_report_overview",
+      "list_open_invoices",
+    ]);
+    expect(planAssistantTools("Suggest invoice email copy")).toContain(
+      "suggest_invoice_email_copy",
+    );
+  });
+
+  test("mock assistant response cites completed tool sources and refuses without permissions", async () => {
+    const provider = createMockAssistantResponseProvider();
+    const response = await provider.generateResponse({
+      question: "Explain cashflow",
+      toolResults: [
+        {
+          toolName: "get_report_overview",
+          risk: "read",
+          status: "completed",
+          input: {},
+          output: { summary: "Cashflow is positive." },
+          sourceRefs: [{ type: "transaction", id: "txn_1", label: "Client payment" }],
+        },
+      ],
+    });
+    const refused = await provider.generateResponse({
+      question: "Explain documents",
+      toolResults: [
+        {
+          toolName: "search_documents",
+          risk: "read",
+          status: "refused",
+          input: {},
+          output: { summary: "Permission documents.read is required." },
+          sourceRefs: [],
+        },
+      ],
+    });
+
+    expect(response.sourceRefs).toEqual([
+      { type: "transaction", id: "txn_1", label: "Client payment" },
+    ]);
+    expect(refused.content).toContain("current permissions");
   });
 });

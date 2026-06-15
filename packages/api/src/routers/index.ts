@@ -19,8 +19,10 @@ import {
   createRecurringInvoiceSchedule,
   createTeam,
   generateInboxMatchSuggestions,
+  getAssistantConversation,
   inviteTeamMember,
   correctDocumentExtraction,
+  listAssistantWorkspace,
   listBankConnections,
   listBillingWorkspace,
   listDocuments,
@@ -38,6 +40,7 @@ import {
   recordInvoicePayment,
   reviewTransaction,
   sendInvoice,
+  sendAssistantMessage,
   syncBankConnection,
   type DawnRepository,
   type DocumentExtractionFields,
@@ -95,6 +98,23 @@ const reportOverviewInput = z
     to: z.iso.datetime().nullable().optional(),
   })
   .optional();
+
+const assistantWorkspaceInput = z
+  .object({
+    teamId: z.string().min(1).optional(),
+  })
+  .optional();
+
+const assistantConversationInput = z.object({
+  teamId: z.string().min(1).optional(),
+  threadId: z.string().min(1),
+});
+
+const assistantAskInput = z.object({
+  teamId: z.string().min(1).optional(),
+  threadId: z.string().min(1).nullable().optional(),
+  message: z.string().trim().min(1).max(2_000),
+});
 
 const bankConnectionInput = z.object({
   teamId: z.string().min(1),
@@ -611,6 +631,60 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             mapAppError(error);
           }
         }),
+    },
+    assistant: {
+      list: protectedProcedure
+        .input(assistantWorkspaceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listAssistantWorkspace(transactionReviewRepository, {
+              actor: { id: context.session.user.id, type: "user" },
+              requestId: context.requestId,
+              teamId: input?.teamId,
+            });
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      thread: protectedProcedure
+        .input(assistantConversationInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await getAssistantConversation(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                teamId: input.teamId,
+                threadId: input.threadId,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      ask: protectedProcedure.input(assistantAskInput).handler(async ({ context, input }) => {
+        try {
+          return await sendAssistantMessage(
+            transactionReviewRepository,
+            {
+              actor: { id: context.session.user.id, type: "user" },
+              requestId: context.requestId,
+              teamId: input.teamId,
+            },
+            {
+              teamId: input.teamId,
+              threadId: input.threadId ?? null,
+              message: input.message,
+            },
+          );
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
     },
     banking: {
       list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {

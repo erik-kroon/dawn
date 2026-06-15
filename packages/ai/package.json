@@ -14,7 +14,8 @@
     "check-types": "tsgo --noEmit"
   },
   "dependencies": {
-    "@dawn/domain": "workspace:*"
+    "@dawn/domain": "workspace:*",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@dawn/config": "workspace:*",

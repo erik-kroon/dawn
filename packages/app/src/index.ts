@@ -1,6 +1,18 @@
-import type { InsightGenerationProvider, InsightDraft } from "@dawn/ai";
+import {
+  createMockAssistantResponseProvider,
+  getAssistantTool,
+  planAssistantTools,
+  type AssistantResponseProvider,
+  type AssistantToolName,
+  type AssistantToolResult,
+  type InsightDraft,
+  type InsightGenerationProvider,
+} from "@dawn/ai";
 import type {
   Actor,
+  AssistantMessage,
+  AssistantThread,
+  AssistantToolCall,
   BusinessInsight,
   BusinessReport,
   Category,
@@ -58,6 +70,7 @@ import {
   assertTimeEntryInput,
   createReportTotals,
   csvRowToLedgerDraft,
+  formatMoney,
   invoiceStatusAfterPayment,
   ledgerDuplicateKey,
   markInvoiceSent,
@@ -720,6 +733,28 @@ export type GenerateWeeklyInsightsResult = {
   replayed: boolean;
 };
 
+export type AssistantWorkspace = {
+  teamId: string;
+  threads: AssistantThread[];
+};
+
+export type AssistantConversation = {
+  teamId: string;
+  thread: AssistantThread;
+  messages: AssistantMessage[];
+  toolCalls: AssistantToolCall[];
+};
+
+export type SendAssistantMessageCommand = {
+  teamId?: string;
+  threadId?: string | null;
+  message: string;
+};
+
+export type SendAssistantMessageResult = AssistantConversation & {
+  toolResults: AssistantToolResult[];
+};
+
 type NormalizedInvoiceDraftInput = Omit<InvoiceDraftInput, "discountBasisPoints" | "lines"> & {
   discountBasisPoints: number;
   lines: InvoiceLineDraft[];
@@ -1104,7 +1139,8 @@ export type DawnRepository = BankingUseCaseRepository &
   InboxRepository &
   BillingRepository &
   ProjectRepository &
-  ReportingRepository;
+  ReportingRepository &
+  AssistantRepository;
 
 export type ProjectRepository = {
   listProjects(teamId: string): Promise<Project[]>;
@@ -1157,6 +1193,44 @@ export type ReportingRepository = {
       }
     >;
   }): Promise<BusinessInsight[]>;
+};
+
+export type AssistantRepository = {
+  listAssistantThreads(teamId: string): Promise<AssistantThread[]>;
+  getAssistantThreadForTeam(teamId: string, threadId: string): Promise<AssistantThread | null>;
+  listAssistantMessages(threadId: string): Promise<AssistantMessage[]>;
+  listAssistantToolCalls(threadId: string): Promise<AssistantToolCall[]>;
+  createAssistantThread(input: {
+    threadId: string;
+    teamId: string;
+    title: string;
+    createdByActorId: string;
+    createdAt: string;
+  }): Promise<AssistantThread>;
+  createAssistantMessage(input: {
+    messageId: string;
+    threadId: string;
+    teamId: string;
+    role: AssistantMessage["role"];
+    content: string;
+    sourceRefs: ReportSourceRef[];
+    createdAt: string;
+  }): Promise<AssistantMessage>;
+  createAssistantToolCalls(input: {
+    toolCalls: Array<{
+      toolCallId: string;
+      threadId: string;
+      messageId: string;
+      teamId: string;
+      toolName: string;
+      risk: AssistantToolCall["risk"];
+      status: AssistantToolCall["status"];
+      input: Record<string, unknown>;
+      output: Record<string, unknown>;
+      sourceRefs: ReportSourceRef[];
+      createdAt: string;
+    }>;
+  }): Promise<AssistantToolCall[]>;
 };
 
 export type OutboxDispatchRepository = {
@@ -4192,6 +4266,588 @@ export async function generateWeeklyInsights(
   });
 }
 
+export async function listAssistantWorkspace(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: { teamId?: string } = {},
+): Promise<AssistantWorkspace> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId ?? context.teamId },
+    "assistant.use",
+    "You cannot use the assistant for this team",
+  );
+
+  return {
+    teamId: access.teamId,
+    threads: await repository.listAssistantThreads(access.teamId),
+  };
+}
+
+export async function getAssistantConversation(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: { teamId?: string; threadId: string },
+): Promise<AssistantConversation> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId ?? context.teamId },
+    "assistant.use",
+    "You cannot use the assistant for this team",
+  );
+  const thread = await repository.getAssistantThreadForTeam(access.teamId, command.threadId);
+
+  if (!thread) {
+    throw new AppError("NOT_FOUND", "Assistant thread was not found");
+  }
+
+  return {
+    teamId: access.teamId,
+    thread,
+    messages: await repository.listAssistantMessages(thread.id),
+    toolCalls: await repository.listAssistantToolCalls(thread.id),
+  };
+}
+
+export async function sendAssistantMessage(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: SendAssistantMessageCommand,
+  provider: AssistantResponseProvider = createMockAssistantResponseProvider(),
+): Promise<SendAssistantMessageResult> {
+  const message = command.message.trim();
+
+  if (!message) {
+    throw new AppError("CONFLICT", "Assistant message cannot be empty");
+  }
+
+  return repository.withTransaction(async (transactionRepository) => {
+    const assistantRepository = transactionRepository as DawnRepository;
+    const access = await resolveTeamAccess(
+      assistantRepository,
+      { ...context, teamId: command.teamId ?? context.teamId },
+      "assistant.use",
+      "You cannot use the assistant for this team",
+    );
+    const now = new Date().toISOString();
+    const thread = command.threadId
+      ? await loadAssistantThread(assistantRepository, access.teamId, command.threadId)
+      : await assistantRepository.createAssistantThread({
+          threadId: crypto.randomUUID(),
+          teamId: access.teamId,
+          title: assistantThreadTitle(message),
+          createdByActorId: context.actor.id,
+          createdAt: now,
+        });
+    const userMessage = await assistantRepository.createAssistantMessage({
+      messageId: crypto.randomUUID(),
+      threadId: thread.id,
+      teamId: access.teamId,
+      role: "user",
+      content: message,
+      sourceRefs: [],
+      createdAt: now,
+    });
+    const toolResults = await runAssistantTools(assistantRepository, access, message);
+    const response = await provider.generateResponse({ question: message, toolResults });
+    const assistantMessage = await assistantRepository.createAssistantMessage({
+      messageId: crypto.randomUUID(),
+      threadId: thread.id,
+      teamId: access.teamId,
+      role: "assistant",
+      content: response.content,
+      sourceRefs: response.sourceRefs,
+      createdAt: new Date().toISOString(),
+    });
+    await assistantRepository.createAssistantToolCalls({
+      toolCalls: toolResults.map((result) => ({
+        toolCallId: crypto.randomUUID(),
+        threadId: thread.id,
+        messageId: assistantMessage.id,
+        teamId: access.teamId,
+        toolName: result.toolName,
+        risk: result.risk,
+        status: result.status,
+        input: result.input,
+        output: result.output,
+        sourceRefs: result.sourceRefs,
+        createdAt: assistantMessage.createdAt,
+      })),
+    });
+
+    await assistantRepository.appendAuditEvent({
+      teamId: access.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "assistant.message.created",
+      entityType: "assistant_thread",
+      entityId: thread.id,
+      metadata: {
+        userMessageId: userMessage.id,
+        assistantMessageId: assistantMessage.id,
+        toolNames: toolResults.map((result) => result.toolName),
+      },
+    });
+
+    return {
+      teamId: access.teamId,
+      thread,
+      messages: await assistantRepository.listAssistantMessages(thread.id),
+      toolCalls: await assistantRepository.listAssistantToolCalls(thread.id),
+      toolResults,
+    };
+  });
+}
+
+async function loadAssistantThread(repository: DawnRepository, teamId: string, threadId: string) {
+  const thread = await repository.getAssistantThreadForTeam(teamId, threadId);
+
+  if (!thread) {
+    throw new AppError("NOT_FOUND", "Assistant thread was not found");
+  }
+
+  return thread;
+}
+
+async function runAssistantTools(
+  repository: DawnRepository,
+  access: ResolvedTeamAccess,
+  question: string,
+): Promise<AssistantToolResult[]> {
+  const toolNames = planAssistantTools(question);
+  const results: AssistantToolResult[] = [];
+
+  for (const toolName of toolNames) {
+    const tool = getAssistantTool(toolName);
+    const input = tool.inputSchema.parse(toolInputForQuestion(toolName, question));
+
+    if (!access.permissions.includes(tool.requiredPermission)) {
+      results.push({
+        toolName,
+        risk: tool.risk,
+        status: "refused",
+        input,
+        output: {
+          summary: `Permission ${tool.requiredPermission} is required for ${toolName}.`,
+          requiredPermission: tool.requiredPermission,
+        },
+        sourceRefs: [],
+      });
+      continue;
+    }
+
+    results.push(await executeAssistantTool(repository, access.teamId, toolName, input));
+  }
+
+  return results;
+}
+
+function toolInputForQuestion(
+  toolName: AssistantToolName,
+  question: string,
+): Record<string, unknown> {
+  if (toolName === "get_report_overview") {
+    return {};
+  }
+
+  return { query: question };
+}
+
+async function executeAssistantTool(
+  repository: DawnRepository,
+  teamId: string,
+  toolName: AssistantToolName,
+  input: Record<string, unknown>,
+): Promise<AssistantToolResult> {
+  if (toolName === "search_transactions") {
+    return assistantToolResult(
+      toolName,
+      "read",
+      input,
+      await searchAssistantTransactions(repository, teamId, input),
+    );
+  }
+
+  if (toolName === "list_open_invoices") {
+    return assistantToolResult(
+      toolName,
+      "read",
+      input,
+      await listAssistantOpenInvoices(repository, teamId),
+    );
+  }
+
+  if (toolName === "search_documents") {
+    return assistantToolResult(
+      toolName,
+      "read",
+      input,
+      await searchAssistantDocuments(repository, teamId, input),
+    );
+  }
+
+  if (toolName === "list_customers") {
+    return assistantToolResult(
+      toolName,
+      "read",
+      input,
+      await listAssistantCustomers(repository, teamId, input),
+    );
+  }
+
+  if (toolName === "list_projects") {
+    return assistantToolResult(
+      toolName,
+      "read",
+      input,
+      await listAssistantProjects(repository, teamId, input),
+    );
+  }
+
+  if (toolName === "get_report_overview") {
+    return assistantToolResult(
+      toolName,
+      "read",
+      input,
+      await getAssistantReportOverview(repository, teamId),
+    );
+  }
+
+  if (toolName === "suggest_transaction_category") {
+    return assistantToolResult(
+      toolName,
+      "suggest",
+      input,
+      await suggestAssistantTransactionCategories(repository, teamId, input),
+    );
+  }
+
+  if (toolName === "suggest_inbox_match") {
+    return assistantToolResult(
+      toolName,
+      "suggest",
+      input,
+      await suggestAssistantInboxMatches(repository, teamId),
+    );
+  }
+
+  return assistantToolResult(
+    toolName,
+    "suggest",
+    input,
+    await suggestAssistantInvoiceEmailCopy(repository, teamId),
+  );
+}
+
+function assistantToolResult(
+  toolName: AssistantToolName,
+  risk: AssistantToolResult["risk"],
+  input: Record<string, unknown>,
+  output: { summary: string; sources: ReportSourceRef[] } & Record<string, unknown>,
+): AssistantToolResult {
+  const { sources, ...rest } = output;
+
+  return {
+    toolName,
+    risk,
+    status: "completed",
+    input,
+    output: rest,
+    sourceRefs: sources,
+  };
+}
+
+async function searchAssistantTransactions(
+  repository: DawnRepository,
+  teamId: string,
+  input: Record<string, unknown>,
+) {
+  const query = normalizedAssistantQuery(input);
+  const transactions = (await repository.listTransactionsForReport({ teamId }))
+    .filter((transaction) =>
+      matchesAssistantQuery(query, [
+        transaction.description,
+        transaction.categoryId,
+        transaction.type,
+        transaction.source,
+      ]),
+    )
+    .slice(0, 5);
+
+  return {
+    summary: `Found ${transactions.length} matching transactions.`,
+    transactions: transactions.map((transaction) => ({
+      id: transaction.id,
+      postedAt: transaction.postedAt,
+      description: transaction.description,
+      amount: transaction.money,
+      categoryId: transaction.categoryId,
+      reviewState: transaction.reviewState,
+    })),
+    sources: transactions.map(transactionSource),
+  };
+}
+
+async function listAssistantOpenInvoices(repository: DawnRepository, teamId: string) {
+  const [customers, invoices] = await Promise.all([
+    repository.listCustomers(teamId),
+    repository.listInvoices(teamId),
+  ]);
+  const customerById = new Map(customers.map((customer) => [customer.id, customer]));
+  const openInvoices = unpaidInvoices(invoices, customerById, invoices[0]?.currency ?? "USD").slice(
+    0,
+    5,
+  );
+
+  return {
+    summary: `${openInvoices.length} invoices are currently unpaid.`,
+    invoices: openInvoices.map((invoice) => ({
+      invoiceId: invoice.invoiceId,
+      invoiceNumber: invoice.invoiceNumber,
+      customerName: invoice.customerName,
+      amountDue: invoice.amountDue,
+      dueDate: invoice.dueDate,
+    })),
+    sources: openInvoices.flatMap((invoice) => invoice.sources),
+  };
+}
+
+async function searchAssistantDocuments(
+  repository: DawnRepository,
+  teamId: string,
+  input: Record<string, unknown>,
+) {
+  const query = normalizedAssistantQuery(input);
+  const documents = (await repository.listDocuments(teamId))
+    .filter((document) =>
+      matchesAssistantQuery(query, [document.title, document.currentVersion?.fileName]),
+    )
+    .slice(0, 5);
+  const inboxItems = (await repository.listInboxItems(teamId))
+    .filter((item) =>
+      matchesAssistantQuery(query, [
+        item.document?.title,
+        item.document?.currentVersion?.fileName,
+        item.latestExtraction?.fields.merchantName,
+        item.latestExtraction?.fields.invoiceNumber,
+      ]),
+    )
+    .slice(0, 5);
+
+  return {
+    summary: `Found ${documents.length} documents and ${inboxItems.length} inbox items.`,
+    documents: documents.map((document) => ({
+      id: document.id,
+      title: document.title,
+      fileName: document.currentVersion?.fileName ?? null,
+      status: document.status,
+    })),
+    inboxItems: inboxItems.map((item) => ({
+      id: item.id,
+      status: item.status,
+      extractionStatus: item.extractionStatus,
+      merchantName: item.latestExtraction?.fields.merchantName ?? null,
+    })),
+    sources: [...documents.map(documentSource), ...inboxItems.map(inboxItemSource)],
+  };
+}
+
+async function listAssistantCustomers(
+  repository: DawnRepository,
+  teamId: string,
+  input: Record<string, unknown>,
+) {
+  const query = normalizedAssistantQuery(input);
+  const customers = (await repository.listCustomers(teamId))
+    .filter((customer) => matchesAssistantQuery(query, [customer.name, customer.email]))
+    .slice(0, 5);
+
+  return {
+    summary: `Found ${customers.length} customers.`,
+    customers: customers.map((customer) => ({
+      id: customer.id,
+      name: customer.name,
+      email: customer.email,
+    })),
+    sources: customers.map(customerSource),
+  };
+}
+
+async function listAssistantProjects(
+  repository: DawnRepository,
+  teamId: string,
+  input: Record<string, unknown>,
+) {
+  const query = normalizedAssistantQuery(input);
+  const projects = (await repository.listProjects(teamId))
+    .filter((project) => matchesAssistantQuery(query, [project.name, project.description]))
+    .slice(0, 5);
+
+  return {
+    summary: `Found ${projects.length} projects.`,
+    projects: projects.map((project) => ({
+      id: project.id,
+      name: project.name,
+      status: project.status,
+      billableRate: project.billableRate,
+    })),
+    sources: projects.map(projectSource),
+  };
+}
+
+async function getAssistantReportOverview(repository: DawnRepository, teamId: string) {
+  const report = await loadBusinessReport(repository, teamId, { from: null, to: null });
+  const insights = await repository.listBusinessInsights({ teamId });
+
+  return {
+    summary: `Cashflow is ${formatMoney(report.cashflow)} with ${report.unpaidInvoices.length} unpaid invoices and ${report.inboxBacklog.needsReview} inbox items needing review.`,
+    report: {
+      cashflow: report.cashflow,
+      profit: report.totals.profit,
+      unpaidInvoiceCount: report.unpaidInvoices.length,
+      utilizationBasisPoints: report.timeUtilization.utilizationBasisPoints,
+      insightCount: insights.length,
+    },
+    sources: [
+      ...report.revenueByCustomer.flatMap((bucket) => bucket.sources).slice(0, 3),
+      ...report.unpaidInvoices.flatMap((invoice) => invoice.sources).slice(0, 3),
+      ...insights.flatMap((insight) => insight.sourceRefs).slice(0, 3),
+    ],
+  };
+}
+
+async function suggestAssistantTransactionCategories(
+  repository: DawnRepository,
+  teamId: string,
+  input: Record<string, unknown>,
+) {
+  const query = normalizedAssistantQuery(input);
+  const [workspace, transactions] = await Promise.all([
+    repository.listWorkspace({ id: "assistant", type: "user" }, teamId),
+    repository.listTransactionsForReport({ teamId }),
+  ]);
+  const categories = workspace.categories;
+  const candidates = transactions
+    .filter((transaction) => transaction.categoryId === null)
+    .filter((transaction) => matchesAssistantQuery(query, [transaction.description]))
+    .slice(0, 5);
+  const suggestions = candidates.map((transaction) => {
+    const category =
+      categories.find((candidate) =>
+        transaction.description.toLowerCase().includes(candidate.name.toLowerCase()),
+      ) ??
+      categories[0] ??
+      null;
+
+    return {
+      transactionId: transaction.id,
+      description: transaction.description,
+      suggestedCategoryId: category?.id ?? null,
+      suggestedCategoryName: category?.name ?? null,
+      confidence: category ? 0.72 : 0.2,
+    };
+  });
+
+  return {
+    summary: `Prepared ${suggestions.length} category suggestions without changing transactions.`,
+    suggestions,
+    sources: candidates.map(transactionSource),
+  };
+}
+
+async function suggestAssistantInboxMatches(repository: DawnRepository, teamId: string) {
+  const inboxItems = (await repository.listInboxItems(teamId))
+    .filter((item) => item.status !== "resolved")
+    .slice(0, 5);
+  const suggestions = inboxItems.flatMap((item) =>
+    (item.matchSuggestions ?? [])
+      .filter((suggestion) => suggestion.status === "suggested")
+      .slice(0, 2)
+      .map((suggestion) => ({
+        inboxItemId: item.id,
+        transactionId: suggestion.transactionId,
+        confidence: suggestion.confidence,
+        explanation: suggestion.explanation,
+      })),
+  );
+
+  return {
+    summary: `Found ${suggestions.length} existing inbox match suggestions without accepting them.`,
+    suggestions,
+    sources: inboxItems.map(inboxItemSource),
+  };
+}
+
+async function suggestAssistantInvoiceEmailCopy(repository: DawnRepository, teamId: string) {
+  const [customers, invoices] = await Promise.all([
+    repository.listCustomers(teamId),
+    repository.listInvoices(teamId),
+  ]);
+  const customerById = new Map(customers.map((customer) => [customer.id, customer]));
+  const invoice = invoices.find(
+    (candidate) =>
+      candidate.status !== "paid" &&
+      candidate.status !== "void" &&
+      candidate.totals.total.amountMinor > candidate.amountPaid.amountMinor,
+  );
+
+  if (!invoice) {
+    return {
+      summary: "There are no open invoices to draft follow-up copy for.",
+      suggestions: [],
+      sources: [],
+    };
+  }
+
+  const customer = customerById.get(invoice.customerId);
+  const amountDue = {
+    amountMinor: invoice.totals.total.amountMinor - invoice.amountPaid.amountMinor,
+    currency: invoice.currency,
+  };
+
+  return {
+    summary: `Drafted follow-up email copy for ${invoice.invoiceNumber}; nothing was sent.`,
+    suggestions: [
+      {
+        invoiceId: invoice.id,
+        subject: `Following up on ${invoice.invoiceNumber}`,
+        body: `Hi ${customer?.name ?? "there"},\n\nI'm following up on ${invoice.invoiceNumber} for ${formatMoney(amountDue)}. Please let me know if you need anything from us.\n\nThanks,`,
+      },
+    ],
+    sources: [invoiceSource(invoice)],
+  };
+}
+
+function normalizedAssistantQuery(input: Record<string, unknown>) {
+  return typeof input.query === "string" ? input.query.toLowerCase() : "";
+}
+
+function matchesAssistantQuery(query: string, values: readonly (string | null | undefined)[]) {
+  if (!query) {
+    return true;
+  }
+
+  const tokens = query
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length > 2)
+    .filter(
+      (token) => !["and", "the", "for", "with", "about", "explain", "suggest"].includes(token),
+    );
+
+  if (tokens.length === 0) {
+    return true;
+  }
+
+  return values.some((value) => {
+    const normalized = value?.toLowerCase();
+    return normalized ? tokens.some((token) => normalized.includes(token)) : false;
+  });
+}
+
+function assistantThreadTitle(message: string) {
+  return message.length > 60 ? `${message.slice(0, 57)}...` : message;
+}
+
 async function loadBusinessReport(
   repository: DawnRepository,
   teamId: string,
@@ -4415,6 +5071,38 @@ function invoiceSource(invoice: InvoiceDraft): ReportSourceRef {
     type: "invoice",
     id: invoice.id,
     label: invoice.invoiceNumber,
+  };
+}
+
+function documentSource(document: BusinessDocument): ReportSourceRef {
+  return {
+    type: "document",
+    id: document.id,
+    label: document.title,
+  };
+}
+
+function customerSource(customer: Customer): ReportSourceRef {
+  return {
+    type: "customer",
+    id: customer.id,
+    label: customer.name,
+  };
+}
+
+function projectSource(project: Project): ReportSourceRef {
+  return {
+    type: "project",
+    id: project.id,
+    label: project.name,
+  };
+}
+
+function inboxItemSource(item: InboxItem): ReportSourceRef {
+  return {
+    type: "inbox_item",
+    id: item.id,
+    label: item.document?.title ?? item.source?.name ?? item.id,
   };
 }
 
