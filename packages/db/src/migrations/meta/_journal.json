@@ -64,6 +64,13 @@
       "when": 1781482422789,
       "tag": "0008_blue_misty_knight",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1781483223842,
+      "tag": "0009_jazzy_paladin",
+      "breakpoints": true
     }
   ]
 }

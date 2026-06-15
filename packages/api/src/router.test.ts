@@ -22,12 +22,15 @@ import type {
   DocumentExtractionConfidence,
   DocumentExtractionFields,
   DocumentUrlSigner,
+  HardNegativeTransactionMatch,
   IdempotencyResult,
   InboxItem,
+  InboxTransactionMatchSuggestion,
   InboxSource,
   InboxSourceType,
   ProviderSyncRun,
   ReviewWorkspaceData,
+  TeamAlias,
   TransactionImportSession,
 } from "@dawn/app";
 import { createMockBankingProvider } from "@dawn/integrations";
@@ -47,6 +50,10 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   importSessions: TransactionImportSession[] = [];
   invites = new Map<string, TeamInvite>();
+  matchSuggestions = new Map<string, InboxTransactionMatchSuggestion>();
+  aliases: TeamAlias[] = [];
+  hardNegatives: HardNegativeTransactionMatch[] = [];
+  attachments: { transactionId: string; documentId: string }[] = [];
   memberships = new Map<string, TeamRole>();
   providerObjects = new Map<string, Record<string, unknown>>();
   syncRuns: ProviderSyncRun[] = [];
@@ -672,6 +679,134 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return updated;
   }
 
+  async listTeamAliases(teamId: string) {
+    return this.aliases.filter((alias) => alias.teamId === teamId);
+  }
+
+  async listHardNegativeMatches(teamId: string, inboxItemId: string) {
+    return this.hardNegatives.filter(
+      (match) => match.teamId === teamId && match.inboxItemId === inboxItemId,
+    );
+  }
+
+  async upsertInboxMatchSuggestions(input: {
+    teamId: string;
+    inboxItemId: string;
+    suggestions: {
+      transactionId: string;
+      score: number;
+      confidence: InboxTransactionMatchSuggestion["confidence"];
+      explanation: string[];
+    }[];
+  }) {
+    const persisted = input.suggestions.map((suggestion, index) => {
+      const existing = [...this.matchSuggestions.values()].find(
+        (record) =>
+          record.teamId === input.teamId &&
+          record.inboxItemId === input.inboxItemId &&
+          record.transactionId === suggestion.transactionId,
+      );
+      const record: InboxTransactionMatchSuggestion = {
+        id: existing?.id ?? `match_${this.matchSuggestions.size + index + 1}`,
+        teamId: input.teamId,
+        inboxItemId: input.inboxItemId,
+        transactionId: suggestion.transactionId,
+        score: suggestion.score,
+        confidence: suggestion.confidence,
+        explanation: suggestion.explanation,
+        status: existing?.status ?? "suggested",
+        createdAt: existing?.createdAt ?? "2026-06-15T10:04:00.000Z",
+        updatedAt: "2026-06-15T10:04:00.000Z",
+        transaction: this.transactions.get(suggestion.transactionId) ?? null,
+      };
+      this.matchSuggestions.set(record.id, record);
+      return record;
+    });
+    const item = this.inboxItems.get(input.inboxItemId);
+
+    if (item?.teamId === input.teamId) {
+      this.inboxItems.set(item.id, { ...item, matchSuggestions: persisted });
+    }
+
+    return persisted;
+  }
+
+  async getInboxMatchSuggestionForTeam(teamId: string, suggestionId: string) {
+    const suggestion = this.matchSuggestions.get(suggestionId);
+    return suggestion?.teamId === teamId ? suggestion : null;
+  }
+
+  async acceptInboxMatchSuggestion(input: {
+    teamId: string;
+    suggestionId: string;
+    actorId: string;
+  }) {
+    const suggestion = this.matchSuggestions.get(input.suggestionId);
+
+    if (!suggestion || suggestion.teamId !== input.teamId) {
+      throw new Error("Inbox match suggestion not found");
+    }
+
+    const item = this.inboxItems.get(suggestion.inboxItemId);
+
+    if (!item) {
+      throw new Error("Inbox item not found");
+    }
+
+    const accepted = { ...suggestion, status: "accepted" as const };
+    this.matchSuggestions.set(accepted.id, accepted);
+    this.attachments.push({
+      transactionId: accepted.transactionId,
+      documentId: item.documentId,
+    });
+
+    if (item.latestExtraction?.fields.merchantName && accepted.transaction?.description) {
+      this.aliases.push({
+        id: `alias_${this.aliases.length + 1}`,
+        teamId: input.teamId,
+        source: item.latestExtraction.fields.merchantName,
+        target: accepted.transaction.description,
+        createdAt: "2026-06-15T10:04:00.000Z",
+      });
+    }
+
+    const updatedItem = {
+      ...item,
+      status: "resolved" as const,
+      matchSuggestions: [accepted],
+      updatedAt: "2026-06-15T10:04:00.000Z",
+    };
+    this.inboxItems.set(updatedItem.id, updatedItem);
+
+    return { suggestion: accepted, inboxItem: updatedItem };
+  }
+
+  async rejectInboxMatchSuggestion(input: {
+    teamId: string;
+    suggestionId: string;
+    reason?: string | null;
+    actorId: string;
+  }) {
+    const suggestion = this.matchSuggestions.get(input.suggestionId);
+
+    if (!suggestion || suggestion.teamId !== input.teamId) {
+      throw new Error("Inbox match suggestion not found");
+    }
+
+    const rejected = { ...suggestion, status: "rejected" as const };
+    this.matchSuggestions.set(rejected.id, rejected);
+    this.hardNegatives.push({
+      id: `negative_${this.hardNegatives.length + 1}`,
+      teamId: input.teamId,
+      inboxItemId: rejected.inboxItemId,
+      transactionId: rejected.transactionId,
+      reason: input.reason,
+      createdAt: "2026-06-15T10:04:00.000Z",
+    });
+
+    return rejected;
+  }
+
   async createTeamInvite(input: {
     teamId: string;
     email: string;
@@ -1262,6 +1397,112 @@ describe("appRouter", () => {
     expect(repository.outboxEvents.at(-1)).toMatchObject({
       type: "document_extraction.corrected",
     });
+  });
+
+  test("suggests, accepts, and rejects inbox transaction matches through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    repository.transactions.set("txn_1", {
+      id: "txn_1",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Acme Supply INV-42",
+      postedAt: "2026-06-14T10:20:00.000Z",
+      money: { amountMinor: -4250, currency: "USD" },
+      type: "expense",
+      source: "bank_sync",
+      providerTransactionId: "provider_txn_1",
+      categoryId: null,
+      reviewState: "needs_review",
+    });
+    repository.transactions.set("txn_2", {
+      id: "txn_2",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Acme Supply INV-42 duplicate",
+      postedAt: "2026-06-14T10:20:00.000Z",
+      money: { amountMinor: -4250, currency: "USD" },
+      type: "expense",
+      source: "bank_sync",
+      providerTransactionId: "provider_txn_2",
+      categoryId: null,
+      reviewState: "needs_review",
+    });
+    repository.inboxItems.set("inbox_1", {
+      id: "inbox_1",
+      teamId: "team_1",
+      sourceId: "source_1",
+      sourceType: "document_upload",
+      documentId: "doc_1",
+      documentVersionId: "version_1",
+      status: "needs_review",
+      extractionStatus: "completed",
+      createdByActorId: "user_1",
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:02:00.000Z",
+      latestExtraction: {
+        id: "extract_1",
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        documentId: "doc_1",
+        documentVersionId: "version_1",
+        extractionVersion: 1,
+        source: "local_deterministic",
+        status: "completed",
+        fields: {
+          merchantName: "Acme Supply",
+          issuedAt: "2026-06-14T00:00:00.000Z",
+          invoiceNumber: "INV-42",
+          totalAmountMinor: 4250,
+          currency: "USD",
+        },
+        confidence: {},
+        rawText: "Acme Supply invoice INV-42 total USD 42.50",
+        error: null,
+        createdByActorId: "user_1",
+        createdAt: "2026-06-15T10:02:00.000Z",
+      },
+    });
+    const router = await createTestRouter(repository);
+    const callerContext = {
+      context: testContext({ id: "user_1", email: "member@example.com" }),
+    };
+
+    const generated = await call(
+      router.inbox.suggestMatches,
+      { teamId: "team_1", inboxItemId: "inbox_1" },
+      callerContext,
+    );
+    const accepted = await call(
+      router.inbox.acceptMatch,
+      {
+        teamId: "team_1",
+        suggestionId: generated.suggestions[0]?.id ?? "",
+        idempotencyKey: "accept_match_1",
+      },
+      callerContext,
+    );
+    const rejected = await call(
+      router.inbox.rejectMatch,
+      {
+        teamId: "team_1",
+        suggestionId: generated.suggestions[1]?.id ?? "",
+        reason: "wrong duplicate",
+        idempotencyKey: "reject_match_1",
+      },
+      callerContext,
+    );
+
+    expect(generated.suggestions).toHaveLength(2);
+    expect(generated.suggestions[0]?.score).toBeGreaterThanOrEqual(0.75);
+    expect(accepted.suggestion.status).toBe("accepted");
+    expect(accepted.inboxItem.status).toBe("resolved");
+    expect(repository.attachments).toEqual([{ transactionId: "txn_1", documentId: "doc_1" }]);
+    expect(rejected.suggestion.status).toBe("rejected");
+    expect(repository.hardNegatives).toMatchObject([
+      { inboxItemId: "inbox_1", transactionId: "txn_2", reason: "wrong duplicate" },
+    ]);
   });
 
   test("connects and syncs a mock bank provider through protected routes", async () => {

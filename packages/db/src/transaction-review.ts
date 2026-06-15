@@ -11,8 +11,10 @@ import type {
   DocumentExtractionConfidence,
   DocumentExtractionFields,
   DocumentExtractionSource,
+  HardNegativeTransactionMatch,
   IdempotencyResult,
   InboxItem,
+  InboxTransactionMatchSuggestion,
   InboxSource,
   InboxSourceType,
   JobRun,
@@ -20,6 +22,7 @@ import type {
   OutboxEvent,
   ProviderSyncRun,
   ReviewWorkspaceData,
+  TeamAlias,
   TransactionImportSession,
 } from "@dawn/app";
 import type {
@@ -736,7 +739,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
   }
 
   async listInboxItems(teamId: string): Promise<InboxItem[]> {
-    const [items, sources, documents, versions, extractions] = await Promise.all([
+    const [items, sources, documents, versions, extractions, matchSuggestions] = await Promise.all([
       this.client
         .select()
         .from(schema.inboxItem)
@@ -755,6 +758,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
         .select()
         .from(schema.documentExtraction)
         .where(eq(schema.documentExtraction.teamId, teamId)),
+      this.listInboxMatchSuggestions(teamId),
     ]);
 
     return items.map((item) =>
@@ -763,6 +767,9 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
         document: documents.find((document) => document.id === item.documentId) ?? null,
         version: versions.find((version) => version.id === item.documentVersionId) ?? null,
         latestExtraction: latestExtractionForItem(extractions, item.id),
+        matchSuggestions: matchSuggestions.filter(
+          (suggestion) => suggestion.inboxItemId === item.id,
+        ),
       }),
     );
   }
@@ -862,7 +869,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       return null;
     }
 
-    const [source, document, version, latestExtraction] = await Promise.all([
+    const [source, document, version, latestExtraction, matchSuggestions] = await Promise.all([
       this.client
         .select()
         .from(schema.inboxSource)
@@ -888,9 +895,10 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
         .orderBy(desc(schema.documentExtraction.extractionVersion))
         .limit(1)
         .then((rows) => rows[0] ?? null),
+      this.listInboxMatchSuggestions(teamId, inboxItemId),
     ]);
 
-    return mapInboxItem(item, { source, document, version, latestExtraction });
+    return mapInboxItem(item, { source, document, version, latestExtraction, matchSuggestions });
   }
 
   async createDocumentExtraction(input: {
@@ -1033,6 +1041,269 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     }
 
     return mapInboxItem(item);
+  }
+
+  async listTeamAliases(teamId: string): Promise<TeamAlias[]> {
+    const aliases = await this.client
+      .select()
+      .from(schema.teamAlias)
+      .where(eq(schema.teamAlias.teamId, teamId))
+      .orderBy(desc(schema.teamAlias.createdAt));
+
+    return aliases.map(mapTeamAlias);
+  }
+
+  async listHardNegativeMatches(
+    teamId: string,
+    inboxItemId: string,
+  ): Promise<HardNegativeTransactionMatch[]> {
+    const matches = await this.client
+      .select()
+      .from(schema.hardNegativeMatch)
+      .where(
+        and(
+          eq(schema.hardNegativeMatch.teamId, teamId),
+          eq(schema.hardNegativeMatch.inboxItemId, inboxItemId),
+        ),
+      );
+
+    return matches.map(mapHardNegativeMatch);
+  }
+
+  async upsertInboxMatchSuggestions(input: {
+    teamId: string;
+    inboxItemId: string;
+    suggestions: {
+      inboxItemId: string;
+      transactionId: string;
+      score: number;
+      confidence: InboxTransactionMatchSuggestion["confidence"];
+      explanation: string[];
+    }[];
+  }): Promise<InboxTransactionMatchSuggestion[]> {
+    if (input.suggestions.length === 0) {
+      return [];
+    }
+
+    await this.client
+      .insert(schema.inboxMatchSuggestion)
+      .values(
+        input.suggestions.map((suggestion) => ({
+          id: crypto.randomUUID(),
+          teamId: input.teamId,
+          inboxItemId: input.inboxItemId,
+          transactionId: suggestion.transactionId,
+          score: Math.round(suggestion.score * 1_000),
+          confidence: suggestion.confidence,
+          explanation: suggestion.explanation,
+          status: "suggested",
+        })),
+      )
+      .onConflictDoUpdate({
+        target: [
+          schema.inboxMatchSuggestion.teamId,
+          schema.inboxMatchSuggestion.inboxItemId,
+          schema.inboxMatchSuggestion.transactionId,
+        ],
+        set: {
+          score: sql`excluded.score`,
+          confidence: sql`excluded.confidence`,
+          explanation: sql`excluded.explanation`,
+          updatedAt: new Date(),
+        },
+        setWhere: eq(schema.inboxMatchSuggestion.status, "suggested"),
+      });
+
+    return this.listInboxMatchSuggestions(input.teamId, input.inboxItemId);
+  }
+
+  async listInboxMatchSuggestions(
+    teamId: string,
+    inboxItemId?: string,
+  ): Promise<InboxTransactionMatchSuggestion[]> {
+    const rows = await this.client
+      .select({
+        suggestion: schema.inboxMatchSuggestion,
+        transaction: schema.transaction,
+      })
+      .from(schema.inboxMatchSuggestion)
+      .leftJoin(
+        schema.transaction,
+        eq(schema.transaction.id, schema.inboxMatchSuggestion.transactionId),
+      )
+      .where(
+        inboxItemId
+          ? and(
+              eq(schema.inboxMatchSuggestion.teamId, teamId),
+              eq(schema.inboxMatchSuggestion.inboxItemId, inboxItemId),
+            )
+          : eq(schema.inboxMatchSuggestion.teamId, teamId),
+      )
+      .orderBy(
+        desc(schema.inboxMatchSuggestion.score),
+        desc(schema.inboxMatchSuggestion.updatedAt),
+      );
+
+    return rows.map((row) => mapInboxMatchSuggestion(row.suggestion, row.transaction));
+  }
+
+  async getInboxMatchSuggestionForTeam(teamId: string, suggestionId: string) {
+    const [row] = await this.client
+      .select({
+        suggestion: schema.inboxMatchSuggestion,
+        transaction: schema.transaction,
+      })
+      .from(schema.inboxMatchSuggestion)
+      .leftJoin(
+        schema.transaction,
+        eq(schema.transaction.id, schema.inboxMatchSuggestion.transactionId),
+      )
+      .where(
+        and(
+          eq(schema.inboxMatchSuggestion.teamId, teamId),
+          eq(schema.inboxMatchSuggestion.id, suggestionId),
+        ),
+      )
+      .limit(1);
+
+    return row ? mapInboxMatchSuggestion(row.suggestion, row.transaction) : null;
+  }
+
+  async acceptInboxMatchSuggestion(input: {
+    teamId: string;
+    suggestionId: string;
+    actorId: string;
+  }): Promise<{ suggestion: InboxTransactionMatchSuggestion; inboxItem: InboxItem }> {
+    const suggestion = await this.getInboxMatchSuggestionForTeam(input.teamId, input.suggestionId);
+
+    if (!suggestion) {
+      throw new Error("Inbox match suggestion not found");
+    }
+
+    const item = await this.getInboxItemForTeam(input.teamId, suggestion.inboxItemId);
+
+    if (!item) {
+      throw new Error("Inbox item not found");
+    }
+
+    await this.client
+      .insert(schema.transactionAttachment)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        transactionId: suggestion.transactionId,
+        documentId: item.documentId,
+        inboxItemId: item.id,
+        createdByActorId: input.actorId,
+      })
+      .onConflictDoNothing();
+
+    if (item.latestExtraction?.fields.merchantName && suggestion.transaction?.description) {
+      await this.client
+        .insert(schema.teamAlias)
+        .values({
+          id: crypto.randomUUID(),
+          teamId: input.teamId,
+          source: item.latestExtraction.fields.merchantName,
+          target: suggestion.transaction.description,
+          createdByActorId: input.actorId,
+        })
+        .onConflictDoNothing();
+    }
+
+    const [accepted] = await this.client
+      .update(schema.inboxMatchSuggestion)
+      .set({
+        status: "accepted",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.inboxMatchSuggestion.teamId, input.teamId),
+          eq(schema.inboxMatchSuggestion.id, input.suggestionId),
+        ),
+      )
+      .returning();
+
+    if (!accepted) {
+      throw new Error("Inbox match suggestion was not accepted");
+    }
+
+    const [updatedItem] = await this.client
+      .update(schema.inboxItem)
+      .set({
+        status: "resolved",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.inboxItem.teamId, input.teamId),
+          eq(schema.inboxItem.id, suggestion.inboxItemId),
+        ),
+      )
+      .returning();
+
+    if (!updatedItem) {
+      throw new Error("Inbox item was not resolved");
+    }
+
+    const [hydratedSuggestion, hydratedItem] = await Promise.all([
+      this.getInboxMatchSuggestionForTeam(input.teamId, input.suggestionId),
+      this.getInboxItemForTeam(input.teamId, suggestion.inboxItemId),
+    ]);
+
+    return {
+      suggestion: hydratedSuggestion ?? mapInboxMatchSuggestion(accepted, null),
+      inboxItem: hydratedItem ?? mapInboxItem(updatedItem),
+    };
+  }
+
+  async rejectInboxMatchSuggestion(input: {
+    teamId: string;
+    suggestionId: string;
+    reason?: string | null;
+    actorId: string;
+  }): Promise<InboxTransactionMatchSuggestion> {
+    const suggestion = await this.getInboxMatchSuggestionForTeam(input.teamId, input.suggestionId);
+
+    if (!suggestion) {
+      throw new Error("Inbox match suggestion not found");
+    }
+
+    await this.client
+      .insert(schema.hardNegativeMatch)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: input.teamId,
+        inboxItemId: suggestion.inboxItemId,
+        transactionId: suggestion.transactionId,
+        reason: input.reason ?? null,
+        createdByActorId: input.actorId,
+      })
+      .onConflictDoNothing();
+
+    const [rejected] = await this.client
+      .update(schema.inboxMatchSuggestion)
+      .set({
+        status: "rejected",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.inboxMatchSuggestion.teamId, input.teamId),
+          eq(schema.inboxMatchSuggestion.id, input.suggestionId),
+        ),
+      )
+      .returning();
+
+    if (!rejected) {
+      throw new Error("Inbox match suggestion was not rejected");
+    }
+
+    return (
+      (await this.getInboxMatchSuggestionForTeam(input.teamId, input.suggestionId)) ??
+      mapInboxMatchSuggestion(rejected, null)
+    );
   }
 
   private async nextDocumentExtractionVersion(inboxItemId: string) {
@@ -1652,6 +1923,7 @@ function mapInboxItem(
     document?: typeof schema.businessDocument.$inferSelect | null;
     version?: typeof schema.documentVersion.$inferSelect | null;
     latestExtraction?: typeof schema.documentExtraction.$inferSelect | null;
+    matchSuggestions?: InboxTransactionMatchSuggestion[];
   } = {},
 ): InboxItem {
   return {
@@ -1676,6 +1948,49 @@ function mapInboxItem(
     latestExtraction: related.latestExtraction
       ? mapDocumentExtraction(related.latestExtraction)
       : null,
+    matchSuggestions: related.matchSuggestions ?? [],
+  };
+}
+
+function mapInboxMatchSuggestion(
+  suggestion: typeof schema.inboxMatchSuggestion.$inferSelect,
+  transaction: typeof schema.transaction.$inferSelect | null,
+): InboxTransactionMatchSuggestion {
+  return {
+    id: suggestion.id,
+    teamId: suggestion.teamId,
+    inboxItemId: suggestion.inboxItemId,
+    transactionId: suggestion.transactionId,
+    score: suggestion.score / 1_000,
+    confidence: suggestion.confidence as InboxTransactionMatchSuggestion["confidence"],
+    explanation: suggestion.explanation,
+    status: suggestion.status as InboxTransactionMatchSuggestion["status"],
+    createdAt: suggestion.createdAt.toISOString(),
+    updatedAt: suggestion.updatedAt.toISOString(),
+    transaction: transaction ? mapTransaction(transaction) : null,
+  };
+}
+
+function mapTeamAlias(alias: typeof schema.teamAlias.$inferSelect): TeamAlias {
+  return {
+    id: alias.id,
+    teamId: alias.teamId,
+    source: alias.source,
+    target: alias.target,
+    createdAt: alias.createdAt.toISOString(),
+  };
+}
+
+function mapHardNegativeMatch(
+  match: typeof schema.hardNegativeMatch.$inferSelect,
+): HardNegativeTransactionMatch {
+  return {
+    id: match.id,
+    teamId: match.teamId,
+    inboxItemId: match.inboxItemId,
+    transactionId: match.transactionId,
+    reason: match.reason,
+    createdAt: match.createdAt.toISOString(),
   };
 }
 

@@ -559,6 +559,113 @@ export const documentExtraction = pgTable(
   ],
 );
 
+export const inboxMatchSuggestion = pgTable(
+  "inbox_match_suggestion",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    inboxItemId: text("inbox_item_id")
+      .notNull()
+      .references(() => inboxItem.id, { onDelete: "cascade" }),
+    transactionId: text("transaction_id")
+      .notNull()
+      .references(() => transaction.id, { onDelete: "cascade" }),
+    score: integer("score").notNull(),
+    confidence: text("confidence").notNull(),
+    explanation: jsonb("explanation").$type<string[]>().notNull(),
+    status: text("status").default("suggested").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("inbox_match_suggestion_item_transaction_idx").on(
+      table.teamId,
+      table.inboxItemId,
+      table.transactionId,
+    ),
+    index("inbox_match_suggestion_team_item_idx").on(table.teamId, table.inboxItemId),
+    index("inbox_match_suggestion_transaction_idx").on(table.transactionId),
+  ],
+);
+
+export const transactionAttachment = pgTable(
+  "transaction_attachment",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    transactionId: text("transaction_id")
+      .notNull()
+      .references(() => transaction.id, { onDelete: "cascade" }),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => businessDocument.id, { onDelete: "cascade" }),
+    inboxItemId: text("inbox_item_id").references(() => inboxItem.id, { onDelete: "set null" }),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("transaction_attachment_document_idx").on(
+      table.teamId,
+      table.transactionId,
+      table.documentId,
+    ),
+    index("transaction_attachment_team_transaction_idx").on(table.teamId, table.transactionId),
+    index("transaction_attachment_inbox_item_idx").on(table.inboxItemId),
+  ],
+);
+
+export const teamAlias = pgTable(
+  "team_alias",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    target: text("target").notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("team_alias_source_target_idx").on(table.teamId, table.source, table.target),
+    index("team_alias_team_idx").on(table.teamId),
+  ],
+);
+
+export const hardNegativeMatch = pgTable(
+  "hard_negative_match",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    inboxItemId: text("inbox_item_id")
+      .notNull()
+      .references(() => inboxItem.id, { onDelete: "cascade" }),
+    transactionId: text("transaction_id")
+      .notNull()
+      .references(() => transaction.id, { onDelete: "cascade" }),
+    reason: text("reason"),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("hard_negative_match_item_transaction_idx").on(
+      table.teamId,
+      table.inboxItemId,
+      table.transactionId,
+    ),
+    index("hard_negative_match_team_item_idx").on(table.teamId, table.inboxItemId),
+  ],
+);
+
 export const idempotencyKey = pgTable(
   "idempotency_key",
   {

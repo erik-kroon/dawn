@@ -195,6 +195,29 @@ function RouteComponent() {
       },
     }),
   );
+  const suggestInboxMatchesMutation = useMutation(
+    orpc.inbox.suggestMatches.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
+      },
+    }),
+  );
+  const acceptInboxMatchMutation = useMutation(
+    orpc.inbox.acceptMatch.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
+        await queryClient.invalidateQueries({ queryKey: orpc.transactionReview.list.queryKey() });
+        await transactionSync.refetch();
+      },
+    }),
+  );
+  const rejectInboxMatchMutation = useMutation(
+    orpc.inbox.rejectMatch.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
+      },
+    }),
+  );
   const csvCommitMutation = useMutation(
     orpc.csvImport.commit.mutationOptions({
       onSuccess: async () => {
@@ -667,6 +690,101 @@ function RouteComponent() {
                           Confidence: {formatExtractionConfidence(item.latestExtraction.confidence)}
                         </p>
                       ) : null}
+                      <div className="grid gap-2">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <p className="text-sm font-medium">Match suggestions</p>
+                          <Button
+                            disabled={
+                              suggestInboxMatchesMutation.isPending ||
+                              !transactionReview.data.teamId ||
+                              item.extractionStatus !== "completed"
+                            }
+                            onClick={() =>
+                              suggestInboxMatchesMutation.mutate({
+                                teamId: transactionReview.data.teamId,
+                                inboxItemId: item.id,
+                              })
+                            }
+                            size="sm"
+                            variant="outline"
+                          >
+                            Find matches
+                          </Button>
+                        </div>
+                        {item.matchSuggestions?.length ? (
+                          <div className="grid gap-2">
+                            {item.matchSuggestions.map((suggestion) => (
+                              <div
+                                className="grid gap-2 border p-2 text-sm md:grid-cols-[1fr_auto]"
+                                key={suggestion.id}
+                              >
+                                <div className="grid gap-1">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="font-medium">
+                                      {suggestion.transaction?.description ??
+                                        suggestion.transactionId}
+                                    </span>
+                                    <span className="text-xs text-muted-foreground">
+                                      {formatMatchScore(suggestion.score)} · {suggestion.confidence}{" "}
+                                      · {suggestion.status}
+                                    </span>
+                                  </div>
+                                  {suggestion.transaction ? (
+                                    <p className="text-muted-foreground">
+                                      {formatMoney(suggestion.transaction.money)} ·{" "}
+                                      {new Date(
+                                        suggestion.transaction.postedAt,
+                                      ).toLocaleDateString()}
+                                    </p>
+                                  ) : null}
+                                  <p className="text-xs text-muted-foreground">
+                                    {suggestion.explanation.join(" · ")}
+                                  </p>
+                                </div>
+                                <div className="flex items-start justify-end gap-2">
+                                  <Button
+                                    disabled={
+                                      acceptInboxMatchMutation.isPending ||
+                                      suggestion.status !== "suggested"
+                                    }
+                                    onClick={() =>
+                                      acceptInboxMatchMutation.mutate({
+                                        teamId: transactionReview.data.teamId,
+                                        suggestionId: suggestion.id,
+                                        idempotencyKey: crypto.randomUUID(),
+                                      })
+                                    }
+                                    size="sm"
+                                  >
+                                    Accept
+                                  </Button>
+                                  <Button
+                                    disabled={
+                                      rejectInboxMatchMutation.isPending ||
+                                      suggestion.status !== "suggested"
+                                    }
+                                    onClick={() =>
+                                      rejectInboxMatchMutation.mutate({
+                                        teamId: transactionReview.data.teamId,
+                                        suggestionId: suggestion.id,
+                                        idempotencyKey: crypto.randomUUID(),
+                                      })
+                                    }
+                                    size="sm"
+                                    variant="outline"
+                                  >
+                                    Reject
+                                  </Button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-muted-foreground">
+                            No suggestions generated for this item.
+                          </p>
+                        )}
+                      </div>
                       <div className="flex justify-end">
                         <Button
                           disabled={
@@ -696,6 +814,17 @@ function RouteComponent() {
                 <p className="text-sm text-destructive">
                   {extractionCorrectionMutation.error.message}
                 </p>
+              ) : null}
+              {suggestInboxMatchesMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {suggestInboxMatchesMutation.error.message}
+                </p>
+              ) : null}
+              {acceptInboxMatchMutation.error ? (
+                <p className="text-sm text-destructive">{acceptInboxMatchMutation.error.message}</p>
+              ) : null}
+              {rejectInboxMatchMutation.error ? (
+                <p className="text-sm text-destructive">{rejectInboxMatchMutation.error.message}</p>
               ) : null}
             </div>
           ) : null}
@@ -1200,6 +1329,10 @@ function isTransactionSyncRecord(transaction: {
   updatedAt?: string | null;
 }): transaction is TransactionSyncRecord {
   return typeof transaction.updatedAt === "string" && transaction.updatedAt.length > 0;
+}
+
+function formatMatchScore(score: number) {
+  return `${Math.round(score * 100)}%`;
 }
 
 function errorMessage(error: unknown) {

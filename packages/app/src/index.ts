@@ -8,11 +8,14 @@ import type {
   Permission,
   ReportTotals,
   Team,
+  TeamMatchAlias,
   TeamInvite,
   TeamMember,
   TeamMembership,
   TeamRole,
   Transaction,
+  InboxMatchConfidence,
+  InboxMatchSuggestion,
 } from "@dawn/domain";
 import type {
   BankingProvider,
@@ -32,6 +35,7 @@ import {
   parseCsvTransactionRows,
   permissionsForRole,
   roleHasPermission,
+  suggestInboxTransactionMatches,
 } from "@dawn/domain";
 import { providerTransactionToLedgerDraft } from "@dawn/integrations";
 import { dawnQueueNames, nextOutboxRetryAt, outboxEventToQueueMessages } from "@dawn/jobs";
@@ -296,6 +300,38 @@ export type InboxItem = {
   source?: InboxSource | null;
   document?: BusinessDocument | null;
   latestExtraction?: DocumentExtraction | null;
+  matchSuggestions?: InboxTransactionMatchSuggestion[];
+};
+
+export type InboxTransactionMatchStatus = "suggested" | "accepted" | "rejected";
+
+export type InboxTransactionMatchSuggestion = {
+  id: string;
+  teamId: string;
+  inboxItemId: string;
+  transactionId: string;
+  score: number;
+  confidence: InboxMatchConfidence;
+  explanation: string[];
+  status: InboxTransactionMatchStatus;
+  createdAt: string;
+  updatedAt: string;
+  transaction?: Transaction | null;
+};
+
+export type TeamAlias = TeamMatchAlias & {
+  id: string;
+  teamId: string;
+  createdAt: string;
+};
+
+export type HardNegativeTransactionMatch = {
+  id: string;
+  teamId: string;
+  inboxItemId: string;
+  transactionId: string;
+  reason?: string | null;
+  createdAt: string;
 };
 
 export type DocumentType =
@@ -367,6 +403,40 @@ export type CorrectDocumentExtractionCommand = {
 export type CorrectDocumentExtractionResult = {
   inboxItem: InboxItem;
   extraction: DocumentExtraction;
+  replayed: boolean;
+};
+
+export type GenerateInboxMatchSuggestionsCommand = {
+  teamId: string;
+  inboxItemId: string;
+};
+
+export type GenerateInboxMatchSuggestionsResult = {
+  inboxItemId: string;
+  suggestions: InboxTransactionMatchSuggestion[];
+};
+
+export type AcceptInboxMatchCommand = {
+  teamId: string;
+  suggestionId: string;
+  idempotencyKey: string;
+};
+
+export type AcceptInboxMatchResult = {
+  suggestion: InboxTransactionMatchSuggestion;
+  inboxItem: InboxItem;
+  replayed: boolean;
+};
+
+export type RejectInboxMatchCommand = {
+  teamId: string;
+  suggestionId: string;
+  reason?: string | null;
+  idempotencyKey: string;
+};
+
+export type RejectInboxMatchResult = {
+  suggestion: InboxTransactionMatchSuggestion;
   replayed: boolean;
 };
 
@@ -636,6 +706,31 @@ export type InboxRepository = {
     error: string;
     failedAt: Date;
   }): Promise<InboxItem>;
+  listTeamAliases(teamId: string): Promise<TeamAlias[]>;
+  listHardNegativeMatches(
+    teamId: string,
+    inboxItemId: string,
+  ): Promise<HardNegativeTransactionMatch[]>;
+  upsertInboxMatchSuggestions(input: {
+    teamId: string;
+    inboxItemId: string;
+    suggestions: InboxMatchSuggestion[];
+  }): Promise<InboxTransactionMatchSuggestion[]>;
+  getInboxMatchSuggestionForTeam(
+    teamId: string,
+    suggestionId: string,
+  ): Promise<InboxTransactionMatchSuggestion | null>;
+  acceptInboxMatchSuggestion(input: {
+    teamId: string;
+    suggestionId: string;
+    actorId: string;
+  }): Promise<{ suggestion: InboxTransactionMatchSuggestion; inboxItem: InboxItem }>;
+  rejectInboxMatchSuggestion(input: {
+    teamId: string;
+    suggestionId: string;
+    reason?: string | null;
+    actorId: string;
+  }): Promise<InboxTransactionMatchSuggestion>;
 };
 
 export type DawnRepository = BankingUseCaseRepository & DocumentRepository & InboxRepository;
@@ -788,6 +883,8 @@ const syncBankConnectionOperation = "banking.connection.sync";
 const createDocumentUploadOperation = "document.upload.create";
 const runDocumentExtractionOperation = "document.extraction.run";
 const correctDocumentExtractionOperation = "document.extraction.correct";
+const acceptInboxMatchOperation = "inbox.match.accept";
+const rejectInboxMatchOperation = "inbox.match.reject";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
@@ -1932,6 +2029,271 @@ export async function correctDocumentExtraction(
       teamId: command.teamId,
       actorId: context.actor.id,
       operation: correctDocumentExtractionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result: finalResult,
+    });
+
+    return finalResult;
+  });
+}
+
+export async function generateInboxMatchSuggestions(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: GenerateInboxMatchSuggestionsCommand,
+): Promise<GenerateInboxMatchSuggestionsResult> {
+  assertCommandTeamMatchesContext(context, command.teamId, "Inbox item not found");
+
+  await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId },
+    "documents.read",
+    "You cannot read inbox items for this team",
+  );
+  await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId },
+    "transactions.read",
+    "You cannot read transactions for this team",
+  );
+
+  const [inboxItem, transactions, aliases, hardNegatives] = await Promise.all([
+    repository.getInboxItemForTeam(command.teamId, command.inboxItemId),
+    repository.listTransactionsForReport({ teamId: command.teamId }),
+    repository.listTeamAliases(command.teamId),
+    repository.listHardNegativeMatches(command.teamId, command.inboxItemId),
+  ]);
+
+  if (!inboxItem || !inboxItem.latestExtraction) {
+    throw new AppError("NOT_FOUND", "Inbox item not found");
+  }
+
+  const suggestions = suggestInboxTransactionMatches(
+    {
+      inboxItemId: inboxItem.id,
+      documentId: inboxItem.documentId,
+      sender: inboxItem.source?.name,
+      documentText: inboxItem.latestExtraction.rawText,
+      fields: inboxItem.latestExtraction.fields,
+    },
+    transactions.map((transaction) => ({
+      transaction,
+      providerReference: transaction.providerTransactionId,
+    })),
+    {
+      aliases,
+      hardNegatives,
+    },
+  )
+    .filter((suggestion) => suggestion.score >= 0.35)
+    .slice(0, 5);
+
+  return {
+    inboxItemId: inboxItem.id,
+    suggestions: await repository.upsertInboxMatchSuggestions({
+      teamId: command.teamId,
+      inboxItemId: inboxItem.id,
+      suggestions,
+    }),
+  };
+}
+
+export async function acceptInboxMatch(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: AcceptInboxMatchCommand,
+): Promise<AcceptInboxMatchResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const inboxRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Inbox match not found");
+
+    await resolveTeamAccess(
+      inboxRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.write",
+      "You cannot accept inbox matches for this team",
+    );
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      suggestionId: command.suggestionId,
+    });
+    const replayed = await inboxRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      acceptInboxMatchOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different inbox match",
+        );
+      }
+
+      return { ...(replayed.result as AcceptInboxMatchResult), replayed: true };
+    }
+
+    const existing = await inboxRepository.getInboxMatchSuggestionForTeam(
+      command.teamId,
+      command.suggestionId,
+    );
+
+    if (!existing) {
+      throw new AppError("NOT_FOUND", "Inbox match not found");
+    }
+
+    if (existing.status === "rejected") {
+      throw new AppError("CONFLICT", "Rejected inbox matches cannot be accepted");
+    }
+
+    const accepted = await inboxRepository.acceptInboxMatchSuggestion({
+      teamId: command.teamId,
+      suggestionId: command.suggestionId,
+      actorId: context.actor.id,
+    });
+
+    await inboxRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "inbox_match.accepted",
+      entityType: "inbox_item",
+      entityId: accepted.inboxItem.id,
+      metadata: {
+        suggestionId: accepted.suggestion.id,
+        transactionId: accepted.suggestion.transactionId,
+        documentId: accepted.inboxItem.documentId,
+        score: accepted.suggestion.score,
+      },
+    });
+
+    await inboxRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "inbox_match.accepted",
+      version: 1,
+      payload: {
+        inboxItemId: accepted.inboxItem.id,
+        suggestionId: accepted.suggestion.id,
+        transactionId: accepted.suggestion.transactionId,
+        documentId: accepted.inboxItem.documentId,
+      },
+    });
+
+    const finalResult = { ...accepted, replayed: false };
+
+    await inboxRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: acceptInboxMatchOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result: finalResult,
+    });
+
+    return finalResult;
+  });
+}
+
+export async function rejectInboxMatch(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: RejectInboxMatchCommand,
+): Promise<RejectInboxMatchResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const inboxRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Inbox match not found");
+
+    await resolveTeamAccess(
+      inboxRepository,
+      { ...context, teamId: command.teamId },
+      "transactions.write",
+      "You cannot reject inbox matches for this team",
+    );
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      suggestionId: command.suggestionId,
+      reason: command.reason ?? null,
+    });
+    const replayed = await inboxRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      rejectInboxMatchOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different inbox match rejection",
+        );
+      }
+
+      return { ...(replayed.result as RejectInboxMatchResult), replayed: true };
+    }
+
+    const existing = await inboxRepository.getInboxMatchSuggestionForTeam(
+      command.teamId,
+      command.suggestionId,
+    );
+
+    if (!existing) {
+      throw new AppError("NOT_FOUND", "Inbox match not found");
+    }
+
+    if (existing.status === "accepted") {
+      throw new AppError("CONFLICT", "Accepted inbox matches cannot be rejected");
+    }
+
+    const suggestion = await inboxRepository.rejectInboxMatchSuggestion({
+      teamId: command.teamId,
+      suggestionId: command.suggestionId,
+      reason: command.reason,
+      actorId: context.actor.id,
+    });
+
+    await inboxRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "inbox_match.rejected",
+      entityType: "inbox_item",
+      entityId: suggestion.inboxItemId,
+      metadata: {
+        suggestionId: suggestion.id,
+        transactionId: suggestion.transactionId,
+        reason: command.reason ?? null,
+      },
+    });
+
+    await inboxRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "inbox_match.rejected",
+      version: 1,
+      payload: {
+        inboxItemId: suggestion.inboxItemId,
+        suggestionId: suggestion.id,
+        transactionId: suggestion.transactionId,
+      },
+    });
+
+    const finalResult = { suggestion, replayed: false };
+
+    await inboxRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: rejectInboxMatchOperation,
       key: command.idempotencyKey,
       fingerprint,
       result: finalResult,

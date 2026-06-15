@@ -2,6 +2,7 @@ import type { RouterClient } from "@orpc/server";
 import { ORPCError } from "@orpc/server";
 import {
   AppError,
+  acceptInboxMatch,
   acceptTeamInvite,
   commitCsvTransactionImport,
   connectMockBankConnection,
@@ -9,6 +10,7 @@ import {
   createDocumentUpload,
   createLedgerTransaction,
   createTeam,
+  generateInboxMatchSuggestions,
   inviteTeamMember,
   correctDocumentExtraction,
   listBankConnections,
@@ -20,6 +22,7 @@ import {
   listTransactionSyncCollection,
   listTransactionReviewWorkspace,
   previewCsvTransactionImport,
+  rejectInboxMatch,
   reviewTransaction,
   syncBankConnection,
   type DawnRepository,
@@ -114,6 +117,24 @@ const correctDocumentExtractionInput = z.object({
   teamId: z.string().min(1),
   inboxItemId: z.string().min(1),
   fields: documentExtractionFieldsInput,
+  idempotencyKey: z.string().min(1),
+});
+
+const generateInboxMatchSuggestionsInput = z.object({
+  teamId: z.string().min(1),
+  inboxItemId: z.string().min(1),
+});
+
+const acceptInboxMatchInput = z.object({
+  teamId: z.string().min(1),
+  suggestionId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const rejectInboxMatchInput = z.object({
+  teamId: z.string().min(1),
+  suggestionId: z.string().min(1),
+  reason: z.string().nullable().optional(),
   idempotencyKey: z.string().min(1),
 });
 
@@ -550,6 +571,57 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 ...input,
                 fields: input.fields as DocumentExtractionFields,
               },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      suggestMatches: protectedProcedure
+        .input(generateInboxMatchSuggestionsInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await generateInboxMatchSuggestions(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      acceptMatch: protectedProcedure
+        .input(acceptInboxMatchInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await acceptInboxMatch(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      rejectMatch: protectedProcedure
+        .input(rejectInboxMatchInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await rejectInboxMatch(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
             );
           } catch (error) {
             mapAppError(error);
