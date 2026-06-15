@@ -32,10 +32,14 @@ describe("team role permissions", () => {
     expect(roleHasPermission("viewer", "operations.read")).toBe(false);
   });
 
-  test("public API project scopes resolve to project permissions", () => {
-    expect(permissionsForPublicApiScopes(["projects.read", "projects.write"])).toEqual([
-      "projects.read",
-      "projects.write",
-    ]);
+  test("public API resource scopes resolve to product permissions", () => {
+    expect(
+      permissionsForPublicApiScopes([
+        "documents.read",
+        "documents.write",
+        "projects.read",
+        "projects.write",
+      ]),
+    ).toEqual(["documents.read", "documents.write", "projects.read", "projects.write"]);
   });
 });

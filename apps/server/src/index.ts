@@ -4,12 +4,14 @@ import { onError } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
 import { ZodToJsonSchemaConverter } from "@orpc/zod/zod4";
 import { createContext } from "@dawn/api/context";
-import { verifyDocumentUrlToken } from "@dawn/api/document-url";
+import { createDocumentUrlSigner, verifyDocumentUrlToken } from "@dawn/api/document-url";
 import { appRouter } from "@dawn/api/routers/index";
 import {
   AppError,
   completeDocumentUpload,
   createCustomer,
+  createDocumentDownload,
+  createDocumentUpload,
   createDraftInvoice,
   createLedgerTransaction,
   createProduct,
@@ -21,6 +23,7 @@ import {
   generateRecurringInvoice,
   generateWeeklyInsights,
   listBillingWorkspace,
+  listDocuments,
   listProjectWorkspace,
   listTransactionReviewWorkspace,
   requestBankConnectionSyncFromWebhook,
@@ -372,6 +375,92 @@ app.get("/api/v1/invoices", async (c) => {
     return c.json({
       data: billing.invoices,
     });
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.get("/api/v1/documents", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+  const teamId = c.req.query("teamId");
+
+  if (!teamId) {
+    return c.json({ error: "teamId is required" }, 400);
+  }
+
+  try {
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "documents.read");
+    const workspace = await listDocuments(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      { teamId },
+    );
+
+    return c.json({
+      data: workspace.documents,
+    });
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/documents/uploads", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "documents.write");
+    const result = await createDocumentUpload(
+      repository,
+      createPublicDocumentUrlSigner(c.env),
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        fileName: requireString(body.fileName, "fileName"),
+        contentType: requireString(body.contentType, "contentType"),
+        byteSize: requirePositiveSafeInteger(body.byteSize, "byteSize"),
+        checksumSha256: optionalString(body.checksumSha256),
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/documents/:documentId/download", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "documents.read");
+    const result = await createDocumentDownload(
+      repository,
+      createPublicDocumentUrlSigner(c.env),
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        documentId: c.req.param("documentId"),
+      },
+    );
+
+    return c.json(result);
   } catch (error) {
     return publicApiError(c, error);
   }
@@ -848,8 +937,25 @@ function requireSafeInteger(value: unknown, name: string) {
   return value;
 }
 
+function requirePositiveSafeInteger(value: unknown, name: string) {
+  const integer = requireSafeInteger(value, name);
+
+  if (integer <= 0) {
+    throw new AppError("CONFLICT", `${name} must be positive`);
+  }
+
+  return integer;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function createPublicDocumentUrlSigner(bindings: DawnCloudflareBindings) {
+  return createDocumentUrlSigner({
+    baseUrl: env.BETTER_AUTH_URL,
+    secret: bindings.BETTER_AUTH_SECRET,
+  });
 }
 
 function publicApiError(c: HonoContext<ServerHonoEnv>, error: unknown) {
@@ -899,6 +1005,24 @@ export function publicApiOpenApiDocument(requestUrl: string) {
         post: {
           summary: "Create an invoice draft",
           parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
+        },
+      },
+      "/documents": {
+        get: {
+          summary: "List team documents",
+          parameters: [{ name: "teamId", in: "query", required: true }],
+        },
+      },
+      "/documents/uploads": {
+        post: {
+          summary: "Create a signed document upload",
+          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
+        },
+      },
+      "/documents/{documentId}/download": {
+        post: {
+          summary: "Create a signed document download",
+          parameters: [{ name: "documentId", in: "path", required: true }],
         },
       },
       "/customers": {

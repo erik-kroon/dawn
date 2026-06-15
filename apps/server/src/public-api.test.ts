@@ -16,6 +16,9 @@ describe("public API contract", () => {
     expect(Object.keys(document.paths)).toEqual([
       "/transactions",
       "/invoices",
+      "/documents",
+      "/documents/uploads",
+      "/documents/{documentId}/download",
       "/customers",
       "/products",
       "/projects",
@@ -32,6 +35,12 @@ describe("public API contract", () => {
     expect(document.paths["/products"]).toMatchObject({
       get: { summary: "List team products" },
       post: { summary: "Create a product" },
+    });
+    expect(document.paths["/documents/uploads"]).toMatchObject({
+      post: { summary: "Create a signed document upload" },
+    });
+    expect(document.paths["/documents/{documentId}/download"]).toMatchObject({
+      post: { summary: "Create a signed document download" },
     });
     expect(document.components.securitySchemes.bearerApiKey).toMatchObject({
       type: "http",

@@ -293,13 +293,13 @@ describe("developer and public API use cases", () => {
     const created = await createApiKey(repository as unknown as DawnRepository, context, {
       teamId: "team_1",
       name: "Reporting client",
-      scopes: ["transactions.read", "projects.read"],
+      scopes: ["transactions.read", "documents.read", "projects.read"],
       idempotencyKey: "api_key_1",
     });
     const replayed = await createApiKey(repository as unknown as DawnRepository, context, {
       teamId: "team_1",
       name: "Reporting client",
-      scopes: ["transactions.read", "projects.read"],
+      scopes: ["transactions.read", "documents.read", "projects.read"],
       idempotencyKey: "api_key_1",
     });
     const resolved = await resolvePublicApiKey(
@@ -320,11 +320,11 @@ describe("developer and public API use cases", () => {
     expect(resolved.actor).toMatchObject({
       type: "api_key",
       teamId: "team_1",
-      permissions: ["transactions.read", "projects.read"],
+      permissions: ["transactions.read", "documents.read", "projects.read"],
     });
     expect(workspace.apiKeys[0]).toMatchObject({
       keyPrefix: created.token.slice(0, 14),
-      scopes: ["transactions.read", "projects.read"],
+      scopes: ["transactions.read", "documents.read", "projects.read"],
     });
   });
 

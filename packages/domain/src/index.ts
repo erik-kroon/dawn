@@ -36,6 +36,8 @@ export type Permission =
 export type PublicApiScope =
   | "transactions.read"
   | "transactions.write"
+  | "documents.read"
+  | "documents.write"
   | "invoices.read"
   | "invoices.write"
   | "projects.read"
@@ -753,6 +755,14 @@ export function automationActionRequiresApproval(actionType: AutomationActionTyp
 export function permissionForPublicApiScope(scope: PublicApiScope): Permission {
   if (scope === "transactions.write") {
     return "transactions.write";
+  }
+
+  if (scope === "documents.read") {
+    return "documents.read";
+  }
+
+  if (scope === "documents.write") {
+    return "documents.write";
   }
 
   if (scope === "invoices.read") {

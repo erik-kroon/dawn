@@ -193,6 +193,8 @@ const runAutomationForOutboxEventInput = z.object({
 const publicApiScopeInput = z.enum([
   "transactions.read",
   "transactions.write",
+  "documents.read",
+  "documents.write",
   "invoices.read",
   "invoices.write",
   "projects.read",

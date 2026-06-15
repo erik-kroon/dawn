@@ -12,8 +12,12 @@ export type OAuthAuthorizeSearch = {
 const publicApiScopes = new Set<PublicApiScope>([
   "transactions.read",
   "transactions.write",
+  "documents.read",
+  "documents.write",
   "invoices.read",
   "invoices.write",
+  "projects.read",
+  "projects.write",
   "webhooks.manage",
 ]);
 
