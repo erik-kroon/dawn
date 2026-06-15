@@ -47,6 +47,9 @@ export type DawnWorkerHealth = {
     "database" | "documents" | "jobs" | "deadLetter" | "tenantCoordinator",
     "bound" | "missing"
   >;
+  configuration: {
+    gmail: "configured" | "missing";
+  };
 };
 
 export type DawnWorkerRuntime = {
@@ -74,6 +77,9 @@ export function createDawnWorkerRuntime(env: DawnCloudflareBindings): DawnWorker
           jobs: env.DAWN_JOBS ? "bound" : "missing",
           deadLetter: env.DAWN_JOBS_DLQ ? "bound" : "missing",
           tenantCoordinator: env.DAWN_TENANT_COORDINATOR ? "bound" : "missing",
+        },
+        configuration: {
+          gmail: env.GMAIL_CLIENT_ID && env.GMAIL_CLIENT_SECRET ? "configured" : "missing",
         },
       };
     },

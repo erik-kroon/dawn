@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   completeEmailInboxOAuth,
   createEmailInboxAuthorizationUrl,
+  listEmailInboxWorkspace,
+  requestDueEmailInboxSyncs,
   syncEmailInbox,
   type BusinessDocument,
   type BusinessDocumentVersion,
@@ -29,7 +31,9 @@ import type {
 import {
   createEmailInboxTokenCodec,
   createMockEmailInboxProvider,
+  EmailInboxProviderAuthError,
   InboxConnector,
+  type EmailInboxProvider,
 } from "@dawn/integrations";
 
 class MemoryEmailInboxRepository {
@@ -222,6 +226,26 @@ class MemoryEmailInboxRepository {
     };
     this.syncRuns.set(syncRun.id, syncRun);
     return syncRun;
+  }
+
+  async createEmailInboxSyncRunIfIdle(input: {
+    syncRunId: string;
+    teamId: string;
+    integrationConnectionId: string;
+    category: IntegrationCategory;
+    provider: string;
+  }) {
+    const running = [...this.syncRuns.values()].find(
+      (syncRun) =>
+        syncRun.integrationConnectionId === input.integrationConnectionId &&
+        syncRun.status === "running",
+    );
+
+    if (running) {
+      return null;
+    }
+
+    return this.createIntegrationSyncRun(input);
   }
 
   async finishIntegrationSyncRun(input: {
@@ -475,15 +499,19 @@ const context = {
   teamId: "team_1",
 };
 
-const connectors = [
-  new InboxConnector({
-    provider: createMockEmailInboxProvider(),
-    tokenCodec: createEmailInboxTokenCodec({
-      secret: "test_secret_that_is_long_enough_for_aes",
-      keyId: "test-email-token",
+function createEmailInboxConnectors(provider: EmailInboxProvider = createMockEmailInboxProvider()) {
+  return [
+    new InboxConnector({
+      provider,
+      tokenCodec: createEmailInboxTokenCodec({
+        secret: "test_secret_that_is_long_enough_for_aes",
+        keyId: "test-email-token",
+      }),
     }),
-  }),
-];
+  ];
+}
+
+const connectors = createEmailInboxConnectors();
 
 describe("email inbox use cases", () => {
   test("creates an authorization URL and stores an encrypted email inbox connection", async () => {
@@ -525,6 +553,172 @@ describe("email inbox use cases", () => {
       "mock_refresh",
     );
     expect(repository.outboxEvents.at(-1)).toMatchObject({ type: "email_inbox.connected" });
+  });
+
+  test("reports due and skipped scheduled sync requests", async () => {
+    const repository = new MemoryEmailInboxRepository();
+    const connected = await completeEmailInboxOAuth(
+      repository as unknown as DawnRepository,
+      connectors,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-email-inbox",
+        code: "oauth_code_1",
+        redirectUrl: "http://localhost:3000/inbox/oauth/callback",
+        idempotencyKey: "email_oauth_1",
+      },
+    );
+    const baseConnection = repository.connections.get(connected.connection.id)!;
+
+    repository.connections.set("connection_recent", {
+      ...baseConnection,
+      id: "connection_recent",
+      providerConnectionId: "mock_email_account_recent",
+      displayName: "recent@example.com",
+      lastSyncAt: "2026-06-15T09:30:00.000Z",
+    });
+    repository.connections.set("connection_error", {
+      ...baseConnection,
+      id: "connection_error",
+      providerConnectionId: "mock_email_account_error",
+      displayName: "error@example.com",
+      status: "error",
+      lastError: "Email inbox connection requires reauthorization",
+      rawPayload: {
+        emailInbox: {
+          reauthorizationRequired: true,
+        },
+      },
+    });
+    repository.connections.set("connection_disabled", {
+      ...baseConnection,
+      id: "connection_disabled",
+      providerConnectionId: "mock_email_account_disabled",
+      displayName: "disabled@example.com",
+      status: "disabled",
+      disabledAt: "2026-06-15T09:00:00.000Z",
+    });
+
+    const result = await requestDueEmailInboxSyncs(
+      repository as unknown as DawnRepository,
+      context,
+      {
+        teamId: "team_1",
+        now: new Date("2026-06-15T10:00:00.000Z"),
+        idempotencyKey: "email_due_sync_1",
+      },
+    );
+
+    expect(result).toEqual({ requested: 1, skipped: 3 });
+    expect(
+      repository.outboxEvents.filter(
+        (event) =>
+          typeof event === "object" &&
+          event !== null &&
+          "type" in event &&
+          event.type === "inbox.provider.sync_requested",
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("marks revoked credentials as reauthorization required", async () => {
+    const repository = new MemoryEmailInboxRepository();
+    const storage = new MemoryEmailInboxStorage();
+    const connected = await completeEmailInboxOAuth(
+      repository as unknown as DawnRepository,
+      connectors,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-email-inbox",
+        code: "oauth_code_1",
+        redirectUrl: "http://localhost:3000/inbox/oauth/callback",
+        idempotencyKey: "email_oauth_1",
+      },
+    );
+    const reauthorizationConnectors = createEmailInboxConnectors({
+      ...createMockEmailInboxProvider(),
+      async syncEvidence(input) {
+        throw new EmailInboxProviderAuthError(
+          "Email inbox connection requires reauthorization",
+          "reauthorization_required",
+          "mock-email-inbox",
+          input.connection.providerConnectionId,
+        );
+      },
+    });
+
+    const synced = await syncEmailInbox(
+      repository as unknown as DawnRepository,
+      reauthorizationConnectors,
+      storage,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "email_sync_reauth",
+      },
+    );
+    const workspace = await listEmailInboxWorkspace(
+      repository as unknown as DawnRepository,
+      connectors,
+      context,
+      { teamId: "team_1" },
+    );
+
+    expect(synced.connection.status).toBe("error");
+    expect(synced.connection.rawPayload?.emailInbox).toMatchObject({
+      reauthorizationRequired: true,
+      lastError: "Email inbox connection requires reauthorization",
+    });
+    expect(synced.syncRun).toMatchObject({
+      status: "failed",
+      error: "Email inbox connection requires reauthorization",
+      rawPayload: { reauthorizationRequired: true },
+    });
+    expect(workspace.connections.at(0)).toMatchObject({
+      reauthorizationRequired: true,
+      latestSyncRun: {
+        status: "failed",
+        error: "Email inbox connection requires reauthorization",
+      },
+    });
+  });
+
+  test("does not start a second sync while the connection has a running sync", async () => {
+    const repository = new MemoryEmailInboxRepository();
+    const storage = new MemoryEmailInboxStorage();
+    const connected = await completeEmailInboxOAuth(
+      repository as unknown as DawnRepository,
+      connectors,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-email-inbox",
+        code: "oauth_code_1",
+        redirectUrl: "http://localhost:3000/inbox/oauth/callback",
+        idempotencyKey: "email_oauth_1",
+      },
+    );
+
+    await repository.createIntegrationSyncRun({
+      syncRunId: "sync_running_1",
+      teamId: "team_1",
+      integrationConnectionId: connected.connection.id,
+      category: "email",
+      provider: "mock-email-inbox",
+    });
+
+    await expect(
+      syncEmailInbox(repository as unknown as DawnRepository, connectors, storage, context, {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "email_sync_conflict",
+      }),
+    ).rejects.toThrow("Email inbox sync already running");
+    expect(repository.syncRuns).toHaveLength(1);
+    expect(storage.objects).toHaveLength(0);
   });
 
   test("syncs attachment and body-only evidence into documents and inbox items", async () => {

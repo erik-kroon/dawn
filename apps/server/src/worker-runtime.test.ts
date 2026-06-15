@@ -36,6 +36,9 @@ describe("Dawn worker runtime", () => {
         deadLetter: "bound",
         tenantCoordinator: "bound",
       },
+      configuration: {
+        gmail: "missing",
+      },
     });
     expect(runtime.health().handlers).toEqual([
       "automation.run",
@@ -53,6 +56,17 @@ describe("Dawn worker runtime", () => {
       "transaction_import.commit",
       "webhook.deliver",
     ]);
+  });
+
+  test("reports Gmail worker configuration when both OAuth values are present", () => {
+    const runtime = createDawnWorkerRuntime(
+      createWorkerTestEnv(async () => Response.json({}), {
+        GMAIL_CLIENT_ID: "gmail-client-id",
+        GMAIL_CLIENT_SECRET: "gmail-client-secret",
+      }),
+    );
+
+    expect(runtime.health().configuration).toEqual({ gmail: "configured" });
   });
 
   test("runs sync invalidation jobs through the worker registry", async () => {
@@ -137,7 +151,10 @@ describe("Dawn worker runtime", () => {
   });
 });
 
-function createWorkerTestEnv(fetch: DurableObjectStub["fetch"]): DawnCloudflareBindings {
+function createWorkerTestEnv(
+  fetch: DurableObjectStub["fetch"],
+  overrides: Partial<DawnCloudflareBindings> = {},
+): DawnCloudflareBindings {
   return {
     ENVIRONMENT: "preview",
     NODE_ENV: "test",
@@ -159,5 +176,6 @@ function createWorkerTestEnv(fetch: DurableObjectStub["fetch"]): DawnCloudflareB
         return { fetch } as DurableObjectStub;
       },
     } as unknown as DurableObjectNamespace,
+    ...overrides,
   };
 }

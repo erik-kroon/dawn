@@ -980,6 +980,16 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return integrationPersistence.createIntegrationSyncRun(this.client, input);
   }
 
+  async createEmailInboxSyncRunIfIdle(input: {
+    syncRunId: string;
+    teamId: string;
+    integrationConnectionId: string;
+    category: IntegrationCategory;
+    provider: string;
+  }): Promise<IntegrationSyncRun | null> {
+    return integrationPersistence.createIntegrationSyncRunIfIdle(this.client, input);
+  }
+
   async finishIntegrationSyncRun(input: {
     syncRunId: string;
     status: Exclude<IntegrationSyncRunStatus, "running">;

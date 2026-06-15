@@ -183,6 +183,13 @@ export type EmailInboxUseCaseRepository = TransactionReviewRepository &
     }): Promise<IntegrationConnection>;
     listIntegrationConnectionsForTeam(teamId: string): Promise<IntegrationConnection[]>;
     listEmailInboxSyncCandidateConnections(): Promise<IntegrationConnection[]>;
+    createEmailInboxSyncRunIfIdle(input: {
+      syncRunId: string;
+      teamId: string;
+      integrationConnectionId: string;
+      category: IntegrationCategory;
+      provider: string;
+    }): Promise<IntegrationSyncRun | null>;
     getProviderObjectForTeam(input: {
       teamId: string;
       provider: string;
@@ -450,13 +457,17 @@ export async function syncEmailInbox(
       connectors,
       connection.provider as EmailInboxProviderName,
     );
-    const syncRun = await emailRepository.createIntegrationSyncRun({
+    const syncRun = await emailRepository.createEmailInboxSyncRunIfIdle({
       syncRunId: crypto.randomUUID(),
       teamId: command.teamId,
       integrationConnectionId: connection.id,
       category: connection.category,
       provider: connection.provider,
     });
+
+    if (!syncRun) {
+      throw new AppError("CONFLICT", "Email inbox sync already running");
+    }
 
     try {
       const rawPayload = { ...secrets.rawPayload };
@@ -799,9 +810,10 @@ export async function requestDueEmailInboxSyncs(
     return replayed.result as RequestDueEmailInboxSyncsResult;
   }
 
-  const connections = (await repository.listIntegrationConnectionsForTeam(teamId)).filter(
-    (connection) => isEmailInboxConnection(connection) && emailInboxSyncDue(connection, now),
+  const emailConnections = (await repository.listIntegrationConnectionsForTeam(teamId)).filter(
+    isEmailInboxConnection,
   );
+  const connections = emailConnections.filter((connection) => emailInboxSyncDue(connection, now));
 
   let requested = 0;
 
@@ -821,16 +833,21 @@ export async function requestDueEmailInboxSyncs(
     requested += 1;
   }
 
+  const result = {
+    requested,
+    skipped: emailConnections.length - requested,
+  };
+
   await repository.saveIdempotencyResult({
     teamId,
     actorId: context.actor.id,
     operation: requestDueEmailInboxSyncsOperation,
     key: command.idempotencyKey,
     fingerprint,
-    result: { requested, skipped: 0 },
+    result,
   });
 
-  return { requested, skipped: 0 };
+  return result;
 }
 
 function emailInboxProviderDescriptor(connector: InboxConnector): EmailInboxProviderDescriptor {

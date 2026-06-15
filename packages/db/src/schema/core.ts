@@ -1,4 +1,4 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   boolean,
   integer,
@@ -506,6 +506,9 @@ export const integrationSyncRun = pgTable(
   (table) => [
     index("integration_sync_run_connection_idx").on(table.integrationConnectionId, table.startedAt),
     index("integration_sync_run_status_idx").on(table.status, table.startedAt),
+    uniqueIndex("integration_sync_run_running_connection_idx")
+      .on(table.integrationConnectionId)
+      .where(sql`${table.status} = 'running'`),
   ],
 );
 

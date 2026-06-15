@@ -29,7 +29,8 @@ The baseline graph in `packages/infra/alchemy.run.ts` defines:
 
 The Worker also receives typed string bindings for `DATABASE_URL`,
 `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `POLAR_ACCESS_TOKEN`,
-`POLAR_SUCCESS_URL`, `CORS_ORIGIN`, `NODE_ENV`, and `ENVIRONMENT`.
+`POLAR_SUCCESS_URL`, `CORS_ORIGIN`, `GMAIL_CLIENT_ID`,
+`GMAIL_CLIENT_SECRET`, `NODE_ENV`, and `ENVIRONMENT`.
 
 ## Secrets
 
@@ -49,6 +50,19 @@ Required deploy-time public/runtime values:
 - `CORS_ORIGIN`
 - `VITE_SERVER_URL` when the web app should target a custom API route instead of
   the generated API Worker URL.
+
+Optional Gmail inbox values:
+
+- `GMAIL_CLIENT_ID`
+- `GMAIL_CLIENT_SECRET`
+
+Set both values to expose Gmail in the email inbox provider catalog for the API
+Worker and background Worker. Gmail sync also depends on the existing
+`BETTER_AUTH_SECRET` token encryption key, `DAWN_JOBS` queue, cron-triggered
+Worker runtime, and `DAWN_DOCUMENTS` R2 bucket. The web app sends the OAuth
+redirect URL for the inbox route, so the Google OAuth client must allow the
+deployed web origin's `/inbox` callback URL. Dawn requests Gmail read-only
+access through `https://www.googleapis.com/auth/gmail.readonly`.
 
 ## Commands
 

@@ -162,6 +162,33 @@ export async function createIntegrationSyncRun(
   return mapIntegrationSyncRun(syncRun);
 }
 
+export async function createIntegrationSyncRunIfIdle(
+  client: QueryClient,
+  input: {
+    syncRunId: string;
+    teamId: string;
+    integrationConnectionId: string;
+    category: IntegrationCategory;
+    provider: string;
+  },
+): Promise<IntegrationSyncRun | null> {
+  const running = await getRunningIntegrationSyncRun(client, input.integrationConnectionId);
+
+  if (running) {
+    return null;
+  }
+
+  try {
+    return await createIntegrationSyncRun(client, input);
+  } catch (error) {
+    if (isRunningSyncConflict(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
 export async function finishIntegrationSyncRun(
   client: QueryClient,
   input: {
@@ -189,6 +216,37 @@ export async function finishIntegrationSyncRun(
   }
 
   return mapIntegrationSyncRun(syncRun);
+}
+
+async function getRunningIntegrationSyncRun(
+  client: QueryClient,
+  integrationConnectionId: string,
+): Promise<IntegrationSyncRun | null> {
+  const [syncRun] = await client
+    .select()
+    .from(schema.integrationSyncRun)
+    .where(
+      and(
+        eq(schema.integrationSyncRun.integrationConnectionId, integrationConnectionId),
+        eq(schema.integrationSyncRun.status, "running"),
+      ),
+    )
+    .limit(1);
+
+  return syncRun ? mapIntegrationSyncRun(syncRun) : null;
+}
+
+function isRunningSyncConflict(error: unknown) {
+  const metadata = error as {
+    code?: unknown;
+    constraint?: unknown;
+    message?: unknown;
+  };
+  const detail = `${String(metadata.code ?? "")} ${String(metadata.constraint ?? "")} ${String(
+    metadata.message ?? "",
+  )}`;
+
+  return detail.includes("23505") && detail.includes("integration_sync_run_running_connection_idx");
 }
 
 export async function markIntegrationConnectionSynced(

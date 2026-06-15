@@ -1924,6 +1924,26 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     return syncRun;
   }
 
+  async createEmailInboxSyncRunIfIdle(input: {
+    syncRunId: string;
+    teamId: string;
+    integrationConnectionId: string;
+    category: IntegrationCategory;
+    provider: string;
+  }) {
+    const running = [...this.integrationSyncRuns.values()].find(
+      (syncRun) =>
+        syncRun.integrationConnectionId === input.integrationConnectionId &&
+        syncRun.status === "running",
+    );
+
+    if (running) {
+      return null;
+    }
+
+    return this.createIntegrationSyncRun(input);
+  }
+
   async finishIntegrationSyncRun(input: {
     syncRunId: string;
     status: Exclude<IntegrationSyncRunStatus, "running">;

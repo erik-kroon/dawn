@@ -281,6 +281,9 @@ Status: Completed on 2026-06-15.
 
 Make Gmail ingestion reliable enough for accountant workflows, not just a local connector demo.
 
+Status: Local backend/runtime hardening completed on 2026-06-15. Live Gmail smoke
+remains blocked until Google OAuth credentials and a test mailbox are available.
+
 ## Scope
 
 - Confirm Cloudflare/server environment bindings include Gmail client id, client secret, redirect URL, encryption key, queue, cron, and object storage requirements.
@@ -305,21 +308,33 @@ Make Gmail ingestion reliable enough for accountant workflows, not just a local 
 
 ## Acceptance Criteria
 
-- [ ] Gmail OAuth can be configured in the deployment environment without ad hoc local-only secrets.
-- [ ] A connected Gmail account can sync manually and on schedule.
-- [ ] Expired or revoked credentials produce a reauth state, not silent failure.
-- [ ] Sync runs are idempotent and do not concurrently process the same connection.
-- [ ] Attachments and body-only receipts can both produce inbox items.
-- [ ] The inbox UI shows actionable sync status and errors.
-- [ ] Provider message ids, attachment ids, and checksums prevent duplicate document ingestion.
+- [x] Gmail OAuth can be configured in the deployment environment without ad hoc local-only secrets.
+- [x] A connected Gmail account can sync manually and on schedule.
+- [x] Expired or revoked credentials produce a reauth state, not silent failure.
+- [x] Sync runs are idempotent and do not concurrently process the same connection.
+- [x] Attachments and body-only receipts can both produce inbox items.
+- [x] The inbox UI shows actionable sync status and errors.
+- [x] Provider message ids, attachment ids, and checksums prevent duplicate document ingestion.
 
 ## Verification
 
-- `bun test packages/app/src/email-inbox.test.ts packages/app/src/inbox-extraction.test.ts`
-- `bun test packages/jobs`
-- Server/worker runtime tests covering environment binding presence.
-- Manual live Gmail smoke when credentials are available.
-- `bun run check-types`
+- Red tests first confirmed scheduled sync skipped-count reporting and
+  per-connection active sync rejection were missing.
+- `bun test packages/app/src/email-inbox.test.ts` passed: 5 tests.
+- `bun test packages/app` passed: 125 tests.
+- `bun test packages/api/src/router.test.ts` passed: 30 tests.
+- `DATABASE_URL=postgres://test BETTER_AUTH_SECRET=0123456789abcdef0123456789abcdef BETTER_AUTH_URL=http://localhost:3000 CORS_ORIGIN=http://localhost:3001 bun test apps/server/src/worker-runtime.test.ts`
+  passed: 5 tests.
+- `bun test packages/jobs/src/index.test.ts` passed: 18 tests. A bare
+  `bun test packages/jobs` was not used for verification because it also
+  discovers read-only `ref/midday` tests with unavailable Midday-only modules.
+- `bun run check-types` passed, including the web production build.
+- `bunx oxlint` passed.
+- `bunx oxfmt --check` passed on this slice's touched files after targeted
+  formatting of `packages/app/src/email-inbox.test.ts` and
+  `packages/db/src/repositories/integrations.ts`.
+- Manual live Gmail smoke remains blocked until deployment has Google OAuth
+  credentials and a test mailbox.
 
 ## Dependencies
 
