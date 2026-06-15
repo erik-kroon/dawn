@@ -253,6 +253,9 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 4 follow-up  | `bun run release:gate`                                                                                                                                                                                                                                                                                                       | Pass    | Ignored-TypeScript scan, committed-secret scan, 21-migration journal validation, full workspace typecheck/build, 200 Dawn tests, deterministic AI eval, lint/format, and server worker bundle passed.  |
 | 2026-06-15 DB harness         | `bun run test:db`                                                                                                                                                                                                                                                                                                            | Skipped | Added opt-in Postgres integration test harness; current environment has no `DAWN_DATABASE_TEST_URL`, so the migrated Drizzle repository test is skipped by default.                                    |
 | 2026-06-15 DB harness         | `bun run release:gate`                                                                                                                                                                                                                                                                                                       | Pass    | Default gate remains deterministic: 200 tests passed, 1 DB integration test skipped, deterministic AI eval passed, lint/format and server bundle passed.                                               |
+| 2026-06-15 slice 5 follow-up  | `bun test packages/domain/src/csv-import.test.ts packages/app/src/ledger.test.ts packages/api/src/router.test.ts`                                                                                                                                                                                                            | Pass    | 45 focused tests passed for semicolon CSV parsing, decimal comma money, debit/credit mapping, app import preview/commit, and protected API routes.                                                     |
+| 2026-06-15 slice 5 follow-up  | Browser smoke: local server on `3000`, local web on `3002`, open `/dashboard` at desktop and mobile widths                                                                                                                                                                                                                   | Partial | Protected dashboard route redirected to `/login`; auth-session checks returned 200. Console entries were React DevTools info and the existing login autocomplete warning.                              |
+| 2026-06-15 slice 5 follow-up  | `bun run release:gate`                                                                                                                                                                                                                                                                                                       | Pass    | Ignored-TypeScript scan, committed-secret scan, 21-migration journal validation, full workspace typecheck/build, 204 tests passed, 1 DB integration test skipped, AI eval and server bundle passed.    |
 
 ## Commit Log
 
@@ -291,6 +294,7 @@ pass, and the implementing agent has inspected the diff.
 | `d76a917` | Sandbox banking provider             | Adds sandbox connection sessions, encrypted token metadata, verified webhook sync requests, queued sync, and disconnect.         |
 | `597adc8` | Ledger metadata and transfers        | Adds counterparty/tag use cases, transfer-pair semantics, transfer group persistence, API routes, dashboard controls, and tests. |
 | `ecde4c9` | DB ledger integration harness        | Adds opt-in migrated Postgres coverage for ledger reports, metadata, transfer groups, tenant predicates, replay, and rollback.   |
+| `29e61a5` | CSV bank export mappings             | Adds semicolon/tab parsing, decimal-comma money, debit/credit mappings, API support, dashboard controls, and tests.              |
 
 ## Implementation Notes
 
@@ -352,6 +356,13 @@ domain layer, app-layer import preview/commit use cases, duplicate detection
 against existing ledger transactions and within the file, persisted CSV import
 sessions, protected oRPC preview/commit routes, route tests, and a dashboard CSV
 upload panel with column mapping, row status preview, and commit controls.
+
+Slice 5 follow-up added common bank-export variants to the canonical CSV import
+path. The domain parser now detects comma, semicolon, and tab delimiters,
+supports decimal-comma and European grouped money formats, and normalizes either
+a signed amount column or separate debit/credit columns into exact signed minor
+units. The protected API accepts the richer mapping contract and the dashboard
+exposes optional debit and credit column controls.
 
 Slice 6 foundation introduced `packages/sync` for the first transaction
 collection contract, including cursor response shape, invalidation event shape,
@@ -606,8 +617,10 @@ execution remain gated by R2 retention, provider cleanup, and compliance rules.
   generation, release gate, an opt-in Drizzle/Postgres integration harness, and
   unauthenticated browser redirect smoke.
 - Slice 5 still needs authenticated browser/manual import verification against a
-  migrated local database and richer CSV mapping variants before it should be
-  marked complete.
+  migrated local database before it should be marked complete. Current
+  verification covers parser variants, signed amount and debit/credit mapping,
+  preview/commit use cases, protected routes, dashboard build, release gate, and
+  unauthenticated browser redirect smoke.
 - Slice 6 still needs authenticated two-session browser verification and a
   deployed/local Worker-bound realtime invalidation exercise before it should be
   marked complete.
