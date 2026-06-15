@@ -87,6 +87,11 @@ type CsvImportPreviewData = {
   }[];
 };
 
+type AccountantClosePeriodState = {
+  from: string;
+  to: string;
+};
+
 function OperationsRoute() {
   const { session } = Route.useRouteContext();
   const { currentTeamId } = Route.useLoaderData();
@@ -133,6 +138,9 @@ function OperationsRoute() {
     invertAmount: false,
     categoryId: "",
   });
+  const [accountantClosePeriod, setAccountantClosePeriod] = useState<AccountantClosePeriodState>(
+    () => defaultAccountantClosePeriod(),
+  );
   const [csvParseError, setCsvParseError] = useState<string | null>(null);
   const [sandboxBankSession, setSandboxBankSession] = useState<{
     providerSessionId: string;
@@ -148,6 +156,12 @@ function OperationsRoute() {
   const canManageTeam = transactionReview.data?.permissions.includes("team.manage") ?? false;
   const canReadOperations =
     transactionReview.data?.permissions.includes("operations.read") ?? false;
+  const canExportPackets =
+    transactionReview.data?.permissions.includes("transactions.export") ?? false;
+  const accountantCloseInput = useMemo(
+    () => accountantClosePeriodInput(accountantClosePeriod),
+    [accountantClosePeriod],
+  );
   const canManageBankConnections =
     transactionReview.data?.permissions.includes("bank_connections.manage") ?? false;
   const canManageIntegrations =
@@ -157,8 +171,30 @@ function OperationsRoute() {
     enabled: canManageTeam && Boolean(currentTeamId),
   });
   const operations = useQuery({
-    ...orpc.operations.list.queryOptions({ input: { teamId: currentTeamId, limit: 8 } }),
+    ...orpc.operations.list.queryOptions({
+      input: {
+        teamId: currentTeamId,
+        limit: 12,
+        accountantClose: accountantCloseInput ?? undefined,
+      },
+    }),
     enabled: canReadOperations && Boolean(currentTeamId),
+  });
+  const packetExports = useQuery({
+    ...orpc.transactionReview.listPacketExports.queryOptions({
+      input: { teamId: currentTeamId, limit: 8 },
+    }),
+    enabled: canExportPackets && Boolean(currentTeamId),
+  });
+  const packetAccessAudit = useQuery({
+    ...orpc.operations.list.queryOptions({
+      input: {
+        teamId: currentTeamId,
+        limit: 50,
+        audit: { entityType: "accountant_packet" },
+      },
+    }),
+    enabled: canReadOperations && canExportPackets && Boolean(currentTeamId),
   });
   const automations = useQuery({
     ...orpc.automations.list.queryOptions({ input: { teamId: currentTeamId } }),
@@ -444,6 +480,8 @@ function OperationsRoute() {
     ],
     [banking.data?.connections.length, operations.data],
   );
+  const accountantPacketAuditEvents =
+    packetAccessAudit.data?.auditEvents ?? operations.data?.auditEvents ?? [];
 
   return (
     <div className="mx-auto grid w-full max-w-[1728px] gap-8 py-8">
@@ -1490,6 +1528,178 @@ function OperationsRoute() {
         </Panel>
       </section>
 
+      <section className="grid gap-6 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+        <Panel
+          description="Selected-period readiness uses transaction lifecycle state before the accountant packet is sent."
+          icon={ShieldIcon}
+          title="Accountant close"
+        >
+          <div className="grid gap-4">
+            <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto_auto]">
+              <Label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                From
+                <Input
+                  aria-label="Accountant close period from"
+                  onChange={(event) =>
+                    setAccountantClosePeriod((period) => ({
+                      ...period,
+                      from: event.target.value,
+                    }))
+                  }
+                  type="date"
+                  value={accountantClosePeriod.from}
+                />
+              </Label>
+              <Label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                To
+                <Input
+                  aria-label="Accountant close period to"
+                  onChange={(event) =>
+                    setAccountantClosePeriod((period) => ({
+                      ...period,
+                      to: event.target.value,
+                    }))
+                  }
+                  type="date"
+                  value={accountantClosePeriod.to}
+                />
+              </Label>
+              <Button
+                className="self-end"
+                onClick={() => setAccountantClosePeriod((period) => shiftMonthPeriod(period, -1))}
+                variant="outline"
+              >
+                Previous
+              </Button>
+              <Button
+                className="self-end"
+                onClick={() => setAccountantClosePeriod(defaultAccountantClosePeriod())}
+                variant="outline"
+              >
+                This month
+              </Button>
+            </div>
+
+            {operations.data?.accountantClose ? (
+              <div className="grid gap-3">
+                <div className="flex flex-wrap items-start justify-between gap-3 border border-border p-3">
+                  <div>
+                    <p className="text-sm font-medium">
+                      {formatDateRange(
+                        operations.data.accountantClose.period.from,
+                        operations.data.accountantClose.period.to,
+                      )}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {operations.data.accountantClose.nextStep}
+                    </p>
+                  </div>
+                  <Badge variant={closeStatusVariant(operations.data.accountantClose.status)}>
+                    {statusLabel(operations.data.accountantClose.status)}
+                  </Badge>
+                </div>
+                <div className="grid gap-px border border-border bg-border sm:grid-cols-3">
+                  {[
+                    ["Transactions", operations.data.accountantClose.transactionCount],
+                    ["Ready", operations.data.accountantClose.readyToExportCount],
+                    ["Exported", operations.data.accountantClose.exportedCount],
+                    ["Missing receipts", operations.data.accountantClose.missingReceiptCount],
+                    ["Needs review", operations.data.accountantClose.needsReviewCount],
+                    ["Failed exports", operations.data.accountantClose.exportFailedCount],
+                  ].map(([label, value]) => (
+                    <div className="bg-background p-3" key={label}>
+                      <p className="text-xs text-muted-foreground">{label}</p>
+                      <p className="mt-2 font-mono text-lg">{value}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <Muted>
+                Select a valid close period and load Operations access to see accountant readiness.
+              </Muted>
+            )}
+          </div>
+        </Panel>
+
+        <Panel
+          description="Stored accountant packets, generation actors, status, and access audit events."
+          icon={DatabaseIcon}
+          title="Export history"
+        >
+          <div className="grid gap-3">
+            {packetExports.data?.packets.slice(0, 8).map((packet) => {
+              const accessEvents = accountantPacketAuditEvents.filter(
+                (event) =>
+                  event.entityType === "accountant_packet" &&
+                  event.entityId === packet.packetId &&
+                  event.action !== "accountant_packet.exported",
+              );
+
+              return (
+                <div className="grid gap-3 border border-border p-3 text-sm" key={packet.packetId}>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">{packet.fileName}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Generated by {packet.actorId} · {formatDateTime(packet.createdAt)}
+                      </p>
+                    </div>
+                    <Badge variant={packetStatusVariant(packet.status)}>
+                      {statusLabel(packet.status)}
+                    </Badge>
+                  </div>
+                  <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+                    <span>{packet.manifest.transactionCount} transactions</span>
+                    <span>
+                      {packet.manifest.attachmentCount} attachments ·{" "}
+                      {packet.manifest.skippedAttachmentCount} skipped
+                    </span>
+                    <span>{formatBytes(packet.byteSize)}</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {formatDateRange(packet.manifest.filters.from, packet.manifest.filters.to)} ·{" "}
+                    {packet.manifest.settings.formats.join(" + ").toUpperCase()} · delimiter{" "}
+                    {packet.manifest.settings.csvDelimiter === "\t"
+                      ? "tab"
+                      : packet.manifest.settings.csvDelimiter}
+                  </p>
+                  <div className="grid gap-2">
+                    <p className="text-xs font-medium">Access activity</p>
+                    {accessEvents.slice(0, 3).map((event) => (
+                      <RunLine
+                        detail={formatPacketAccessDetail(event)}
+                        key={event.id}
+                        status={formatDateTime(event.occurredAt)}
+                        title={accountantPacketAuditLabel(event.action)}
+                      />
+                    ))}
+                    {accessEvents.length === 0 ? (
+                      <Muted>No access events in the current operations window.</Muted>
+                    ) : null}
+                  </div>
+                  {packet.status === "revoked" ? (
+                    <p className="text-xs text-muted-foreground">
+                      Revoked by {packet.revokedByActorId ?? "unknown"} ·{" "}
+                      {formatDateTime(packet.revokedAt)}
+                      {packet.revokeReason ? ` · ${packet.revokeReason}` : ""}
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })}
+            {canExportPackets && !packetExports.data?.packets.length ? (
+              <Muted>No stored accountant packet exports yet.</Muted>
+            ) : null}
+            {!canExportPackets ? (
+              <Muted>Accountant packet export permission is required to view history.</Muted>
+            ) : null}
+            <ErrorText error={packetExports.error} />
+            <ErrorText error={packetAccessAudit.error} />
+          </div>
+        </Panel>
+      </section>
+
       <Panel
         description="Queue, outbox, provider, webhook, automation, audit, and data workflow state."
         icon={ActivityIcon}
@@ -1509,7 +1719,7 @@ function OperationsRoute() {
               </div>
             ))}
           </div>
-          <div className="grid gap-3 lg:grid-cols-3">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <ListBlock title="Outbox and jobs">
               {operations.data?.recentOutboxEvents.slice(0, 4).map((event) => (
                 <RunLine
@@ -1532,6 +1742,28 @@ function OperationsRoute() {
               {!operations.data?.recentOutboxEvents.length &&
               !operations.data?.recentJobRuns.length ? (
                 <Muted>No outbox or job runs yet.</Muted>
+              ) : null}
+            </ListBlock>
+            <ListBlock title="Job guidance">
+              {operations.data?.jobRunActions.slice(0, 4).map((action) => (
+                <div className="grid gap-2 border border-border p-3 text-sm" key={action.jobRunId}>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="truncate font-medium">{action.jobType}</span>
+                    <Badge variant={jobActionVariant(action.status)}>
+                      {statusLabel(action.status)}
+                    </Badge>
+                  </div>
+                  <p className="break-words text-xs text-muted-foreground">{action.reason}</p>
+                  <p className="break-words text-xs text-muted-foreground">{action.nextStep}</p>
+                  {action.nextAttemptAt ? (
+                    <p className="text-xs text-muted-foreground">
+                      Next attempt: {formatDateTime(action.nextAttemptAt)}
+                    </p>
+                  ) : null}
+                </div>
+              ))}
+              {!operations.data?.jobRunActions.length ? (
+                <Muted>No queued, retryable, or dead-lettered jobs.</Muted>
               ) : null}
             </ListBlock>
             <ListBlock title="Providers">
@@ -1822,6 +2054,187 @@ function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
 
 function mappedCsvValue(values: Record<string, string>, column: string, fallback: string) {
   return column ? values[column] || fallback : fallback;
+}
+
+function defaultAccountantClosePeriod(): AccountantClosePeriodState {
+  return monthPeriodFromDate(new Date());
+}
+
+function shiftMonthPeriod(period: AccountantClosePeriodState, offset: number) {
+  const [year = "0", month = "1"] = period.from.split("-");
+  const date = new Date(Date.UTC(Number.parseInt(year, 10), Number.parseInt(month, 10) - 1, 1));
+
+  if (!Number.isFinite(date.getTime())) {
+    return defaultAccountantClosePeriod();
+  }
+
+  date.setUTCMonth(date.getUTCMonth() + offset);
+
+  return monthPeriodFromDate(date);
+}
+
+function monthPeriodFromDate(date: Date): AccountantClosePeriodState {
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth();
+  const from = new Date(Date.UTC(year, month, 1));
+  const to = new Date(Date.UTC(year, month + 1, 0));
+
+  return {
+    from: isoDateInputValue(from),
+    to: isoDateInputValue(to),
+  };
+}
+
+function accountantClosePeriodInput(period: AccountantClosePeriodState) {
+  if (!period.from || !period.to) {
+    return null;
+  }
+
+  const from = new Date(`${period.from}T00:00:00.000Z`);
+  const to = new Date(`${period.to}T23:59:59.999Z`);
+
+  if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
+    return null;
+  }
+
+  return {
+    from: from.toISOString(),
+    to: to.toISOString(),
+  };
+}
+
+function isoDateInputValue(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function formatDateRange(from: string, to: string) {
+  return `${formatDateOnly(from)} to ${formatDateOnly(to)}`;
+}
+
+function formatDateOnly(value?: string | null) {
+  if (!value) {
+    return "n/a";
+  }
+
+  const date = new Date(value);
+
+  if (!Number.isFinite(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleDateString();
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) {
+    return "n/a";
+  }
+
+  const date = new Date(value);
+
+  if (!Number.isFinite(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString();
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) {
+    return `${value} B`;
+  }
+
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function statusLabel(status: string) {
+  return status.replaceAll("_", " ");
+}
+
+function closeStatusVariant(status: string) {
+  if (status === "ready") {
+    return "success" as const;
+  }
+
+  if (status === "blocked") {
+    return "error" as const;
+  }
+
+  if (status === "needs_work") {
+    return "warning" as const;
+  }
+
+  return "secondary" as const;
+}
+
+function packetStatusVariant(status: string) {
+  return status === "available" ? ("success" as const) : ("warning" as const);
+}
+
+function jobActionVariant(status: string) {
+  if (status === "dead_lettered") {
+    return "error" as const;
+  }
+
+  if (status === "retryable") {
+    return "warning" as const;
+  }
+
+  return "secondary" as const;
+}
+
+function accountantPacketAuditLabel(action: string) {
+  if (action === "accountant_packet.download_link_created") {
+    return "Download link";
+  }
+
+  if (action === "accountant_packet.email_sent") {
+    return "Email sent";
+  }
+
+  if (action === "accountant_packet.email_failed") {
+    return "Email failed";
+  }
+
+  if (action === "accountant_packet.revoked") {
+    return "Revoked";
+  }
+
+  return statusLabel(action.replace(/^accountant_packet\./, ""));
+}
+
+function formatPacketAccessDetail(event: { actorId: string; metadata: Record<string, unknown> }) {
+  const toEmail = typeof event.metadata.toEmail === "string" ? event.metadata.toEmail : null;
+  const copiedRequesterEmail =
+    typeof event.metadata.copiedRequesterEmail === "string"
+      ? event.metadata.copiedRequesterEmail
+      : null;
+  const expiresAt = typeof event.metadata.expiresAt === "string" ? event.metadata.expiresAt : null;
+  const providerMessageId =
+    typeof event.metadata.providerMessageId === "string" ? event.metadata.providerMessageId : null;
+  const details = [`Actor ${event.actorId}`];
+
+  if (toEmail) {
+    details.push(`to ${toEmail}`);
+  }
+
+  if (copiedRequesterEmail) {
+    details.push(`cc ${copiedRequesterEmail}`);
+  }
+
+  if (providerMessageId) {
+    details.push(`message ${providerMessageId}`);
+  }
+
+  if (expiresAt) {
+    details.push(`expires ${formatDateTime(expiresAt)}`);
+  }
+
+  return details.join(" · ");
 }
 
 function parseMoneyInputToMinor(value: string) {
