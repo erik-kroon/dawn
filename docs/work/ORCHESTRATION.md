@@ -249,6 +249,9 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 24 follow-up | `bun test packages/integrations/src/providers.test.ts packages/app/src/integrations.test.ts packages/api/src/router.test.ts`                                                                                                                                                                                                 | Pass    | 35 focused tests passed for typed accounting transaction/invoice exports, idempotent app export runs, protected API routing, and existing integration routes.                                                                |
 | 2026-06-15 slice 24 follow-up | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                                                                            |
 | 2026-06-15 slice 24 follow-up | `bun run release:gate`                                                                                                                                                                                                                                                                                                       | Pass    | Full release gate passed: ignored-TypeScript scan, committed-secret scan, 21-migration journal validation, workspace typecheck/build, 215 tests passed with 1 DB integration skip, AI eval, check, and server worker bundle. |
+| 2026-06-15 slice 24 follow-up | `bun test packages/integrations/src/providers.test.ts packages/app/src/integrations.test.ts packages/api/src/router.test.ts`                                                                                                                                                                                                 | Pass    | 37 focused tests passed for typed payment provider event normalization, invoice payment recording through integration routes, accounting exports, and existing integration routes.                                           |
+| 2026-06-15 slice 24 follow-up | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                                                                            |
+| 2026-06-15 slice 24 follow-up | `bun run release:gate`                                                                                                                                                                                                                                                                                                       | Pass    | Full release gate passed: ignored-TypeScript scan, committed-secret scan, 21-migration journal validation, workspace typecheck/build, 217 tests passed with 1 DB integration skip, AI eval, check, and server worker bundle. |
 | 2026-06-15 slice 25           | `bun test apps/desktop/src/bun/shell.test.ts`                                                                                                                                                                                                                                                                                | Pass    | 4 tests passed for deep-link parsing, dashboard URL construction, capture payload encoding, unsupported file rejection, and notification copy.                                                                               |
 | 2026-06-15 slice 25           | `bun run --filter desktop check-types`                                                                                                                                                                                                                                                                                       | Pass    | Desktop package typecheck passed after matching Electrobun tray menu item types.                                                                                                                                             |
 | 2026-06-15 slice 25           | `bun run --filter desktop build`                                                                                                                                                                                                                                                                                             | Pass    | Desktop bundle/build passed; Vite reported the existing large chunk warning and Electrobun skipped codesign/notarization.                                                                                                    |
@@ -602,6 +605,13 @@ through existing integration sync runs with audit/outbox events, and the
 protected API exposes an `integrations.exportAccounting` route for transaction
 and invoice exports.
 
+Slice 24 payment follow-up added typed payment provider event normalization.
+Payment integrations now convert raw provider payment payloads into canonical
+invoice payment events, the app layer records them through invoice payment
+lifecycle rules with integration sync-run status, audit, invoice events, and
+outbox records, and the protected API exposes an
+`integrations.recordPaymentEvent` route for the verified local adapter path.
+
 Slice 25 foundation deepened the existing Electrobun shell without adding
 desktop-only business rules. The desktop app now registers the `dawn` URL scheme
 and capture-friendly file associations, parses `dawn://open/...`,
@@ -746,8 +756,9 @@ provider cleanup, and compliance rules.
   capability declarations, encrypted-token metadata shape, raw payload
   preservation, idempotent sync logging, provider failure surfacing,
   non-destructive disable behavior, typed accounting exports for transactions
-  and invoices, protected API routes, migration generation, typecheck/check, and
-  focused tests.
+  and invoices, typed payment provider events that update invoice payment state,
+  protected API routes, migration generation, typecheck/check, and focused
+  tests.
 - Slice 25 still needs installed-app/manual review of OS file association,
   custom URL scheme launch behavior, tray capture, native notifications, and an
   authenticated desktop upload against a migrated local or preview database.

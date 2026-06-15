@@ -162,6 +162,21 @@ export type IntegrationProviderExportResult = {
   rawPayload: ProviderRawPayload;
 };
 
+export type IntegrationPaymentEvent = {
+  providerEventId: string;
+  invoiceId: string;
+  amount: Money;
+  paidAt: string;
+  method?: string | null;
+  rawPayload: ProviderRawPayload;
+};
+
+export type IntegrationProviderPaymentEventResult = {
+  status: "completed";
+  paymentEvent: IntegrationPaymentEvent;
+  rawPayload: ProviderRawPayload;
+};
+
 export type IntegrationProvider = {
   provider: IntegrationProviderName;
   category: IntegrationCategory;
@@ -186,6 +201,11 @@ export type IntegrationProvider = {
     providerConnectionId: string;
     invoices: readonly InvoiceDraft[];
   }): Promise<IntegrationProviderExportResult>;
+  receivePaymentEvent?(input: {
+    teamId: string;
+    providerConnectionId: string;
+    rawPayload: ProviderRawPayload;
+  }): Promise<IntegrationProviderPaymentEventResult>;
 };
 
 export function canonicalProviderTransactionId(input: {
@@ -613,7 +633,76 @@ export function createMockIntegrationProvider(input: {
         },
       };
     },
+    async receivePaymentEvent(command) {
+      if (!input.capabilities.includes("receivePaymentEvents")) {
+        throw new Error(`${input.provider} does not receive payment events`);
+      }
+
+      const paymentEvent = mockPaymentEventFromPayload({
+        provider: input.provider,
+        providerConnectionId: command.providerConnectionId,
+        rawPayload: command.rawPayload,
+      });
+
+      return {
+        status: "completed",
+        paymentEvent,
+        rawPayload: {
+          mock: true,
+          provider: input.provider,
+          providerConnectionId: command.providerConnectionId,
+          paymentEventId: paymentEvent.providerEventId,
+          invoiceId: paymentEvent.invoiceId,
+          amount: paymentEvent.amount,
+        },
+      };
+    },
   };
+}
+
+function mockPaymentEventFromPayload(input: {
+  provider: IntegrationProviderName;
+  providerConnectionId: string;
+  rawPayload: ProviderRawPayload;
+}): IntegrationPaymentEvent {
+  const invoiceId = requiredString(input.rawPayload.invoiceId, "payment event invoiceId");
+  const amountMinor = requiredNumber(input.rawPayload.amountMinor, "payment event amountMinor");
+  const currency =
+    typeof input.rawPayload.currency === "string" ? input.rawPayload.currency.toUpperCase() : "USD";
+  const paidAt =
+    typeof input.rawPayload.paidAt === "string"
+      ? input.rawPayload.paidAt
+      : "2026-06-15T12:00:00.000Z";
+  const providerEventId =
+    typeof input.rawPayload.providerEventId === "string"
+      ? input.rawPayload.providerEventId
+      : `${input.provider}_${input.providerConnectionId}_${invoiceId}_${amountMinor}`;
+  const method = typeof input.rawPayload.method === "string" ? input.rawPayload.method : null;
+
+  return {
+    providerEventId,
+    invoiceId,
+    amount: { amountMinor, currency },
+    paidAt,
+    method,
+    rawPayload: input.rawPayload,
+  };
+}
+
+function requiredString(value: unknown, field: string) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`Missing ${field}`);
+  }
+
+  return value;
+}
+
+function requiredNumber(value: unknown, field: string) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new Error(`Missing ${field}`);
+  }
+
+  return value;
 }
 
 function mockEncryptedProviderToken(input: {

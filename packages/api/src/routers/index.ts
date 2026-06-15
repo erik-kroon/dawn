@@ -33,6 +33,7 @@ import {
   generateInboxMatchSuggestions,
   getAssistantConversation,
   exportAccountingIntegration,
+  recordPaymentProviderEvent,
   inviteTeamMember,
   correctDocumentExtraction,
   listAssistantWorkspace,
@@ -327,6 +328,10 @@ const syncIntegrationInput = z.object({
 
 const exportAccountingIntegrationInput = syncIntegrationInput.extend({
   exportType: z.enum(["transactions", "invoices"]),
+});
+
+const recordPaymentProviderEventInput = syncIntegrationInput.extend({
+  rawPayload: z.record(z.string(), z.unknown()),
 });
 
 const disableIntegrationInput = z.object({
@@ -1421,6 +1426,24 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await exportAccountingIntegration(
+              transactionReviewRepository,
+              integrationProviders,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      recordPaymentEvent: protectedProcedure
+        .input(recordPaymentProviderEventInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await recordPaymentProviderEvent(
               transactionReviewRepository,
               integrationProviders,
               {

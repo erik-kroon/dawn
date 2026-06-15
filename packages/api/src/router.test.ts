@@ -3823,6 +3823,15 @@ describe("appRouter", () => {
       },
       context,
     );
+    const connectedPayments = await call(
+      router.integrations.connect,
+      {
+        teamId: "team_1",
+        provider: "mock-payments",
+        idempotencyKey: "integration_connect_payments_1",
+      },
+      context,
+    );
     repository.transactions.set("txn_export_1", {
       id: "txn_export_1",
       teamId: "team_1",
@@ -3844,7 +3853,7 @@ describe("appRouter", () => {
       },
       context,
     );
-    await call(
+    const invoice = await call(
       router.billing.createDraftInvoice,
       {
         teamId: "team_1",
@@ -3860,6 +3869,17 @@ describe("appRouter", () => {
           },
         ],
         idempotencyKey: "integration_export_invoice_1",
+      },
+      context,
+    );
+    await call(
+      router.billing.sendInvoice,
+      {
+        teamId: "team_1",
+        invoiceId: invoice.invoice.id,
+        toEmail: "billing@acme.test",
+        confirm: true,
+        idempotencyKey: "integration_send_invoice_1",
       },
       context,
     );
@@ -3889,6 +3909,23 @@ describe("appRouter", () => {
         connectionId: connected.connection.id,
         exportType: "invoices",
         idempotencyKey: "integration_export_invoices_1",
+      },
+      context,
+    );
+    const recordedPayment = await call(
+      router.integrations.recordPaymentEvent,
+      {
+        teamId: "team_1",
+        connectionId: connectedPayments.connection.id,
+        rawPayload: {
+          providerEventId: "evt_payment_1",
+          invoiceId: invoice.invoice.id,
+          amountMinor: 5_000_00,
+          currency: "USD",
+          paidAt: "2026-06-16T00:00:00.000Z",
+          method: "card",
+        },
+        idempotencyKey: "integration_payment_event_1",
       },
       context,
     );
@@ -3929,8 +3966,14 @@ describe("appRouter", () => {
       recordsSynced: 1,
       rawPayload: { exportType: "invoices" },
     });
+    expect(recordedPayment).toMatchObject({
+      invoice: { status: "paid" },
+      payment: { method: "card" },
+      syncRun: { status: "completed", recordsSynced: 1 },
+    });
     expect(disabled.connection.status).toBe("disabled");
-    expect(repository.integrationSyncRuns).toHaveLength(3);
+    expect(repository.invoicePayments).toHaveLength(1);
+    expect(repository.integrationSyncRuns).toHaveLength(4);
   });
 
   test("returns operations workspace with redacted failure and audit records", async () => {

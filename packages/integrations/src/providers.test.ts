@@ -96,4 +96,40 @@ describe("integration provider contracts", () => {
       }),
     ).rejects.toThrow("mock-payments does not export transactions");
   });
+
+  test("normalizes payment provider events through typed contracts", async () => {
+    const payments = createMockIntegrationProviders().find(
+      (provider) => provider.provider === "mock-payments",
+    )!;
+    const messaging = createMockIntegrationProviders().find(
+      (provider) => provider.provider === "mock-messaging",
+    )!;
+
+    const result = await payments.receivePaymentEvent!({
+      teamId: "team_1",
+      providerConnectionId: "mock-payments_team_1",
+      rawPayload: {
+        providerEventId: "evt_payment_1",
+        invoiceId: "invoice_1",
+        amountMinor: 5_000_00,
+        currency: "usd",
+        paidAt: "2026-06-15T12:00:00.000Z",
+        method: "card",
+      },
+    });
+
+    expect(result.paymentEvent).toMatchObject({
+      providerEventId: "evt_payment_1",
+      invoiceId: "invoice_1",
+      amount: { amountMinor: 5_000_00, currency: "USD" },
+      method: "card",
+    });
+    await expect(
+      messaging.receivePaymentEvent!({
+        teamId: "team_1",
+        providerConnectionId: "mock-messaging_team_1",
+        rawPayload: {},
+      }),
+    ).rejects.toThrow("mock-messaging does not receive payment events");
+  });
 });

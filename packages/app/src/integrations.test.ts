@@ -5,6 +5,7 @@ import {
   disableIntegration,
   exportAccountingIntegration,
   listIntegrationWorkspace,
+  recordPaymentProviderEvent,
   syncIntegration,
   type DawnRepository,
   type IdempotencyResult,
@@ -16,6 +17,7 @@ import type {
   IntegrationSyncRun,
   IntegrationSyncRunStatus,
   InvoiceDraft,
+  InvoicePayment,
   TeamRole,
   Transaction,
 } from "@dawn/domain";
@@ -27,6 +29,8 @@ class MemoryIntegrationRepository {
   syncRuns = new Map<string, IntegrationSyncRun>();
   transactions: Transaction[] = [];
   invoices: InvoiceDraft[] = [];
+  payments: InvoicePayment[] = [];
+  invoiceEvents: unknown[] = [];
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   auditEvents: unknown[] = [];
   outboxEvents: unknown[] = [];
@@ -45,6 +49,63 @@ class MemoryIntegrationRepository {
 
   async listInvoices(teamId: string) {
     return this.invoices.filter((invoice) => invoice.teamId === teamId);
+  }
+
+  async getInvoiceForTeam(teamId: string, invoiceId: string) {
+    return (
+      this.invoices.find((invoice) => invoice.teamId === teamId && invoice.id === invoiceId) ?? null
+    );
+  }
+
+  async recordInvoicePayment(input: {
+    paymentId: string;
+    teamId: string;
+    invoiceId: string;
+    amount: InvoicePayment["amount"];
+    paidAt: string;
+    method?: string | null;
+    note?: string | null;
+    createdByActorId: string;
+    nextInvoiceStatus: InvoiceDraft["status"];
+    nextAmountPaid: InvoicePayment["amount"];
+    invoicePaidAt?: string | null;
+  }) {
+    const invoice = await this.getInvoiceForTeam(input.teamId, input.invoiceId);
+
+    if (!invoice) {
+      throw new Error("Invoice payment did not update invoice");
+    }
+
+    const payment = {
+      id: input.paymentId,
+      teamId: input.teamId,
+      invoiceId: input.invoiceId,
+      amount: input.amount,
+      paidAt: input.paidAt,
+      method: input.method ?? null,
+      note: input.note ?? null,
+      createdByActorId: input.createdByActorId,
+      createdAt: input.paidAt,
+    };
+    const updated = {
+      ...invoice,
+      status: input.nextInvoiceStatus,
+      amountPaid: input.nextAmountPaid,
+      paidAt: input.invoicePaidAt ?? null,
+      updatedAt: input.paidAt,
+    };
+
+    this.payments.push(payment);
+    this.invoices = this.invoices.map((candidate) =>
+      candidate.id === updated.id ? updated : candidate,
+    );
+
+    return { invoice: updated, payment };
+  }
+
+  async createInvoiceEvent(input: unknown) {
+    this.invoiceEvents.push(input);
+    return input;
   }
 
   async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
@@ -419,6 +480,96 @@ describe("integration use cases", () => {
     expect(repository.outboxEvents.at(-1)).toMatchObject({
       type: "integration.accounting_exported",
       payload: { exportType: "invoices", recordsExported: 1 },
+    });
+  });
+
+  test("records payment provider events through invoice payment rules", async () => {
+    const repository = new MemoryIntegrationRepository();
+    repository.invoices.push({
+      id: "invoice_1",
+      teamId: "team_1",
+      customerId: "customer_1",
+      invoiceNumber: "INV-001",
+      status: "sent",
+      issueDate: "2026-06-15T00:00:00.000Z",
+      currency: "USD",
+      discountBasisPoints: 0,
+      lines: [],
+      totals: {
+        subtotal: { amountMinor: 5_000_00, currency: "USD" },
+        discount: { amountMinor: 0, currency: "USD" },
+        tax: { amountMinor: 0, currency: "USD" },
+        total: { amountMinor: 5_000_00, currency: "USD" },
+      },
+      amountPaid: { amountMinor: 0, currency: "USD" },
+      sentAt: "2026-06-15T10:00:00.000Z",
+      createdByActorId: "user_1",
+    });
+    const providers = createMockIntegrationProviders();
+    const connected = await connectIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-payments",
+        idempotencyKey: "connect_payments_1",
+      },
+    );
+
+    const recorded = await recordPaymentProviderEvent(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        rawPayload: {
+          providerEventId: "evt_payment_1",
+          invoiceId: "invoice_1",
+          amountMinor: 5_000_00,
+          currency: "usd",
+          paidAt: "2026-06-16T00:00:00.000Z",
+          method: "card",
+        },
+        idempotencyKey: "payment_event_1",
+      },
+    );
+    const replay = await recordPaymentProviderEvent(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        rawPayload: {
+          providerEventId: "evt_payment_1",
+          invoiceId: "invoice_1",
+          amountMinor: 5_000_00,
+          currency: "usd",
+          paidAt: "2026-06-16T00:00:00.000Z",
+          method: "card",
+        },
+        idempotencyKey: "payment_event_1",
+      },
+    );
+
+    expect(recorded.syncRun).toMatchObject({
+      status: "completed",
+      recordsSynced: 1,
+      rawPayload: { paymentEventId: "evt_payment_1" },
+    });
+    expect(recorded.invoice).toMatchObject({ status: "paid" });
+    expect(recorded.payment).toMatchObject({
+      amount: { amountMinor: 5_000_00, currency: "USD" },
+      method: "card",
+      note: "Provider payment event evt_payment_1",
+    });
+    expect(replay).toMatchObject({ replayed: true });
+    expect(repository.invoiceEvents).toHaveLength(1);
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "invoice.payment_recorded",
+      payload: { provider: "mock-payments", providerEventId: "evt_payment_1" },
     });
   });
 

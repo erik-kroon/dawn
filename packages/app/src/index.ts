@@ -77,6 +77,7 @@ import type {
   BankingProviderTransaction,
   BankingProviderWebhookVerification,
   InvoiceEmailDeliveryProvider,
+  IntegrationPaymentEvent,
   IntegrationProvider,
   IntegrationProviderCapability,
   IntegrationProviderName,
@@ -421,6 +422,21 @@ export type ExportAccountingIntegrationCommand = {
 export type ExportAccountingIntegrationResult = {
   connection: IntegrationConnection;
   syncRun: IntegrationSyncRun;
+  replayed: boolean;
+};
+
+export type RecordPaymentProviderEventCommand = {
+  teamId: string;
+  connectionId: string;
+  rawPayload: Record<string, unknown>;
+  idempotencyKey: string;
+};
+
+export type RecordPaymentProviderEventResult = {
+  connection: IntegrationConnection;
+  syncRun: IntegrationSyncRun;
+  invoice: InvoiceDraft | null;
+  payment: InvoicePayment | null;
   replayed: boolean;
 };
 
@@ -2120,6 +2136,7 @@ const createWebhookSubscriptionOperation = "webhook_subscription.create";
 const connectIntegrationOperation = "integration.connect";
 const syncIntegrationOperation = "integration.sync";
 const exportAccountingIntegrationOperation = "integration.accounting_export";
+const recordPaymentProviderEventOperation = "integration.payment_event.record";
 const disableIntegrationOperation = "integration.disable";
 const requestTeamDataExportOperation = "team_data.export.request";
 const requestTeamDataDeletionOperation = "team_data.deletion.request";
@@ -5487,6 +5504,179 @@ export async function exportAccountingIntegration(
         teamId: command.teamId,
         actorId: context.actor.id,
         operation: exportAccountingIntegrationOperation,
+        key: command.idempotencyKey,
+        fingerprint,
+        result,
+      });
+
+      return result;
+    }
+  });
+}
+
+export async function recordPaymentProviderEvent(
+  repository: DawnRepository,
+  providers: readonly IntegrationProvider[],
+  context: TransactionReviewContext,
+  command: RecordPaymentProviderEventCommand,
+): Promise<RecordPaymentProviderEventResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const integrationRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Payment integration not found");
+
+    await resolveTeamAccess(
+      integrationRepository,
+      { ...context, teamId: command.teamId },
+      "integrations.write",
+      "You cannot record payment provider events for this team",
+    );
+
+    await resolveTeamAccess(
+      integrationRepository,
+      { ...context, teamId: command.teamId },
+      "invoices.write",
+      "You cannot record payment provider events for this team",
+    );
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      connectionId: command.connectionId,
+      rawPayload: command.rawPayload,
+    });
+    const replayed = await integrationRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      recordPaymentProviderEventOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different payment provider event",
+        );
+      }
+
+      return { ...(replayed.result as RecordPaymentProviderEventResult), replayed: true };
+    }
+
+    const connection = await integrationRepository.getIntegrationConnectionForTeam(
+      command.teamId,
+      command.connectionId,
+    );
+
+    if (!connection || connection.status === "disabled" || connection.category !== "payments") {
+      throw new AppError("NOT_FOUND", "Payment integration not found");
+    }
+
+    const provider = requireIntegrationProvider(providers, connection.provider);
+    const syncRun = await integrationRepository.createIntegrationSyncRun({
+      syncRunId: crypto.randomUUID(),
+      teamId: command.teamId,
+      integrationConnectionId: connection.id,
+      category: connection.category,
+      provider: connection.provider,
+    });
+
+    try {
+      if (
+        !connection.capabilities.includes("receivePaymentEvents") ||
+        !provider.receivePaymentEvent
+      ) {
+        throw new AppError("CONFLICT", "Integration does not support payment events");
+      }
+
+      const providerResult = await provider.receivePaymentEvent({
+        teamId: command.teamId,
+        providerConnectionId: connection.providerConnectionId,
+        rawPayload: command.rawPayload,
+      });
+      const paymentResult = await recordProviderPaymentInRepository(
+        integrationRepository,
+        context,
+        providerResult.paymentEvent,
+        {
+          teamId: command.teamId,
+          connectionId: connection.id,
+          provider: connection.provider,
+        },
+      );
+      const completedSyncRun = await integrationRepository.finishIntegrationSyncRun({
+        syncRunId: syncRun.id,
+        status: providerResult.status,
+        recordsSynced: 1,
+        error: null,
+        rawPayload: providerResult.rawPayload,
+      });
+      const syncedConnection = await integrationRepository.markIntegrationConnectionSynced({
+        connectionId: connection.id,
+        syncedAt: new Date(completedSyncRun.completedAt ?? completedSyncRun.startedAt),
+        status: "connected",
+        lastError: null,
+      });
+
+      await integrationRepository.appendAuditEvent({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        action: "integration.payment_event_recorded",
+        entityType: "integration_connection",
+        entityId: connection.id,
+        metadata: {
+          provider: connection.provider,
+          providerEventId: providerResult.paymentEvent.providerEventId,
+          invoiceId: paymentResult.invoice.id,
+          paymentId: paymentResult.payment.id,
+        },
+      });
+
+      const result = {
+        connection: syncedConnection,
+        syncRun: completedSyncRun,
+        invoice: paymentResult.invoice,
+        payment: paymentResult.payment,
+        replayed: false,
+      };
+
+      await integrationRepository.saveIdempotencyResult({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        operation: recordPaymentProviderEventOperation,
+        key: command.idempotencyKey,
+        fingerprint,
+        result,
+      });
+
+      return result;
+    } catch (error) {
+      const message = errorMessage(error);
+      const failedSyncRun = await integrationRepository.finishIntegrationSyncRun({
+        syncRunId: syncRun.id,
+        status: "failed",
+        recordsSynced: 0,
+        error: message,
+        rawPayload: { error: message, eventType: "payment" },
+      });
+      const failedConnection = await integrationRepository.markIntegrationConnectionSynced({
+        connectionId: connection.id,
+        syncedAt: new Date(failedSyncRun.completedAt ?? failedSyncRun.startedAt),
+        status: "error",
+        lastError: message,
+      });
+      const result = {
+        connection: failedConnection,
+        syncRun: failedSyncRun,
+        invoice: null,
+        payment: null,
+        replayed: false,
+      };
+
+      await integrationRepository.saveIdempotencyResult({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        operation: recordPaymentProviderEventOperation,
         key: command.idempotencyKey,
         fingerprint,
         result,
@@ -9459,6 +9649,102 @@ async function exportInvoicesToProvider(
     providerConnectionId: connection.providerConnectionId,
     invoices: await repository.listInvoices(connection.teamId),
   });
+}
+
+async function recordProviderPaymentInRepository(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  paymentEvent: IntegrationPaymentEvent,
+  metadata: {
+    teamId: string;
+    connectionId: string;
+    provider: string;
+  },
+) {
+  const invoice = await repository.getInvoiceForTeam(metadata.teamId, paymentEvent.invoiceId);
+
+  if (!invoice) {
+    throw new AppError("NOT_FOUND", "Invoice not found for provider payment event");
+  }
+
+  let nextPaymentState: ReturnType<typeof invoiceStatusAfterPayment>;
+
+  try {
+    nextPaymentState = invoiceStatusAfterPayment({
+      invoice,
+      payment: paymentEvent.amount,
+      paidAt: paymentEvent.paidAt,
+    });
+  } catch (error) {
+    throw new AppError("CONFLICT", errorMessage(error));
+  }
+
+  const paymentResult = await repository.recordInvoicePayment({
+    paymentId: crypto.randomUUID(),
+    teamId: metadata.teamId,
+    invoiceId: invoice.id,
+    amount: paymentEvent.amount,
+    paidAt: paymentEvent.paidAt,
+    method: paymentEvent.method ?? "provider",
+    note: `Provider payment event ${paymentEvent.providerEventId}`,
+    createdByActorId: context.actor.id,
+    nextInvoiceStatus: nextPaymentState.status,
+    nextAmountPaid: nextPaymentState.amountPaid,
+    invoicePaidAt: nextPaymentState.paidAt,
+  });
+
+  await repository.createInvoiceEvent({
+    eventId: crypto.randomUUID(),
+    teamId: metadata.teamId,
+    invoiceId: invoice.id,
+    type: "invoice.payment_recorded",
+    occurredAt: paymentEvent.paidAt,
+    actorId: context.actor.id,
+    metadata: {
+      paymentId: paymentResult.payment.id,
+      amount: paymentEvent.amount,
+      nextStatus: paymentResult.invoice.status,
+      provider: metadata.provider,
+      integrationConnectionId: metadata.connectionId,
+      providerEventId: paymentEvent.providerEventId,
+    },
+  });
+
+  await repository.appendAuditEvent({
+    teamId: metadata.teamId,
+    actorId: context.actor.id,
+    requestId: context.requestId,
+    action: "invoice_payment.recorded",
+    entityType: "invoice",
+    entityId: invoice.id,
+    metadata: {
+      paymentId: paymentResult.payment.id,
+      amount: paymentEvent.amount,
+      nextStatus: paymentResult.invoice.status,
+      provider: metadata.provider,
+      integrationConnectionId: metadata.connectionId,
+      providerEventId: paymentEvent.providerEventId,
+    },
+  });
+
+  await repository.appendOutboxEvent({
+    teamId: metadata.teamId,
+    actorId: context.actor.id,
+    requestId: context.requestId,
+    type: "invoice.payment_recorded",
+    version: 1,
+    payload: {
+      invoiceId: invoice.id,
+      paymentId: paymentResult.payment.id,
+      amount: paymentEvent.amount,
+      nextStatus: paymentResult.invoice.status,
+      provider: metadata.provider,
+      integrationConnectionId: metadata.connectionId,
+      providerEventId: paymentEvent.providerEventId,
+    },
+  });
+
+  return paymentResult;
 }
 
 export function connectMockBankConnectionFingerprint(
