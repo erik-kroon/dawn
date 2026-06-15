@@ -584,8 +584,14 @@ server logging.
 Slice 26 follow-up closed the static data-workflow gap by adding audited and
 idempotent export/deletion request commands, outbox events, queue job contracts,
 protected operations routes, dashboard queue controls, and a localhost CORS
-fallback for Vite alternate ports. Actual archive writing and tenant deletion
-execution remain gated by R2 retention, provider cleanup, and compliance rules.
+fallback for Vite alternate ports.
+
+Slice 26 export delivery now writes an audited JSON archive artifact through the
+Worker queue path. The app layer builds a redacted team export snapshot with
+ledger review data and operational evidence, and the server persists it to the
+R2-compatible `DAWN_DOCUMENTS` binding with artifact metadata in audit logs.
+Tenant deletion execution remains gated by retention, provider cleanup, and
+compliance rules.
 
 ## Blockers And Watch Items
 
@@ -699,11 +705,11 @@ execution remain gated by R2 retention, provider cleanup, and compliance rules.
   unauthenticated browser redirect through the deep-link dashboard URL.
 - Slice 26 still needs authenticated operations dashboard review against a
   migrated local or preview database, Cloudflare Analytics/DLQ inspection in a
-  deployed Worker environment, durable persisted export job delivery, and a
-  confirmed tenant deletion workflow once retention/compliance rules are
-  finalized. Current verification covers controlled in-memory failure
-  visibility, redaction, request ID propagation, protected API output,
-  dashboard build, workspace checks, and unauthenticated browser redirect.
+  deployed Worker environment, and a confirmed tenant deletion workflow once
+  retention/compliance rules are finalized. Current verification covers
+  controlled in-memory failure visibility, redaction, request ID propagation,
+  protected API output, durable R2-compatible export archive writing, dashboard
+  build, workspace checks, and unauthenticated browser redirect.
 - Slice 27 adds a local and CI `release:gate` that runs ignored-TypeScript
   checks, committed-secret scanning, migration journal validation, workspace
   typecheck/build, Dawn-owned tests, deterministic AI evals, lint/format, and
