@@ -1,5 +1,6 @@
 import type {
   ActorTeam,
+  AccountantPacketTransactionRow,
   AuditLogEntry,
   BankAccount,
   BankConnection,
@@ -3444,6 +3445,132 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       .orderBy(desc(schema.transaction.postedAt));
 
     return transactions.map(mapTransaction);
+  }
+
+  async listAccountantPacketTransactionRows(input: {
+    teamId: string;
+    from: string;
+    to: string;
+    transactionIds?: readonly string[];
+  }): Promise<AccountantPacketTransactionRow[]> {
+    const conditions: SQL[] = [
+      eq(schema.transaction.teamId, input.teamId),
+      eq(schema.transaction.reviewState, "reviewed"),
+      gte(schema.transaction.postedAt, new Date(input.from)),
+      lte(schema.transaction.postedAt, new Date(input.to)),
+    ];
+    const transactionIds = [...(input.transactionIds ?? [])];
+
+    if (transactionIds.length > 0) {
+      conditions.push(inArray(schema.transaction.id, transactionIds));
+    }
+
+    const rows = await this.client
+      .select({
+        transaction: schema.transaction,
+        account: schema.ledgerAccount,
+        category: schema.transactionCategory,
+        counterparty: schema.counterparty,
+      })
+      .from(schema.transaction)
+      .leftJoin(schema.ledgerAccount, eq(schema.ledgerAccount.id, schema.transaction.accountId))
+      .leftJoin(
+        schema.transactionCategory,
+        eq(schema.transactionCategory.id, schema.transaction.categoryId),
+      )
+      .leftJoin(schema.counterparty, eq(schema.counterparty.id, schema.transaction.counterpartyId))
+      .where(and(...conditions))
+      .orderBy(asc(schema.transaction.postedAt), asc(schema.transaction.id));
+
+    if (rows.length === 0) {
+      return [];
+    }
+
+    const exportedTransactionIds = rows.map((row) => row.transaction.id);
+    const [tagRows, attachmentRows] = await Promise.all([
+      this.client
+        .select({
+          transactionId: schema.transactionTagAssignment.transactionId,
+          tag: schema.transactionTag,
+        })
+        .from(schema.transactionTagAssignment)
+        .innerJoin(
+          schema.transactionTag,
+          eq(schema.transactionTag.id, schema.transactionTagAssignment.tagId),
+        )
+        .where(inArray(schema.transactionTagAssignment.transactionId, exportedTransactionIds))
+        .orderBy(asc(schema.transactionTag.name)),
+      this.client
+        .select({
+          attachment: schema.transactionAttachment,
+          document: schema.businessDocument,
+          version: schema.documentVersion,
+        })
+        .from(schema.transactionAttachment)
+        .innerJoin(
+          schema.businessDocument,
+          eq(schema.businessDocument.id, schema.transactionAttachment.documentId),
+        )
+        .leftJoin(
+          schema.documentVersion,
+          eq(schema.documentVersion.id, schema.businessDocument.currentVersionId),
+        )
+        .where(
+          and(
+            eq(schema.transactionAttachment.teamId, input.teamId),
+            inArray(schema.transactionAttachment.transactionId, exportedTransactionIds),
+          ),
+        )
+        .orderBy(asc(schema.documentVersion.fileName)),
+    ]);
+    const tagsByTransactionId = new Map<string, TransactionTag[]>();
+    const attachmentsByTransactionId = new Map<
+      string,
+      AccountantPacketTransactionRow["attachments"]
+    >();
+
+    for (const row of tagRows) {
+      const current = tagsByTransactionId.get(row.transactionId) ?? [];
+      current.push(mapTransactionTag(row.tag));
+      tagsByTransactionId.set(row.transactionId, current);
+    }
+
+    for (const row of attachmentRows) {
+      if (!row.version || row.document.status !== "uploaded") {
+        continue;
+      }
+
+      const current = attachmentsByTransactionId.get(row.attachment.transactionId) ?? [];
+      current.push({
+        transactionId: row.attachment.transactionId,
+        documentId: row.attachment.documentId,
+        inboxItemId: row.attachment.inboxItemId,
+        versionId: row.version.id,
+        objectKey: row.version.objectKey,
+        fileName: row.version.fileName,
+        contentType: row.version.contentType,
+        byteSize: row.version.byteSize,
+        title: row.document.title,
+      });
+      attachmentsByTransactionId.set(row.attachment.transactionId, current);
+    }
+
+    return rows.map((row) => ({
+      transaction: mapTransaction(row.transaction),
+      account: row.account
+        ? {
+            id: row.account.id,
+            name: row.account.name,
+            currency: row.account.currency,
+          }
+        : null,
+      category: row.category ? { id: row.category.id, name: row.category.name } : null,
+      counterparty: row.counterparty
+        ? { id: row.counterparty.id, name: row.counterparty.name }
+        : null,
+      tags: tagsByTransactionId.get(row.transaction.id) ?? [],
+      attachments: attachmentsByTransactionId.get(row.transaction.id) ?? [],
+    }));
   }
 
   async listTransactionsForSync(input: { teamId: string; cursor?: string | null }) {

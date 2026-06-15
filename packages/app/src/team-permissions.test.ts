@@ -270,6 +270,7 @@ describe("team permissions", () => {
       permissions: [
         "transactions.read",
         "transactions.categorize",
+        "transactions.export",
         "documents.read",
         "documents.write",
         "projects.read",

@@ -23,7 +23,13 @@ describe("team role permissions", () => {
 
   test("accountants can categorize transactions without managing teams", () => {
     expect(roleHasPermission("accountant", "transactions.categorize")).toBe(true);
+    expect(roleHasPermission("accountant", "transactions.export")).toBe(true);
     expect(roleHasPermission("accountant", "team.manage")).toBe(false);
+  });
+
+  test("members can export accountant packets without managing teams", () => {
+    expect(roleHasPermission("member", "transactions.export")).toBe(true);
+    expect(roleHasPermission("member", "team.manage")).toBe(false);
   });
 
   test("viewers only receive read-oriented permissions", () => {

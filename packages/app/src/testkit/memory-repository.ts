@@ -13,6 +13,8 @@ import type {
 } from "@dawn/domain";
 
 import type {
+  AccountantPacketAttachment,
+  AccountantPacketTransactionRow,
   IdempotencyResult,
   LedgerRepository,
   ReviewWorkspaceData,
@@ -28,6 +30,7 @@ export class MemoryAppRepository implements LedgerRepository {
   memberships = new Map<string, TeamRole>();
   outboxEvents: unknown[] = [];
   importSessions: TransactionImportSession[] = [];
+  packetAttachments: AccountantPacketAttachment[] = [];
   tagAssignments: { transactionId: string; tagId: string }[] = [];
   tags = new Map<string, TransactionTag>();
   transactions = new Map<string, Transaction>();
@@ -41,6 +44,7 @@ export class MemoryAppRepository implements LedgerRepository {
     this.memberships.clear();
     this.outboxEvents.length = 0;
     this.importSessions.length = 0;
+    this.packetAttachments.length = 0;
     this.tagAssignments.length = 0;
     this.tags.clear();
     this.transactions.clear();
@@ -175,6 +179,46 @@ export class MemoryAppRepository implements LedgerRepository {
         transaction.teamId === input.teamId &&
         (!input.accountId || transaction.accountId === input.accountId),
     );
+  }
+
+  async listAccountantPacketTransactionRows(input: {
+    teamId: string;
+    from: string;
+    to: string;
+    transactionIds?: readonly string[];
+  }): Promise<AccountantPacketTransactionRow[]> {
+    const from = new Date(input.from).getTime();
+    const to = new Date(input.to).getTime();
+    const transactionIds = new Set(input.transactionIds ?? []);
+
+    return [...this.transactions.values()]
+      .filter((transaction) => transaction.teamId === input.teamId)
+      .filter((transaction) => transaction.reviewState === "reviewed")
+      .filter((transaction) => {
+        const postedAt = new Date(transaction.postedAt).getTime();
+        return postedAt >= from && postedAt <= to;
+      })
+      .filter((transaction) => transactionIds.size === 0 || transactionIds.has(transaction.id))
+      .sort((left, right) => left.postedAt.localeCompare(right.postedAt))
+      .map((transaction) => ({
+        transaction,
+        account: transaction.accountId
+          ? (this.accounts.get(transaction.accountId) ?? null)
+          : null,
+        category: transaction.categoryId
+          ? (this.categories.get(transaction.categoryId) ?? null)
+          : null,
+        counterparty: transaction.counterpartyId
+          ? (this.counterparties.get(transaction.counterpartyId) ?? null)
+          : null,
+        tags: this.tagAssignments
+          .filter((assignment) => assignment.transactionId === transaction.id)
+          .map((assignment) => this.tags.get(assignment.tagId))
+          .filter((tag): tag is TransactionTag => Boolean(tag)),
+        attachments: this.packetAttachments.filter(
+          (attachment) => attachment.transactionId === transaction.id,
+        ),
+      }));
   }
 
   async listTransactionsForSync(input: { teamId: string; cursor?: string | null }) {

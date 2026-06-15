@@ -12,6 +12,7 @@ export type Permission =
   | "transactions.read"
   | "transactions.write"
   | "transactions.categorize"
+  | "transactions.export"
   | "documents.read"
   | "documents.write"
   | "projects.read"
@@ -182,6 +183,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "transactions.read",
     "transactions.write",
     "transactions.categorize",
+    "transactions.export",
     "documents.read",
     "documents.write",
     "projects.read",
@@ -207,6 +209,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "transactions.read",
     "transactions.write",
     "transactions.categorize",
+    "transactions.export",
     "documents.read",
     "documents.write",
     "projects.read",
@@ -231,6 +234,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "transactions.read",
     "transactions.write",
     "transactions.categorize",
+    "transactions.export",
     "documents.read",
     "documents.write",
     "projects.read",
@@ -244,6 +248,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
   accountant: [
     "transactions.read",
     "transactions.categorize",
+    "transactions.export",
     "documents.read",
     "documents.write",
     "projects.read",

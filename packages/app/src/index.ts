@@ -26,6 +26,7 @@ import type {
   ReviewWorkspaceData,
   TransactionImportSession,
 } from "./banking-ledger";
+import type { AccountantPacketRepository as AccountantPacketUseCaseRepository } from "./accountant-packet";
 import type { BillingRepository } from "./billing";
 import type { DocumentsInboxUseCaseRepository } from "./documents-inbox";
 import type { ProjectReportingUseCaseRepository } from "./projects-reporting";
@@ -38,6 +39,7 @@ import type { IntegrationUseCaseRepository } from "./integrations";
 
 export * from "./assistant";
 export * from "./automation";
+export * from "./accountant-packet";
 export * from "./banking-ledger";
 export * from "./billing";
 export * from "./developer";
@@ -252,6 +254,7 @@ export type OutboxQueuePublisher = {
 };
 
 export type DawnRepository = BankingUseCaseRepository &
+  AccountantPacketUseCaseRepository &
   LedgerRepository &
   DocumentsInboxUseCaseRepository &
   BillingRepository &

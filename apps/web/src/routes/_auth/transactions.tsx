@@ -23,6 +23,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   CheckIcon,
   ChevronDownIcon,
+  DownloadIcon,
   ListFilterIcon,
   MoreHorizontalIcon,
   PlusIcon,
@@ -92,6 +93,7 @@ function TransactionsRoute() {
   const [categoryDrafts, setCategoryDrafts] = useState<Record<string, string>>({});
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: currentTeamId } }));
   const transactionSync = useTransactionSync(currentTeamId);
@@ -111,6 +113,7 @@ function TransactionsRoute() {
       },
     }),
   );
+  const exportMutation = useMutation(orpc.transactionReview.exportPacket.mutationOptions());
 
   function updateSearch(next: TransactionsSearch) {
     void navigate({
@@ -166,6 +169,15 @@ function TransactionsRoute() {
         .some((value) => value!.toLowerCase().includes(normalizedQuery));
     });
   }, [categories, query, tab, transactions]);
+  const selectedTransactions = useMemo(
+    () => transactions.filter((transaction) => selectedTransactionIds.has(transaction.id)),
+    [selectedTransactionIds, transactions],
+  );
+  const selectedReviewedTransactions = useMemo(
+    () =>
+      selectedTransactions.filter((transaction) => transaction.reviewState === "reviewed"),
+    [selectedTransactions],
+  );
 
   const allVisibleSelected =
     visibleTransactions.length > 0 &&
@@ -218,6 +230,31 @@ function TransactionsRoute() {
       await transactionSync.refetch();
     } finally {
       setReviewingId(null);
+    }
+  }
+
+  async function exportSelectedTransactions() {
+    if (!transactionReview.data || selectedReviewedTransactions.length === 0) {
+      return;
+    }
+
+    setExportError(null);
+
+    try {
+      const postedTimes = selectedReviewedTransactions.map((transaction) =>
+        new Date(transaction.postedAt).getTime(),
+      );
+      const result = await exportMutation.mutateAsync({
+        teamId: transactionReview.data.teamId,
+        from: new Date(Math.min(...postedTimes)).toISOString(),
+        to: new Date(Math.max(...postedTimes)).toISOString(),
+        transactionIds: selectedReviewedTransactions.map((transaction) => transaction.id),
+        idempotencyKey: crypto.randomUUID(),
+      });
+
+      downloadBase64File(result.bodyBase64, result.contentType, result.fileName);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Accountant packet export failed");
     }
   }
 
@@ -503,8 +540,12 @@ function TransactionsRoute() {
         </span>
       </div>
       {reviewError ? <p className="text-xs text-destructive">{reviewError}</p> : null}
+      {exportError ? <p className="text-xs text-destructive">{exportError}</p> : null}
       {reviewMutation.error ? (
         <p className="text-xs text-destructive">{reviewMutation.error.message}</p>
+      ) : null}
+      {exportMutation.error ? (
+        <p className="text-xs text-destructive">{exportMutation.error.message}</p>
       ) : null}
       {selectedTransactionIds.size > 0 ? (
         <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 flex justify-center bg-gradient-to-t from-background via-background/85 to-transparent px-4 py-7">
@@ -526,9 +567,15 @@ function TransactionsRoute() {
                 Deselect all
                 <XIcon aria-hidden="true" className="size-3.5" />
               </Button>
-              <Button className="gap-2 px-3" disabled size="sm" type="button">
-                Export
-                <ChevronDownIcon aria-hidden="true" className="size-3.5" />
+              <Button
+                className="gap-2 px-3"
+                disabled={exportMutation.isPending || selectedReviewedTransactions.length === 0}
+                onClick={() => void exportSelectedTransactions()}
+                size="sm"
+                type="button"
+              >
+                {exportMutation.isPending ? "Exporting" : "Export"}
+                <DownloadIcon aria-hidden="true" className="size-3.5" />
               </Button>
             </div>
           </div>
@@ -552,6 +599,23 @@ function monthChip(value?: string) {
     month: "long",
     year: "numeric",
   }).format(date);
+}
+
+function downloadBase64File(bodyBase64: string, contentType: string, fileName: string) {
+  const binary = atob(bodyBase64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function isTransactionSyncRecord(

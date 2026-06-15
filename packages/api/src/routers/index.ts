@@ -2,6 +2,7 @@ import type { RouterClient } from "@orpc/server";
 import { ORPCError } from "@orpc/server";
 import {
   AppError,
+  exportAccountantPacket,
   acceptInboxMatch,
   acceptTeamInvite,
   approveAssistantAction,
@@ -78,6 +79,7 @@ import {
   syncBankConnection,
   createLedgerTransferPair,
   type DawnRepository,
+  type AccountantPacketAttachmentResolver,
   type DocumentExtractionFields,
   type DocumentUrlSigner,
   type InvoicePdfRenderer,
@@ -116,6 +118,7 @@ export type AppRouterDependencies = {
   integrationProviders: readonly IntegrationProvider[];
   emailInboxConnectors: readonly InboxConnector[];
   documentUrlSigner: DocumentUrlSigner;
+  accountantPacketAttachmentResolver?: AccountantPacketAttachmentResolver;
   invoicePdfRenderer: InvoicePdfRenderer;
   invoiceEmailDeliveryProvider: InvoiceEmailDeliveryProvider;
 };
@@ -124,6 +127,14 @@ const reviewTransactionInput = z.object({
   teamId: z.string().min(1),
   transactionId: z.string().min(1),
   categoryId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const exportAccountantPacketInput = z.object({
+  teamId: z.string().min(1),
+  from: z.iso.datetime(),
+  to: z.iso.datetime(),
+  transactionIds: z.array(z.string().min(1)).optional(),
   idempotencyKey: z.string().min(1),
 });
 
@@ -745,6 +756,7 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     invoiceEmailDeliveryProvider,
     invoicePdfRenderer,
     dawnRepository,
+    accountantPacketAttachmentResolver,
   } = dependencies;
   const bankingProviderRegistry = createBankingProviderRegistry(bankingProviders);
 
@@ -835,6 +847,23 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
               dawnRepository,
               appRequestFromSession(context, { teamId: input.teamId }),
               input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      exportPacket: protectedProcedure
+        .input(exportAccountantPacketInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await exportAccountantPacket(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              {
+                ...input,
+                transactionIds: input.transactionIds ?? [],
+              },
+              accountantPacketAttachmentResolver,
             );
           } catch (error) {
             mapAppError(error);
