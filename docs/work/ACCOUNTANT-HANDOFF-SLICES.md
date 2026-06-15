@@ -46,13 +46,13 @@ Live Gmail OAuth and email delivery should not block completion of local product
 
 | Slice                                                   | Status      | Notes                                                                                                                                                                                                                                                                                                        |
 | ------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1. Accountant Packet Tracer                             | Completed   | Local tracer exports reviewed transactions to a ZIP with `transactions.csv`, `manifest.json`, optional resolved attachments, idempotency, audit, outbox, API, and transactions-page download wiring. Browser smoke reached `/login`; authenticated click smoke still needs a local test account/session.     |
-| 2. Midday-Parity Transaction Lifecycle And Review Queue | Completed   | Added accountant lifecycle status, derived receipt/export readiness, DB persistence, audited/idempotent status transitions, sync invalidation, ready-only export semantics, and transactions-page queue filters/actions. Browser smoke still needs a local test account/session for authenticated UI clicks. |
+| 1. Accountant Packet Tracer                             | Completed   | Local tracer exports reviewed transactions to a ZIP with `transactions.csv`, `manifest.json`, optional resolved attachments, idempotency, audit, outbox, API, and transactions-page download wiring. Authenticated browser smoke now reaches the transactions screen; click/download smoke still needs ready export fixture data. |
+| 2. Midday-Parity Transaction Lifecycle And Review Queue | Completed   | Added accountant lifecycle status, derived receipt/export readiness, DB persistence, audited/idempotent status transitions, sync invalidation, ready-only export semantics, and transactions-page queue filters/actions. Authenticated browser smoke reached the review queue. |
 | 3. CSV Import Wizard Parity Plus                        | Completed   | Added header auto-detection, mapped column selectors, sign inversion, richer preview metadata, duplicate visibility, synchronous commit, queued large-import sessions, R2-backed payload handoff, worker execution, payload cleanup, and operations-page queued feedback.                                    |
 | 4. Gmail Connector Production Readiness                 | Local backend/runtime hardening completed | Gmail config health, scheduled/manual sync locking, skipped-count reporting, and deterministic provider-boundary tests landed. Live OAuth smoke remains blocked on Google credentials and a test mailbox.                                                                                                    |
-| 5. Receipt Matching Parity Plus                         | Completed   | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Browser smoke remains deferred while inbox/transactions UI files are under concurrent coss work.                                                                   |
+| 5. Receipt Matching Parity Plus                         | Completed   | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Authenticated browser smoke reaches inbox and transactions; accept/reject click smoke still needs a seeded suggestion fixture. |
 | 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, signed download links, skipped attachment counts, exported-after-storage status, packet download token policy, accountant email-link delivery, failed export telemetry, and visible export history landed. Live email provider setup remains open. |
-| 7. Accountant Access And Handoff Audit                  | Local product behavior completed | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Stored packet records, export history API/UI, signed download/email success and failure audits, revocable packet links, and email-only handoff API exist. Authenticated owner/accountant browser smoke still needs a working local session. |
+| 7. Accountant Access And Handoff Audit                  | Local product behavior completed | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Stored packet records, export history API/UI, signed download/email success and failure audits, revocable packet links, and email-only handoff API exist. Authenticated owner page smoke works; accountant-role browser smoke still needs a dedicated account/session fixture. |
 | 8. Operational Hardening And Accountant Close Loop      | Local product behavior completed | Operations API/UI now return selected-period accountant close readiness, date-range close controls, job-run retry/dead-letter guidance with redacted actionable errors, packet access history, and deterministic CSV-to-export close-loop fixture coverage. Live Gmail close smoke remains open. |
 
 ## Outcome
@@ -159,7 +159,14 @@ Status: Completed on 2026-06-15.
 - `bun test` from `packages/jobs` passed: 15 tests.
 - `bun run check-types` passed, including the web production build.
 - Focused API route test passed: `bun test packages/api/src/accountant-packet-router.test.ts`.
-- Manual browser smoke opened `http://localhost:3001/transactions`, which redirected to `http://localhost:3001/login`; authenticated click/download smoke remains blocked until a local test account/session is available.
+- Local auth cookie settings now use `SameSite=Lax` without `Secure` for local
+  HTTP `BETTER_AUTH_URL` values, while preserving `SameSite=None; Secure` for
+  HTTPS origins.
+- Playwright/system Chrome signup smoke created a localhost session cookie and
+  reached `http://localhost:3001/dashboard`.
+- Authenticated Playwright/system Chrome smoke reached
+  `http://localhost:3001/transactions` and rendered the transaction review
+  queue. Export click/download smoke still needs ready export fixture data.
 
 ## Dependencies
 
@@ -212,7 +219,9 @@ Status: Completed on 2026-06-15.
 - `bun test` from `packages/jobs` passed: 17 tests.
 - `bun run check-types` passed, including the web production build.
 - `bun run check` passed; it runs `oxlint && oxfmt --write`.
-- Browser smoke opened `http://localhost:3001/transactions`, which redirected to `http://localhost:3001/login`; authenticated queue chip/action/download smoke remains blocked until a local test account/session is available.
+- Playwright/system Chrome authenticated smoke reached
+  `http://localhost:3001/transactions` and rendered review queue counts, the
+  needs-review transaction row, accountant lifecycle status, and sync status.
 
 ## Dependencies
 
@@ -268,7 +277,11 @@ Status: Completed on 2026-06-15.
 - `bunx oxlint` passed.
 - `bunx oxfmt --check` passed on this slice's touched files after targeted formatting of `packages/app/src/banking-ledger.ts` and `docs/work/ACCOUNTANT-HANDOFF-SLICES.md`. Full `bun run check` was not rerun because it writes across the repo and would collide with concurrent coss UI work in the shared worktree.
 - `git diff --check` passed.
-- Browser smoke opened `http://localhost:3001/operations`; the authenticated Operations page rendered with no console errors. Authenticated CSV upload/preview/commit click-through remains a future manual smoke.
+- Authenticated Playwright/system Chrome smoke reached
+  `http://localhost:3001/operations` and rendered the CSV import controls.
+  CSV upload/preview/commit click-through remains a future manual smoke. The
+  current remote Neon dev database also returns `500` for the unrelated packet
+  history RPC until packet export migrations `0025`/`0026` are applied there.
 
 ## Dependencies
 
@@ -347,9 +360,9 @@ remains blocked until Google OAuth credentials and a test mailbox are available.
 
 Make transaction-to-receipt matching at least Midday-parity for accountant handoff, with Dawn-specific safeguards around financial state.
 
-Status: Completed on 2026-06-15 for domain/app/job behavior. Focused browser
-smoke remains deferred while the inbox and transaction UI files are under
-concurrent coss work.
+Status: Completed on 2026-06-15 for domain/app/job behavior. Authenticated
+browser smoke reaches the inbox and transaction pages; accept/reject match
+click smoke still needs a seeded suggestion fixture.
 
 ## Scope
 
@@ -392,9 +405,9 @@ concurrent coss work.
   passed: 15 tests.
 - `bun test packages/jobs/src/index.test.ts` passed: 18 tests.
 - `bun run check-types` passed, including the web production build.
-- Focused browser smoke for accepting and rejecting match suggestions from both
-  inbox and transaction screens was deferred to avoid touching the concurrent
-  coss UI work.
+- Playwright/system Chrome authenticated smoke reached the inbox page and showed
+  the mock email inbox connector status. Focused browser smoke for accepting
+  and rejecting match suggestions still needs a seeded suggestion fixture.
 
 ## Dependencies
 
@@ -509,7 +522,7 @@ ready packets, but it no longer has transaction categorization or other
 write-oriented product permissions. Stored packet records, signed download-link
 audit, email-send success/failure audit, export history API/UI, revocable packet
 links, and email-only handoff API now exist. Authenticated owner/accountant
-browser smoke still needs a working local session.
+browser smoke still needs a dedicated accountant-role account/session fixture.
 
 ## Scope
 
@@ -565,14 +578,18 @@ browser smoke still needs a working local session.
   generated time, status, size, manifest counts, period, formats, revocation
   details, and accountant packet access audit events for download links, email
   send/failure, and revoke activity.
-- Playwright browser smoke with system Chrome reached `http://localhost:3001/login`
-  when opening `http://localhost:3001/operations`; a disposable local signup
-  attempt stayed on the login form, so authenticated owner/accountant click
-  smoke remains blocked by local auth/session setup.
+- Local auth cookie settings now support localhost HTTP sessions; Playwright
+  signup smoke confirmed a `better-auth.session_token` cookie with
+  `SameSite=Lax` and `secure=false`.
+- Playwright/system Chrome authenticated owner smoke reached the Operations page
+  and rendered the export history surface. The configured remote Neon dev
+  database returned `500` for `transactionReview.listPacketExports`, consistent
+  with missing packet export migrations `0025`/`0026`; no remote migration was
+  run implicitly.
 - `curl -I --max-time 10 http://localhost:3001/operations` returned `200 OK`
   from the Vite dev server.
-- Browser smoke with owner and accountant accounts remains open until local test
-  auth supports a working session.
+- Browser smoke with an accountant-role account remains open until a dedicated
+  accountant account/session fixture is available.
 - `bun run check-types` passed.
 - `bunx oxlint` passed.
 - `bunx oxfmt --check packages/api/src/document-url.ts packages/api/src/document-url.test.ts packages/app/src/accountant-packet.ts packages/app/src/accountant-packet.test.ts packages/app/src/testkit/memory-repository.ts packages/db/src/schema/core.ts packages/db/src/dawn-repository.ts packages/api/src/routers/index.ts packages/api/src/accountant-packet-router.test.ts apps/server/src/index.ts`
@@ -666,10 +683,12 @@ remains open.
 - `bunx oxfmt --check apps/web/src/routes/_auth/operations.tsx` passed.
 - `git diff --check -- apps/web/src/routes/_auth/operations.tsx docs/work/ACCOUNTANT-HANDOFF-SLICES.md`
   passed.
-- Playwright browser smoke with system Chrome reached `http://localhost:3001/login`
-  when opening `http://localhost:3001/operations`; a disposable local signup
-  attempt stayed on the login form, so authenticated Operations UI smoke remains
-  blocked by local auth/session setup.
+- Playwright/system Chrome authenticated smoke reached
+  `http://localhost:3001/operations` and rendered Control room, CSV import,
+  accountant close, export history, and job guidance. The configured remote Neon
+  dev database returned `500` for `transactionReview.listPacketExports`,
+  consistent with missing packet export migrations `0025`/`0026`; no remote
+  migration was run implicitly.
 
 ## Dependencies
 

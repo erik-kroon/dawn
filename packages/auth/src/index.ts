@@ -28,6 +28,28 @@ function resolveTrustedOrigins(configuredOrigin: string) {
   return Array.from(new Set(origins));
 }
 
+function defaultCookieAttributesForAuthUrl(authUrl: string) {
+  let secure = true;
+
+  try {
+    secure = new URL(authUrl).protocol === "https:";
+  } catch {
+    secure = true;
+  }
+
+  return secure
+    ? {
+        sameSite: "none" as const,
+        secure: true,
+        httpOnly: true,
+      }
+    : {
+        sameSite: "lax" as const,
+        secure: false,
+        httpOnly: true,
+      };
+}
+
 export function createAuth() {
   const db = createDb();
   const plugins = [];
@@ -68,11 +90,7 @@ export function createAuth() {
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL,
     advanced: {
-      defaultCookieAttributes: {
-        sameSite: "none",
-        secure: true,
-        httpOnly: true,
-      },
+      defaultCookieAttributes: defaultCookieAttributesForAuthUrl(env.BETTER_AUTH_URL),
     },
     plugins,
   });
