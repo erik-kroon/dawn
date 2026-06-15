@@ -15,7 +15,10 @@ import type {
   ActorTeam,
   BankAccount,
   BankConnection,
-  BankingUseCaseRepository,
+  BusinessDocument,
+  BusinessDocumentVersion,
+  DawnRepository,
+  DocumentUrlSigner,
   IdempotencyResult,
   ProviderSyncRun,
   ReviewWorkspaceData,
@@ -23,12 +26,14 @@ import type {
 } from "@dawn/app";
 import { createMockBankingProvider } from "@dawn/integrations";
 
-class MemoryTransactionReviewRepository implements BankingUseCaseRepository {
+class MemoryTransactionReviewRepository implements DawnRepository {
   auditEvents: unknown[] = [];
   outboxEvents: unknown[] = [];
   bankAccounts = new Map<string, BankAccount>();
   bankConnections = new Map<string, BankConnection>();
   categories = new Map<string, Category>();
+  documents = new Map<string, BusinessDocument>();
+  documentVersions = new Map<string, BusinessDocumentVersion>();
   accounts = new Map<string, LedgerAccount>();
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   importSessions: TransactionImportSession[] = [];
@@ -40,9 +45,7 @@ class MemoryTransactionReviewRepository implements BankingUseCaseRepository {
   transactions = new Map<string, Transaction>();
   users = new Map<string, { email: string; name: string }>();
 
-  async withTransaction<T>(
-    callback: (repository: BankingUseCaseRepository) => Promise<T>,
-  ): Promise<T> {
+  async withTransaction<T>(callback: (repository: DawnRepository) => Promise<T>): Promise<T> {
     return callback(this);
   }
 
@@ -277,9 +280,7 @@ class MemoryTransactionReviewRepository implements BankingUseCaseRepository {
     return connection?.teamId === teamId ? connection : null;
   }
 
-  async upsertBankConnection(
-    input: Parameters<BankingUseCaseRepository["upsertBankConnection"]>[0],
-  ) {
+  async upsertBankConnection(input: Parameters<DawnRepository["upsertBankConnection"]>[0]) {
     const existing = [...this.bankConnections.values()].find(
       (connection) =>
         connection.teamId === input.teamId &&
@@ -301,7 +302,7 @@ class MemoryTransactionReviewRepository implements BankingUseCaseRepository {
     return connection;
   }
 
-  async upsertBankAccount(input: Parameters<BankingUseCaseRepository["upsertBankAccount"]>[0]) {
+  async upsertBankAccount(input: Parameters<DawnRepository["upsertBankAccount"]>[0]) {
     const existing = [...this.bankAccounts.values()].find(
       (account) =>
         account.connectionId === input.connectionId &&
@@ -352,9 +353,7 @@ class MemoryTransactionReviewRepository implements BankingUseCaseRepository {
     return syncRun;
   }
 
-  async finishProviderSyncRun(
-    input: Parameters<BankingUseCaseRepository["finishProviderSyncRun"]>[0],
-  ) {
+  async finishProviderSyncRun(input: Parameters<DawnRepository["finishProviderSyncRun"]>[0]) {
     const existing = this.syncRuns.find((syncRun) => syncRun.id === input.syncRunId);
 
     if (!existing) {
@@ -374,9 +373,7 @@ class MemoryTransactionReviewRepository implements BankingUseCaseRepository {
     return syncRun;
   }
 
-  async markBankConnectionSynced(
-    input: Parameters<BankingUseCaseRepository["markBankConnectionSynced"]>[0],
-  ) {
+  async markBankConnectionSynced(input: Parameters<DawnRepository["markBankConnectionSynced"]>[0]) {
     const existing = this.bankConnections.get(input.connectionId);
 
     if (!existing) {
@@ -393,13 +390,109 @@ class MemoryTransactionReviewRepository implements BankingUseCaseRepository {
     return connection;
   }
 
-  async upsertProviderObject(
-    input: Parameters<BankingUseCaseRepository["upsertProviderObject"]>[0],
-  ) {
+  async upsertProviderObject(input: Parameters<DawnRepository["upsertProviderObject"]>[0]) {
     this.providerObjects.set(
       `${input.provider}:${input.providerObjectType}:${input.providerObjectId}`,
       input.rawPayload,
     );
+  }
+
+  async listDocuments(teamId: string) {
+    return [...this.documents.values()].filter((document) => document.teamId === teamId);
+  }
+
+  async createDocumentUploadRecord(input: {
+    documentId: string;
+    versionId: string;
+    teamId: string;
+    title: string;
+    objectKey: string;
+    fileName: string;
+    contentType: string;
+    byteSize: number;
+    checksumSha256?: string | null;
+    createdByActorId: string;
+  }) {
+    const now = "2026-06-15T10:00:00.000Z";
+    const version: BusinessDocumentVersion = {
+      id: input.versionId,
+      documentId: input.documentId,
+      teamId: input.teamId,
+      versionNumber: 1,
+      objectKey: input.objectKey,
+      fileName: input.fileName,
+      contentType: input.contentType,
+      byteSize: input.byteSize,
+      checksumSha256: input.checksumSha256 ?? null,
+      status: "pending_upload",
+      uploadedAt: null,
+      createdAt: now,
+    };
+    const document: BusinessDocument = {
+      id: input.documentId,
+      teamId: input.teamId,
+      title: input.title,
+      status: "uploading",
+      currentVersionId: null,
+      createdByActorId: input.createdByActorId,
+      createdAt: now,
+      updatedAt: now,
+      currentVersion: null,
+    };
+    this.documents.set(document.id, document);
+    this.documentVersions.set(version.id, version);
+
+    return { document, version };
+  }
+
+  async getDocumentForTeam(teamId: string, documentId: string) {
+    const document = this.documents.get(documentId);
+    return document?.teamId === teamId ? document : null;
+  }
+
+  async getDocumentVersionForTeam(teamId: string, versionId: string) {
+    const version = this.documentVersions.get(versionId);
+    return version?.teamId === teamId ? version : null;
+  }
+
+  async completeDocumentVersionUpload(input: {
+    teamId: string;
+    documentId: string;
+    versionId: string;
+    byteSize: number;
+    checksumSha256?: string | null;
+    uploadedAt: Date;
+  }) {
+    const document = this.documents.get(input.documentId);
+    const version = this.documentVersions.get(input.versionId);
+
+    if (
+      !document ||
+      document.teamId !== input.teamId ||
+      !version ||
+      version.teamId !== input.teamId
+    ) {
+      throw new Error("Document upload not found");
+    }
+
+    const uploadedVersion: BusinessDocumentVersion = {
+      ...version,
+      byteSize: input.byteSize,
+      checksumSha256: input.checksumSha256 ?? null,
+      status: "uploaded",
+      uploadedAt: input.uploadedAt.toISOString(),
+    };
+    const uploadedDocument: BusinessDocument = {
+      ...document,
+      status: "uploaded",
+      currentVersionId: uploadedVersion.id,
+      currentVersion: uploadedVersion,
+      updatedAt: input.uploadedAt.toISOString(),
+    };
+    this.documentVersions.set(uploadedVersion.id, uploadedVersion);
+    this.documents.set(uploadedDocument.id, uploadedDocument);
+
+    return { document: uploadedDocument, version: uploadedVersion };
   }
 
   async createTeamInvite(input: {
@@ -498,7 +591,22 @@ function testContext(user?: { id: string; email: string }) {
   };
 }
 
-async function createTestRouter(repository: BankingUseCaseRepository) {
+const testDocumentUrlSigner: DocumentUrlSigner = {
+  async createUploadUrl(input) {
+    return {
+      url: `http://localhost:3000/documents/upload/${input.versionId}`,
+      expiresAt: "2026-06-15T10:15:00.000Z",
+    };
+  },
+  async createDownloadUrl(input) {
+    return {
+      url: `http://localhost:3000/documents/download/${input.versionId}`,
+      expiresAt: "2026-06-15T10:05:00.000Z",
+    };
+  },
+};
+
+async function createTestRouter(repository: DawnRepository) {
   process.env.DATABASE_URL ??= "postgres://test";
   process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";
   process.env.BETTER_AUTH_URL ??= "http://localhost:3000";
@@ -510,6 +618,7 @@ async function createTestRouter(repository: BankingUseCaseRepository) {
   return createAppRouter({
     transactionReviewRepository: repository,
     bankingProvider: createMockBankingProvider(),
+    documentUrlSigner: testDocumentUrlSigner,
   });
 }
 
@@ -787,6 +896,85 @@ describe("appRouter", () => {
     expect(repository.importSessions).toHaveLength(1);
     expect(repository.auditEvents).toHaveLength(1);
     expect(repository.outboxEvents).toHaveLength(1);
+  });
+
+  test("creates and signs document uploads and downloads through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    const router = await createTestRouter(repository);
+
+    const prepared = await call(
+      router.documents.createUpload,
+      {
+        teamId: "team_1",
+        fileName: "receipt.pdf",
+        contentType: "application/pdf",
+        byteSize: 7,
+        idempotencyKey: "doc_upload_1",
+      },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+    const listed = await call(
+      router.documents.list,
+      { teamId: "team_1" },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    await repository.completeDocumentVersionUpload({
+      teamId: "team_1",
+      documentId: prepared.document.id,
+      versionId: prepared.version.id,
+      byteSize: 7,
+      uploadedAt: new Date("2026-06-15T10:01:00.000Z"),
+    });
+
+    const download = await call(
+      router.documents.download,
+      { teamId: "team_1", documentId: prepared.document.id },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(prepared.uploadUrl).toBe(
+      `http://localhost:3000/documents/upload/${prepared.version.id}`,
+    );
+    expect(listed.documents).toHaveLength(1);
+    expect(listed.documents[0]?.status).toBe("uploading");
+    expect(download.downloadUrl).toBe(
+      `http://localhost:3000/documents/download/${prepared.version.id}`,
+    );
+  });
+
+  test("maps document upload permission denials to typed oRPC errors", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "viewer");
+    const router = await createTestRouter(repository);
+
+    await expect(
+      call(
+        router.documents.createUpload,
+        {
+          teamId: "team_1",
+          fileName: "receipt.pdf",
+          contentType: "application/pdf",
+          byteSize: 7,
+          idempotencyKey: "doc_upload_1",
+        },
+        {
+          context: testContext({ id: "user_1", email: "viewer@example.com" }),
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: "You cannot upload documents for this team",
+    });
   });
 
   test("connects and syncs a mock bank provider through protected routes", async () => {

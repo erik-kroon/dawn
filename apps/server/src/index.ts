@@ -4,8 +4,14 @@ import { onError } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
 import { ZodToJsonSchemaConverter } from "@orpc/zod/zod4";
 import { createContext } from "@dawn/api/context";
+import { verifyDocumentUrlToken } from "@dawn/api/document-url";
 import { appRouter } from "@dawn/api/routers/index";
-import { AppError, dispatchOutboxEvents, resolveTeamAccess } from "@dawn/app";
+import {
+  AppError,
+  completeDocumentUpload,
+  dispatchOutboxEvents,
+  resolveTeamAccess,
+} from "@dawn/app";
 import { auth } from "@dawn/auth";
 import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
 import { env } from "@dawn/env/server";
@@ -18,6 +24,7 @@ import { evlog, type EvlogVariables } from "evlog/hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
+import { createR2DocumentObjectStorage } from "./document-storage";
 import { createCloudflareOutboxQueuePublisher } from "./outbox-queue";
 import { publishTenantSyncInvalidation } from "./tenant-sync";
 
@@ -48,13 +55,88 @@ app.use(
   "/*",
   cors({
     origin: env.CORS_ORIGIN,
-    allowMethods: ["GET", "POST", "OPTIONS"],
+    allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
     credentials: true,
   }),
 );
 
 app.on(["POST", "GET"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+
+app.put("/documents/upload/:token", async (c) => {
+  let payload: Awaited<ReturnType<typeof verifyDocumentUrlToken>>;
+
+  try {
+    payload = await verifyDocumentUrlToken({
+      secret: c.env.BETTER_AUTH_SECRET,
+      token: c.req.param("token"),
+      kind: "upload",
+    });
+  } catch (error) {
+    return c.json({ error: errorMessage(error) }, 401);
+  }
+
+  if (!payload.actorId || !payload.requestId || !payload.byteSize) {
+    return c.json({ error: "Invalid upload token" }, 400);
+  }
+
+  const body = await c.req.arrayBuffer();
+
+  if (body.byteLength !== payload.byteSize) {
+    return c.json({ error: "Upload size does not match signed metadata" }, 409);
+  }
+
+  await createR2DocumentObjectStorage(c.env.DAWN_DOCUMENTS).put({
+    objectKey: payload.objectKey,
+    body,
+    contentType: payload.contentType,
+  });
+
+  const result = await completeDocumentUpload(
+    new DrizzleTransactionReviewRepository(),
+    {
+      actor: { id: payload.actorId, type: "user" },
+      requestId: payload.requestId,
+      teamId: payload.teamId,
+    },
+    {
+      teamId: payload.teamId,
+      documentId: payload.documentId,
+      versionId: payload.versionId,
+      byteSize: payload.byteSize,
+    },
+  );
+
+  return c.json(result);
+});
+
+app.get("/documents/download/:token", async (c) => {
+  let payload: Awaited<ReturnType<typeof verifyDocumentUrlToken>>;
+
+  try {
+    payload = await verifyDocumentUrlToken({
+      secret: c.env.BETTER_AUTH_SECRET,
+      token: c.req.param("token"),
+      kind: "download",
+    });
+  } catch (error) {
+    return c.json({ error: errorMessage(error) }, 401);
+  }
+
+  const object = await createR2DocumentObjectStorage(c.env.DAWN_DOCUMENTS).get(payload.objectKey);
+
+  if (!object) {
+    return c.json({ error: "Document object not found" }, 404);
+  }
+
+  return new Response(object.body, {
+    headers: {
+      "content-type": object.contentType,
+      "content-length": String(object.byteSize),
+      "content-disposition": `attachment; filename="${safeHeaderFileName(payload.fileName)}"`,
+    },
+  });
+});
 
 app.get("/sync/transactions/subscribe", async (c) => {
   if (c.req.header("Upgrade")?.toLowerCase() !== "websocket") {
@@ -193,6 +275,14 @@ function appErrorStatus(error: AppError) {
   }
 
   return 409;
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Unexpected server error";
+}
+
+function safeHeaderFileName(fileName: string) {
+  return fileName.replace(/["\r\n]/g, "_");
 }
 
 async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnCloudflareBindings) {

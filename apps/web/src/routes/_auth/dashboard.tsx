@@ -16,7 +16,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { authClient } from "@/lib/auth-client";
 import { useTransactionSync } from "@/sync/transactions";
-import { orpc } from "@/utils/orpc";
+import { client, orpc } from "@/utils/orpc";
 
 export const Route = createFileRoute("/_auth/dashboard")({
   component: RouteComponent,
@@ -41,6 +41,7 @@ function RouteComponent() {
     currency: "",
     categoryId: "",
   });
+  const [documentFile, setDocumentFile] = useState<File | null>(null);
   const [syncReviewError, setSyncReviewError] = useState<string | null>(null);
   const [syncReviewingId, setSyncReviewingId] = useState<string | null>(null);
 
@@ -73,6 +74,10 @@ function RouteComponent() {
     transactionReview.data?.permissions.includes("bank_connections.manage") ?? false;
   const banking = useQuery({
     ...orpc.banking.list.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
+  const documents = useQuery({
+    ...orpc.documents.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
   const teamDirectory = useQuery({
@@ -134,6 +139,42 @@ function RouteComponent() {
       },
     }),
   );
+  const documentUploadMutation = useMutation({
+    mutationFn: async (input: { teamId: string; file: File }) => {
+      const prepared = await client.documents.createUpload({
+        teamId: input.teamId,
+        fileName: input.file.name,
+        contentType: input.file.type || "application/octet-stream",
+        byteSize: input.file.size,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const upload = await fetch(prepared.uploadUrl, {
+        method: "PUT",
+        headers: {
+          "content-type": input.file.type || "application/octet-stream",
+        },
+        body: await input.file.arrayBuffer(),
+      });
+
+      if (!upload.ok) {
+        throw new Error(await upload.text());
+      }
+
+      return prepared;
+    },
+    onSuccess: async () => {
+      setDocumentFile(null);
+      await queryClient.invalidateQueries({ queryKey: orpc.documents.list.queryKey() });
+    },
+  });
+  const documentDownloadMutation = useMutation({
+    mutationFn: async (input: { teamId: string; documentId: string }) => {
+      return client.documents.download(input);
+    },
+    onSuccess: (result) => {
+      window.location.assign(result.downloadUrl);
+    },
+  });
   const csvCommitMutation = useMutation(
     orpc.csvImport.commit.mutationOptions({
       onSuccess: async () => {
@@ -447,6 +488,96 @@ function RouteComponent() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Documents</CardTitle>
+          <CardDescription>
+            Team files are prepared through app use cases, stored in R2, and downloaded through
+            signed team-scoped URLs.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {transactionReview.data ? (
+            <div className="grid gap-3">
+              <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                <Label className="flex flex-col gap-1 text-sm">
+                  Business document
+                  <Input
+                    type="file"
+                    onChange={(event) => setDocumentFile(event.currentTarget.files?.[0] ?? null)}
+                  />
+                </Label>
+                <Button
+                  disabled={
+                    documentUploadMutation.isPending ||
+                    !documentFile ||
+                    !transactionReview.data.teamId
+                  }
+                  onClick={() => {
+                    if (!documentFile || !transactionReview.data) {
+                      return;
+                    }
+
+                    documentUploadMutation.mutate({
+                      teamId: transactionReview.data.teamId,
+                      file: documentFile,
+                    });
+                  }}
+                >
+                  Upload document
+                </Button>
+              </div>
+              <div className="overflow-hidden border">
+                {documents.data?.documents.map((document) => (
+                  <div
+                    className="grid gap-3 border-b p-3 last:border-b-0 md:grid-cols-[1fr_auto_auto] md:items-center"
+                    key={document.id}
+                  >
+                    <div>
+                      <p className="font-medium">{document.title}</p>
+                      <p className="text-muted-foreground">
+                        {document.currentVersion?.fileName ?? "Upload pending"} · {document.status}
+                        {document.currentVersion
+                          ? ` · ${formatBytes(document.currentVersion.byteSize)}`
+                          : ""}
+                      </p>
+                    </div>
+                    <p className="font-mono text-xs text-muted-foreground">
+                      {new Date(document.updatedAt).toLocaleString()}
+                    </p>
+                    <Button
+                      disabled={
+                        document.status !== "uploaded" ||
+                        documentDownloadMutation.isPending ||
+                        !transactionReview.data.teamId
+                      }
+                      onClick={() =>
+                        documentDownloadMutation.mutate({
+                          teamId: transactionReview.data.teamId,
+                          documentId: document.id,
+                        })
+                      }
+                      variant="outline"
+                    >
+                      Download
+                    </Button>
+                  </div>
+                ))}
+                {documents.data?.documents.length === 0 ? (
+                  <p className="p-3 text-sm text-muted-foreground">No documents uploaded yet.</p>
+                ) : null}
+              </div>
+              {documentUploadMutation.error ? (
+                <p className="text-sm text-destructive">{documentUploadMutation.error.message}</p>
+              ) : null}
+              {documentDownloadMutation.error ? (
+                <p className="text-sm text-destructive">{documentDownloadMutation.error.message}</p>
+              ) : null}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>CSV transaction import</CardTitle>
           <CardDescription>
             Imported rows use the same ledger normalization, duplicate detection, audit, and outbox
@@ -728,6 +859,18 @@ function normalizedCsvMapping(mapping: CsvImportMappingState) {
     currency: mapping.currency.trim() || null,
     categoryId: mapping.categoryId || null,
   };
+}
+
+function formatBytes(byteSize: number) {
+  if (byteSize < 1024) {
+    return `${byteSize} B`;
+  }
+
+  if (byteSize < 1024 * 1024) {
+    return `${(byteSize / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(byteSize / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {

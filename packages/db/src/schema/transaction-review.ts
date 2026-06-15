@@ -427,6 +427,57 @@ export const providerObject = pgTable(
   ],
 );
 
+export const businessDocument = pgTable(
+  "document",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    status: text("status").default("uploading").notNull(),
+    currentVersionId: text("current_version_id"),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("document_team_status_idx").on(table.teamId, table.status),
+    index("document_team_updated_idx").on(table.teamId, table.updatedAt),
+  ],
+);
+
+export const documentVersion = pgTable(
+  "document_version",
+  {
+    id: text("id").primaryKey(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => businessDocument.id, { onDelete: "cascade" }),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    versionNumber: integer("version_number").notNull(),
+    objectKey: text("object_key").notNull(),
+    fileName: text("file_name").notNull(),
+    contentType: text("content_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    checksumSha256: text("checksum_sha256"),
+    status: text("status").default("pending_upload").notNull(),
+    uploadedByActorId: text("uploaded_by_actor_id").notNull(),
+    uploadedAt: timestamp("uploaded_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("document_version_number_idx").on(table.documentId, table.versionNumber),
+    uniqueIndex("document_version_object_key_idx").on(table.objectKey),
+    index("document_version_team_idx").on(table.teamId, table.createdAt),
+  ],
+);
+
 export const idempotencyKey = pgTable(
   "idempotency_key",
   {
@@ -466,6 +517,8 @@ export const teamRelations = relations(team, ({ many }) => ({
   jobRuns: many(jobRun),
   providerSyncRuns: many(providerSyncRun),
   providerObjects: many(providerObject),
+  documents: many(businessDocument),
+  documentVersions: many(documentVersion),
 }));
 
 export const teamMembershipRelations = relations(teamMembership, ({ one }) => ({

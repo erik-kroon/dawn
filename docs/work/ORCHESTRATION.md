@@ -53,7 +53,7 @@ pass, and the implementing agent has inspected the diff.
 | 9   | Tenant Durable Object Realtime Fanout                        | Verified foundation, live multi-client blocked           | Slices 6, 8              | Subscription routing tests; sync protocol tests; Worker/server build; typecheck/check.                                   |
 | 10  | Banking Provider Adapter Interface And Mock Provider         | Verified foundation, live manual sync blocked            | Slices 4, 8              | Adapter/app/API tests; migration; dashboard/server smoke; typecheck/check.                                               |
 | 11  | First Real Banking Provider                                  | Blocked on provider choice/credentials                   | Slice 10                 | Sandbox/provider tests; webhook signature tests; manual sandbox connection.                                              |
-| 12  | Documents And R2 Storage                                     | Not started                                              | Slices 3, 7, 8           | Metadata/permission tests; R2 mock/local test; manual upload/download.                                                   |
+| 12  | Documents And R2 Storage                                     | Verified foundation, manual upload/download blocked      | Slices 3, 7, 8           | Metadata/permission tests; R2 mock/local test; web/server smoke.                                                         |
 | 13  | Inbox And Document Extraction Pipeline                       | Not started                                              | Slice 12                 | Extraction schema tests; worker tests; manual inbox review.                                                              |
 | 14  | Inbox-To-Transaction Matching                                | Not started                                              | Slices 4, 13             | Matching domain tests; accept/reject tests; manual samples.                                                              |
 | 15  | Customers And Invoice Drafts                                 | Not started                                              | Slices 3, 4              | Invoice totals/state tests; customer/draft tests; manual draft.                                                          |
@@ -167,6 +167,12 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 10     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 219 files.                                                                                     |
 | 2026-06-15 slice 10     | `bun run --filter server build`                                                                                                                                                                                                                                                                                              | Pass    | Server bundle built successfully after adding banking routes and integration package dependency.                                             |
 | 2026-06-15 slice 10     | `bun run dev:web` + `env SKIP_ENV_VALIDATION=true POLAR_ACCESS_TOKEN=dummy bun run dev:server` + browser open `http://localhost:3001/`                                                                                                                                                                                       | Pass    | Web shell loaded against local API; fresh console had only React DevTools info. Authenticated banking-panel interaction remains blocked.     |
+| 2026-06-15 slice 12     | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0007_burly_the_call.sql` for document and document version metadata.                                   |
+| 2026-06-15 slice 12     | `bun test packages/app/src/documents.test.ts packages/api/src/document-url.test.ts apps/server/src/document-storage.test.ts packages/api/src/router.test.ts`                                                                                                                                                                 | Pass    | 17 tests passed for document metadata, permission denial, signed URLs, R2 memory storage, and API routes.                                    |
+| 2026-06-15 slice 12     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                       |
+| 2026-06-15 slice 12     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 225 files.                                                                                     |
+| 2026-06-15 slice 12     | `bun run --filter server build`                                                                                                                                                                                                                                                                                              | Pass    | Server Worker bundle built successfully after adding document upload/download routes.                                                        |
+| 2026-06-15 slice 12     | `bun run dev:web` + `env SKIP_ENV_VALIDATION=true POLAR_ACCESS_TOKEN=dummy ... bun run dev:server` + browser open `http://localhost:3001/` and `/dashboard`                                                                                                                                                                  | Partial | Web shell and unauthenticated redirect loaded with no console errors; authenticated document-panel upload/download remains blocked.          |
 
 ## Commit Log
 
@@ -277,6 +283,18 @@ routes, the dashboard shows mock connection/account/latest-sync status, and
 migration `0006_wise_firebrand` adds `bank_connection`, `bank_account`,
 `provider_object`, and `provider_sync_run`.
 
+Slice 12 foundation added app-layer document upload, completion, list, and
+download use cases behind `documents.read`/`documents.write` team permissions.
+Upload preparation is idempotent and stores metadata in Postgres; upload
+completion updates the current document version and writes audit plus
+`document.uploaded` outbox events. The API now exposes document list, upload
+preparation, and download signing routes; the server exposes signed
+`PUT /documents/upload/:token` and `GET /documents/download/:token` routes
+backed by the `DAWN_DOCUMENTS` R2 binding. Migration `0007_burly_the_call`
+adds `document` and `document_version`, and the dashboard includes a compact
+documents panel that uploads file bytes to the signed URL and requests signed
+downloads through the protected API.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -317,3 +335,7 @@ migration `0006_wise_firebrand` adds `bank_connection`, `bank_account`,
 - Slice 10 still needs authenticated manual interaction against a migrated local
   or preview database. Current verification covers adapter/app/API contracts and
   web shell smoke, but not clicking the banking panel through a live session.
+- Slice 12 still needs authenticated manual upload/download against a migrated
+  local or preview database with an R2-compatible `DAWN_DOCUMENTS` binding.
+  Current verification covers app/API/server contracts, signer behavior, memory
+  object storage, server bundle, and unauthenticated web-shell smoke.

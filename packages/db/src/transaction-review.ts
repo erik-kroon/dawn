@@ -3,8 +3,10 @@ import type {
   BankAccount,
   BankConnection,
   BankConnectionSummary,
-  BankingRepository,
+  BusinessDocument,
+  BusinessDocumentVersion,
   CsvTransactionImportMapping,
+  DawnRepository,
   IdempotencyResult,
   JobRun,
   OutboxDispatchRepository,
@@ -12,7 +14,6 @@ import type {
   ProviderSyncRun,
   ReviewWorkspaceData,
   TransactionImportSession,
-  TransactionReviewRepository,
 } from "@dawn/app";
 import type {
   Actor,
@@ -34,7 +35,7 @@ import * as schema from "./schema";
 type Database = typeof db;
 type TransactionClient = Parameters<Parameters<Database["transaction"]>[0]>[0];
 type QueryClient = Database | TransactionClient;
-type DrizzleRepository = TransactionReviewRepository & OutboxDispatchRepository & BankingRepository;
+type DrizzleRepository = DawnRepository & OutboxDispatchRepository;
 
 export class DrizzleTransactionReviewRepository implements DrizzleRepository {
   constructor(private readonly client: QueryClient = db) {}
@@ -558,6 +559,173 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       internalEntityId: input.internalEntityId ?? null,
       rawPayload: input.rawPayload,
     });
+  }
+
+  async listDocuments(teamId: string): Promise<BusinessDocument[]> {
+    const [documents, versions] = await Promise.all([
+      this.client
+        .select()
+        .from(schema.businessDocument)
+        .where(eq(schema.businessDocument.teamId, teamId))
+        .orderBy(desc(schema.businessDocument.updatedAt)),
+      this.client
+        .select()
+        .from(schema.documentVersion)
+        .where(eq(schema.documentVersion.teamId, teamId)),
+    ]);
+
+    return documents.map((document) =>
+      mapBusinessDocument(
+        document,
+        versions.find((version) => version.id === document.currentVersionId) ?? null,
+      ),
+    );
+  }
+
+  async createDocumentUploadRecord(input: {
+    documentId: string;
+    versionId: string;
+    teamId: string;
+    title: string;
+    objectKey: string;
+    fileName: string;
+    contentType: string;
+    byteSize: number;
+    checksumSha256?: string | null;
+    createdByActorId: string;
+  }) {
+    const [document] = await this.client
+      .insert(schema.businessDocument)
+      .values({
+        id: input.documentId,
+        teamId: input.teamId,
+        title: input.title,
+        status: "uploading",
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!document) {
+      throw new Error("Document was not created");
+    }
+
+    const [version] = await this.client
+      .insert(schema.documentVersion)
+      .values({
+        id: input.versionId,
+        documentId: input.documentId,
+        teamId: input.teamId,
+        versionNumber: 1,
+        objectKey: input.objectKey,
+        fileName: input.fileName,
+        contentType: input.contentType,
+        byteSize: input.byteSize,
+        checksumSha256: input.checksumSha256 ?? null,
+        status: "pending_upload",
+        uploadedByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!version) {
+      throw new Error("Document version was not created");
+    }
+
+    return {
+      document: mapBusinessDocument(document, null),
+      version: mapBusinessDocumentVersion(version),
+    };
+  }
+
+  async getDocumentForTeam(teamId: string, documentId: string) {
+    const [document] = await this.client
+      .select()
+      .from(schema.businessDocument)
+      .where(
+        and(eq(schema.businessDocument.teamId, teamId), eq(schema.businessDocument.id, documentId)),
+      )
+      .limit(1);
+
+    if (!document) {
+      return null;
+    }
+
+    const currentVersion = document.currentVersionId
+      ? (
+          await this.client
+            .select()
+            .from(schema.documentVersion)
+            .where(eq(schema.documentVersion.id, document.currentVersionId))
+            .limit(1)
+        )[0]
+      : null;
+
+    return mapBusinessDocument(document, currentVersion ?? null);
+  }
+
+  async getDocumentVersionForTeam(teamId: string, versionId: string) {
+    const [version] = await this.client
+      .select()
+      .from(schema.documentVersion)
+      .where(
+        and(eq(schema.documentVersion.teamId, teamId), eq(schema.documentVersion.id, versionId)),
+      )
+      .limit(1);
+
+    return version ? mapBusinessDocumentVersion(version) : null;
+  }
+
+  async completeDocumentVersionUpload(input: {
+    teamId: string;
+    documentId: string;
+    versionId: string;
+    byteSize: number;
+    checksumSha256?: string | null;
+    uploadedAt: Date;
+  }) {
+    const [version] = await this.client
+      .update(schema.documentVersion)
+      .set({
+        status: "uploaded",
+        byteSize: input.byteSize,
+        checksumSha256: input.checksumSha256 ?? null,
+        uploadedAt: input.uploadedAt,
+      })
+      .where(
+        and(
+          eq(schema.documentVersion.teamId, input.teamId),
+          eq(schema.documentVersion.documentId, input.documentId),
+          eq(schema.documentVersion.id, input.versionId),
+        ),
+      )
+      .returning();
+
+    if (!version) {
+      throw new Error("Document version was not uploaded");
+    }
+
+    const [document] = await this.client
+      .update(schema.businessDocument)
+      .set({
+        status: "uploaded",
+        currentVersionId: input.versionId,
+        updatedAt: input.uploadedAt,
+      })
+      .where(
+        and(
+          eq(schema.businessDocument.teamId, input.teamId),
+          eq(schema.businessDocument.id, input.documentId),
+        ),
+      )
+      .returning();
+
+    if (!document) {
+      throw new Error("Document was not uploaded");
+    }
+
+    return {
+      document: mapBusinessDocument(document, version),
+      version: mapBusinessDocumentVersion(version),
+    };
   }
 
   async listTransactionsForReport(input: {
@@ -1110,6 +1278,42 @@ function mapBankAccount(account: typeof schema.bankAccount.$inferSelect): BankAc
       currency: account.currency,
     },
     status: account.status as BankAccount["status"],
+  };
+}
+
+function mapBusinessDocument(
+  document: typeof schema.businessDocument.$inferSelect,
+  currentVersion: typeof schema.documentVersion.$inferSelect | null,
+): BusinessDocument {
+  return {
+    id: document.id,
+    teamId: document.teamId,
+    title: document.title,
+    status: document.status as BusinessDocument["status"],
+    currentVersionId: document.currentVersionId,
+    createdByActorId: document.createdByActorId,
+    createdAt: document.createdAt.toISOString(),
+    updatedAt: document.updatedAt.toISOString(),
+    currentVersion: currentVersion ? mapBusinessDocumentVersion(currentVersion) : null,
+  };
+}
+
+function mapBusinessDocumentVersion(
+  version: typeof schema.documentVersion.$inferSelect,
+): BusinessDocumentVersion {
+  return {
+    id: version.id,
+    documentId: version.documentId,
+    teamId: version.teamId,
+    versionNumber: version.versionNumber,
+    objectKey: version.objectKey,
+    fileName: version.fileName,
+    contentType: version.contentType,
+    byteSize: version.byteSize,
+    checksumSha256: version.checksumSha256,
+    status: version.status as BusinessDocumentVersion["status"],
+    uploadedAt: version.uploadedAt?.toISOString() ?? null,
+    createdAt: version.createdAt.toISOString(),
   };
 }
 

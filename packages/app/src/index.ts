@@ -238,6 +238,37 @@ export type BankConnectionSummary = {
   latestSyncRun?: ProviderSyncRun | null;
 };
 
+export type BusinessDocumentStatus = "uploading" | "uploaded";
+
+export type BusinessDocumentVersionStatus = "pending_upload" | "uploaded";
+
+export type BusinessDocumentVersion = {
+  id: string;
+  documentId: string;
+  teamId: string;
+  versionNumber: number;
+  objectKey: string;
+  fileName: string;
+  contentType: string;
+  byteSize: number;
+  checksumSha256?: string | null;
+  status: BusinessDocumentVersionStatus;
+  uploadedAt?: string | null;
+  createdAt: string;
+};
+
+export type BusinessDocument = {
+  id: string;
+  teamId: string;
+  title: string;
+  status: BusinessDocumentStatus;
+  currentVersionId?: string | null;
+  createdByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+  currentVersion?: BusinessDocumentVersion | null;
+};
+
 export type ConnectMockBankConnectionCommand = {
   teamId: string;
   idempotencyKey: string;
@@ -261,6 +292,70 @@ export type SyncBankConnectionResult = {
   transactions: Transaction[];
   duplicateCount: number;
   replayed: boolean;
+};
+
+export type CreateDocumentUploadCommand = {
+  teamId: string;
+  fileName: string;
+  contentType: string;
+  byteSize: number;
+  checksumSha256?: string | null;
+  idempotencyKey: string;
+};
+
+export type CreateDocumentUploadResult = {
+  document: BusinessDocument;
+  version: BusinessDocumentVersion;
+  uploadUrl: string;
+  uploadExpiresAt: string;
+  replayed: boolean;
+};
+
+export type CompleteDocumentUploadCommand = {
+  teamId: string;
+  documentId: string;
+  versionId: string;
+  byteSize: number;
+  checksumSha256?: string | null;
+};
+
+export type CompleteDocumentUploadResult = {
+  document: BusinessDocument;
+  version: BusinessDocumentVersion;
+};
+
+export type CreateDocumentDownloadCommand = {
+  teamId: string;
+  documentId: string;
+};
+
+export type CreateDocumentDownloadResult = {
+  document: BusinessDocument;
+  version: BusinessDocumentVersion;
+  downloadUrl: string;
+  downloadExpiresAt: string;
+};
+
+export type DocumentUrlSigner = {
+  createUploadUrl(input: {
+    teamId: string;
+    documentId: string;
+    versionId: string;
+    objectKey: string;
+    fileName: string;
+    contentType: string;
+    byteSize: number;
+    actorId: string;
+    requestId: string;
+  }): Promise<{ url: string; expiresAt: string }>;
+  createDownloadUrl(input: {
+    teamId: string;
+    documentId: string;
+    versionId: string;
+    objectKey: string;
+    fileName: string;
+    contentType: string;
+  }): Promise<{ url: string; expiresAt: string }>;
 };
 
 export type OutboxEventStatus = "pending" | "dispatching" | "dispatched" | "failed";
@@ -357,6 +452,37 @@ export type BankingRepository = {
 };
 
 export type BankingUseCaseRepository = TransactionReviewRepository & BankingRepository;
+
+export type DocumentRepository = {
+  listDocuments(teamId: string): Promise<BusinessDocument[]>;
+  createDocumentUploadRecord(input: {
+    documentId: string;
+    versionId: string;
+    teamId: string;
+    title: string;
+    objectKey: string;
+    fileName: string;
+    contentType: string;
+    byteSize: number;
+    checksumSha256?: string | null;
+    createdByActorId: string;
+  }): Promise<{ document: BusinessDocument; version: BusinessDocumentVersion }>;
+  getDocumentForTeam(teamId: string, documentId: string): Promise<BusinessDocument | null>;
+  getDocumentVersionForTeam(
+    teamId: string,
+    versionId: string,
+  ): Promise<BusinessDocumentVersion | null>;
+  completeDocumentVersionUpload(input: {
+    teamId: string;
+    documentId: string;
+    versionId: string;
+    byteSize: number;
+    checksumSha256?: string | null;
+    uploadedAt: Date;
+  }): Promise<{ document: BusinessDocument; version: BusinessDocumentVersion }>;
+};
+
+export type DawnRepository = BankingUseCaseRepository & DocumentRepository;
 
 export type OutboxDispatchRepository = {
   withTransaction<T>(callback: (repository: OutboxDispatchRepository) => Promise<T>): Promise<T>;
@@ -503,6 +629,7 @@ const createLedgerTransactionOperation = "ledger.transaction.create";
 const commitCsvTransactionImportOperation = "csv_transaction_import.commit";
 const connectMockBankConnectionOperation = "banking.connection.mock.connect";
 const syncBankConnectionOperation = "banking.connection.sync";
+const createDocumentUploadOperation = "document.upload.create";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
@@ -1201,6 +1328,203 @@ export async function syncBankConnection(
   });
 }
 
+export async function listDocuments(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  input: { teamId?: string } = {},
+): Promise<{ teamId: string; documents: BusinessDocument[] }> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: input.teamId ?? context.teamId },
+    "documents.read",
+    "You cannot read documents for this team",
+  );
+
+  return {
+    teamId: access.teamId,
+    documents: await repository.listDocuments(access.teamId),
+  };
+}
+
+export async function createDocumentUpload(
+  repository: DawnRepository,
+  signer: DocumentUrlSigner,
+  context: TransactionReviewContext,
+  command: CreateDocumentUploadCommand,
+): Promise<CreateDocumentUploadResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const documentRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Document not found");
+
+    await resolveTeamAccess(
+      documentRepository,
+      { ...context, teamId: command.teamId },
+      "documents.write",
+      "You cannot upload documents for this team",
+    );
+
+    const normalized = normalizeDocumentUploadCommand(command);
+    const fingerprint = createDocumentUploadFingerprint(normalized);
+    const replayed = await documentRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createDocumentUploadOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different document upload",
+        );
+      }
+
+      return { ...(replayed.result as CreateDocumentUploadResult), replayed: true };
+    }
+
+    const documentId = crypto.randomUUID();
+    const versionId = crypto.randomUUID();
+    const objectKey = documentObjectKey(command.teamId, documentId, versionId, normalized.fileName);
+    const { document, version } = await documentRepository.createDocumentUploadRecord({
+      documentId,
+      versionId,
+      teamId: command.teamId,
+      title: titleFromFileName(normalized.fileName),
+      objectKey,
+      fileName: normalized.fileName,
+      contentType: normalized.contentType,
+      byteSize: normalized.byteSize,
+      checksumSha256: normalized.checksumSha256,
+      createdByActorId: context.actor.id,
+    });
+    const upload = await signer.createUploadUrl({
+      teamId: command.teamId,
+      documentId,
+      versionId,
+      objectKey,
+      fileName: normalized.fileName,
+      contentType: normalized.contentType,
+      byteSize: normalized.byteSize,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+    });
+    const result = {
+      document,
+      version,
+      uploadUrl: upload.url,
+      uploadExpiresAt: upload.expiresAt,
+      replayed: false,
+    };
+
+    await documentRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createDocumentUploadOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function completeDocumentUpload(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: CompleteDocumentUploadCommand,
+): Promise<CompleteDocumentUploadResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const documentRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Document not found");
+
+    const version = await documentRepository.getDocumentVersionForTeam(
+      command.teamId,
+      command.versionId,
+    );
+
+    if (!version || version.documentId !== command.documentId) {
+      throw new AppError("NOT_FOUND", "Document upload not found");
+    }
+
+    const result = await documentRepository.completeDocumentVersionUpload({
+      teamId: command.teamId,
+      documentId: command.documentId,
+      versionId: command.versionId,
+      byteSize: command.byteSize,
+      checksumSha256: command.checksumSha256 ?? version.checksumSha256 ?? null,
+      uploadedAt: new Date(),
+    });
+
+    await documentRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "document.uploaded",
+      entityType: "document",
+      entityId: command.documentId,
+      metadata: {
+        versionId: command.versionId,
+        fileName: result.version.fileName,
+        contentType: result.version.contentType,
+        byteSize: command.byteSize,
+      },
+    });
+
+    await documentRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "document.uploaded",
+      version: 1,
+      payload: {
+        documentId: command.documentId,
+        versionId: command.versionId,
+      },
+    });
+
+    return result;
+  });
+}
+
+export async function createDocumentDownload(
+  repository: DawnRepository,
+  signer: DocumentUrlSigner,
+  context: TransactionReviewContext,
+  command: CreateDocumentDownloadCommand,
+): Promise<CreateDocumentDownloadResult> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId },
+    "documents.read",
+    "You cannot download documents for this team",
+  );
+  const document = await repository.getDocumentForTeam(access.teamId, command.documentId);
+
+  if (!document?.currentVersion || document.status !== "uploaded") {
+    throw new AppError("NOT_FOUND", "Document not found");
+  }
+
+  const download = await signer.createDownloadUrl({
+    teamId: access.teamId,
+    documentId: document.id,
+    versionId: document.currentVersion.id,
+    objectKey: document.currentVersion.objectKey,
+    fileName: document.currentVersion.fileName,
+    contentType: document.currentVersion.contentType,
+  });
+
+  return {
+    document,
+    version: document.currentVersion,
+    downloadUrl: download.url,
+    downloadExpiresAt: download.expiresAt,
+  };
+}
+
 async function importProviderTransaction(input: {
   repository: BankingUseCaseRepository;
   provider: BankingProvider;
@@ -1312,6 +1636,67 @@ export function syncBankConnectionFingerprint(
     connectionId: command.connectionId,
     provider,
   });
+}
+
+function normalizeDocumentUploadCommand(command: CreateDocumentUploadCommand) {
+  const fileName = command.fileName.trim();
+  const contentType = command.contentType.trim().toLowerCase();
+
+  if (!fileName) {
+    throw new AppError("CONFLICT", "Document file name is required");
+  }
+
+  if (!contentType) {
+    throw new AppError("CONFLICT", "Document content type is required");
+  }
+
+  if (!Number.isSafeInteger(command.byteSize) || command.byteSize <= 0) {
+    throw new AppError("CONFLICT", "Document byte size is invalid");
+  }
+
+  return {
+    teamId: command.teamId,
+    fileName,
+    contentType,
+    byteSize: command.byteSize,
+    checksumSha256: command.checksumSha256?.trim() || null,
+    idempotencyKey: command.idempotencyKey,
+  };
+}
+
+export function createDocumentUploadFingerprint(command: CreateDocumentUploadCommand) {
+  const normalized = normalizeDocumentUploadCommand(command);
+
+  return JSON.stringify({
+    teamId: normalized.teamId,
+    fileName: normalized.fileName,
+    contentType: normalized.contentType,
+    byteSize: normalized.byteSize,
+    checksumSha256: normalized.checksumSha256,
+  });
+}
+
+function documentObjectKey(
+  teamId: string,
+  documentId: string,
+  versionId: string,
+  fileName: string,
+) {
+  return `teams/${teamId}/documents/${documentId}/versions/${versionId}/${safeObjectFileName(fileName)}`;
+}
+
+function titleFromFileName(fileName: string) {
+  return fileName.replace(/\.[^.]+$/, "").trim() || fileName;
+}
+
+function safeObjectFileName(fileName: string) {
+  return (
+    fileName
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 120) || "document"
+  );
 }
 
 export async function previewCsvTransactionImport(

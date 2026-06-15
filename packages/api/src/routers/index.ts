@@ -5,10 +5,13 @@ import {
   acceptTeamInvite,
   commitCsvTransactionImport,
   connectMockBankConnection,
+  createDocumentDownload,
+  createDocumentUpload,
   createLedgerTransaction,
   createTeam,
   inviteTeamMember,
   listBankConnections,
+  listDocuments,
   listLedgerSummary,
   listTeamDirectory,
   listTeams,
@@ -17,18 +20,22 @@ import {
   previewCsvTransactionImport,
   reviewTransaction,
   syncBankConnection,
-  type BankingUseCaseRepository,
+  type DawnRepository,
+  type DocumentUrlSigner,
   updateTeamMemberRole,
 } from "@dawn/app";
 import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
+import { env } from "@dawn/env/server";
 import { createMockBankingProvider, type BankingProvider } from "@dawn/integrations";
 import { z } from "zod";
 
 import { protectedProcedure, publicProcedure } from "../index";
+import { createDocumentUrlSigner } from "../document-url";
 
 export type AppRouterDependencies = {
-  transactionReviewRepository: BankingUseCaseRepository;
+  transactionReviewRepository: DawnRepository;
   bankingProvider: BankingProvider;
+  documentUrlSigner: DocumentUrlSigner;
 };
 
 const reviewTransactionInput = z.object({
@@ -61,6 +68,20 @@ const syncBankConnectionInput = z.object({
   teamId: z.string().min(1),
   connectionId: z.string().min(1),
   idempotencyKey: z.string().min(1),
+});
+
+const createDocumentUploadInput = z.object({
+  teamId: z.string().min(1),
+  fileName: z.string().min(1),
+  contentType: z.string().min(1),
+  byteSize: z.number().int().positive(),
+  checksumSha256: z.string().min(1).nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const createDocumentDownloadInput = z.object({
+  teamId: z.string().min(1),
+  documentId: z.string().min(1),
 });
 
 const createLedgerTransactionInput = z.object({
@@ -157,11 +178,15 @@ function createDefaultDependencies(): AppRouterDependencies {
   return {
     transactionReviewRepository: new DrizzleTransactionReviewRepository(),
     bankingProvider: createMockBankingProvider(),
+    documentUrlSigner: createDocumentUrlSigner({
+      baseUrl: env.BETTER_AUTH_URL,
+      secret: env.BETTER_AUTH_SECRET,
+    }),
   };
 }
 
 export function createAppRouter(dependencies: AppRouterDependencies = createDefaultDependencies()) {
-  const { bankingProvider, transactionReviewRepository } = dependencies;
+  const { bankingProvider, documentUrlSigner, transactionReviewRepository } = dependencies;
 
   return {
     healthCheck: publicProcedure.handler(() => {
@@ -401,6 +426,58 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             return await syncBankConnection(
               transactionReviewRepository,
               bankingProvider,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    documents: {
+      list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
+        try {
+          return await listDocuments(transactionReviewRepository, {
+            actor: { id: context.session.user.id, type: "user" },
+            requestId: context.requestId,
+            teamId: input?.teamId,
+          });
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+      createUpload: protectedProcedure
+        .input(createDocumentUploadInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createDocumentUpload(
+              transactionReviewRepository,
+              documentUrlSigner,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                checksumSha256: input.checksumSha256 ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      download: protectedProcedure
+        .input(createDocumentDownloadInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createDocumentDownload(
+              transactionReviewRepository,
+              documentUrlSigner,
               {
                 actor: { id: context.session.user.id, type: "user" },
                 requestId: context.requestId,
