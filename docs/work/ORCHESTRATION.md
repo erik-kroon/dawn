@@ -221,6 +221,7 @@ pass, and the implementing agent has inspected the diff.
 | `7171264` | Inbox transaction matching           | Added deterministic match scoring, suggestion persistence, accept/reject flows, hard-negative memory, and dashboard controls. |
 | `abdb187` | Billing draft foundation             | Added customers, contacts, products/services, exact invoice totals, draft invoice API/UI, and migration.                      |
 | `8499997` | Invoice delivery foundation          | Added invoice PDF preview, confirmed send, payment recording, recurrence jobs, mock email delivery, and dashboard controls.   |
+| `a639988` | Project time foundation              | Added customer-linked projects, time entries, billable reports, invoice conversion, sync contracts, and dashboard controls.    |
 
 ## Implementation Notes
 
