@@ -251,6 +251,8 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 4 follow-up  | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0020_orange_the_fallen.sql` for `transaction.transfer_group_id` and its team index.                                                                              |
 | 2026-06-15 slice 4 follow-up  | Browser smoke: local server on `3000`, local web on `3002`, open `/dashboard` at desktop and mobile widths                                                                                                                                                                                                                   | Partial | Protected dashboard route redirected to `/login`; auth-session checks returned 200. Console entries were React DevTools info and the existing login autocomplete warning.                              |
 | 2026-06-15 slice 4 follow-up  | `bun run release:gate`                                                                                                                                                                                                                                                                                                       | Pass    | Ignored-TypeScript scan, committed-secret scan, 21-migration journal validation, full workspace typecheck/build, 200 Dawn tests, deterministic AI eval, lint/format, and server worker bundle passed.  |
+| 2026-06-15 DB harness         | `bun run test:db`                                                                                                                                                                                                                                                                                                            | Skipped | Added opt-in Postgres integration test harness; current environment has no `DAWN_DATABASE_TEST_URL`, so the migrated Drizzle repository test is skipped by default.                                    |
+| 2026-06-15 DB harness         | `bun run release:gate`                                                                                                                                                                                                                                                                                                       | Pass    | Default gate remains deterministic: 200 tests passed, 1 DB integration test skipped, deterministic AI eval passed, lint/format and server bundle passed.                                               |
 
 ## Commit Log
 
@@ -288,6 +290,7 @@ pass, and the implementing agent has inspected the diff.
 | `b5ab62e` | Data workflow queueing               | Adds audited/idempotent export and deletion requests, queue contracts, protected routes, dashboard controls, and CORS fallback.  |
 | `d76a917` | Sandbox banking provider             | Adds sandbox connection sessions, encrypted token metadata, verified webhook sync requests, queued sync, and disconnect.         |
 | `597adc8` | Ledger metadata and transfers        | Adds counterparty/tag use cases, transfer-pair semantics, transfer group persistence, API routes, dashboard controls, and tests. |
+| `ecde4c9` | DB ledger integration harness        | Adds opt-in migrated Postgres coverage for ledger reports, metadata, transfer groups, tenant predicates, replay, and rollback.   |
 
 ## Implementation Notes
 
@@ -334,6 +337,15 @@ opposite signed transfer transactions, emit a grouped outbox event that
 invalidates both transaction IDs, persist `transaction.transfer_group_id` through
 migration `0020_orange_the_fallen`, and are exposed through protected oRPC
 routes plus dashboard ledger controls.
+
+Slice 4 DB harness follow-up added `bun run test:db` and
+`packages/db/src/transaction-review.integration.test.ts`. When
+`DAWN_DATABASE_TEST_URL` is provided, the test creates an isolated temporary
+schema, runs all SQL migrations, wires `DrizzleTransactionReviewRepository`
+against that schema, and verifies ledger metadata, report totals, tenant
+predicates, idempotent replay, transfer-group persistence, and transaction
+rollback. The default release gate keeps this test skipped until a test Postgres
+URL is available.
 
 Slice 5 foundation added exact CSV parsing and decimal amount conversion in the
 domain layer, app-layer import preview/commit use cases, duplicate detection
@@ -588,10 +600,11 @@ execution remain gated by R2 retention, provider cleanup, and compliance rules.
 - When a development database is available, apply migrations and add a
   repository-level database test for transaction rollback and tenant predicates.
 - Slice 4 still needs authenticated manual ledger review against a migrated
-  local or preview database and database-backed report integration tests before
-  it should be marked complete. Current verification covers metadata use cases,
-  transfer-pair semantics, dashboard controls, route contracts, migration
-  generation, release gate, and unauthenticated browser redirect smoke.
+  local or preview database, plus an executed DB-backed report integration test
+  run with `DAWN_DATABASE_TEST_URL`. Current verification covers metadata use
+  cases, transfer-pair semantics, dashboard controls, route contracts, migration
+  generation, release gate, an opt-in Drizzle/Postgres integration harness, and
+  unauthenticated browser redirect smoke.
 - Slice 5 still needs authenticated browser/manual import verification against a
   migrated local database and richer CSV mapping variants before it should be
   marked complete.
