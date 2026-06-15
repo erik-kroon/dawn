@@ -2,7 +2,7 @@
 
 Triage: ready-for-agent
 Publication: Local repo artifact. No project issue tracker or remote is assumed.
-Status: Slice 2 implemented; Slice 3 next
+Status: Slice 3 implemented; Slice 4 next
 Date: 2026-06-15
 Source material: `docs/PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, Dawn matching code, and Midday reference matching docs/code under `ref/midday`.
 
@@ -196,18 +196,25 @@ Replace broad transaction scans with SQL-first, team-bounded candidate retrieval
 
 ## Acceptance Criteria
 
-- [ ] Forward match generation no longer calls `listTransactionsForReport` for candidate retrieval.
-- [ ] Reverse matching retrieves bounded pending inbox candidates.
-- [ ] Already attached transactions/documents are excluded.
-- [ ] Existing pending suggestions are not duplicated.
-- [ ] Candidate retrieval supports deterministic ordering and a configurable limit.
-- [ ] App tests prove behavior with multiple plausible candidates.
+- [x] Forward match generation no longer calls `listTransactionsForReport` for candidate retrieval.
+- [x] Reverse matching retrieves bounded pending inbox candidates.
+- [x] Already attached transactions/documents are excluded.
+- [x] Existing pending suggestions are not duplicated.
+- [x] Candidate retrieval supports deterministic ordering and a configurable limit.
+- [x] App tests prove behavior with multiple plausible candidates.
+
+## Implementation Notes
+
+- Added `listTransactionMatchCandidatesForInboxItem` for forward candidate retrieval and replaced the report transaction scan in `generateInboxMatchSuggestions`.
+- Renamed the reverse repository method to `listInboxMatchCandidatesForTransaction`.
+- Drizzle retrieval now applies team scope, unresolved inbox state, extraction state, date/amount/currency windows, attachment exclusions, active-suggestion exclusions, deterministic ordering, and limits.
+- App tests assert forward retrieval does not call `listTransactionsForReport` and ranks multiple plausible candidates through domain scoring.
 
 ## Verification
 
-- `bun test packages/app/src/inbox-matching.test.ts`
-- Relevant DB repository tests if a DB test harness exists for this area.
-- `bun run check-types`
+- [x] `bun test packages/app/src/inbox-matching.test.ts packages/jobs/src/index.test.ts`
+- [x] `bun run check-types`
+- No dedicated DB repository test harness exists for this matching retrieval area yet.
 
 ## Dependencies
 

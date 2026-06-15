@@ -1,5 +1,6 @@
 import type {
   InboxMatchConfidence,
+  InboxMatchCandidate,
   InboxMatchSuggestion,
   TeamMatchAlias,
   Transaction,
@@ -193,6 +194,7 @@ export type CorrectDocumentExtractionResult = {
 export type GenerateInboxMatchSuggestionsCommand = {
   teamId: string;
   inboxItemId: string;
+  limit?: number;
 };
 
 export type GenerateInboxMatchSuggestionsResult = {
@@ -390,7 +392,12 @@ export type InboxRepository = {
     teamId: string,
     inboxItemId: string,
   ): Promise<HardNegativeTransactionMatch[]>;
-  listPendingInboxMatchCandidatesForTransaction(input: {
+  listTransactionMatchCandidatesForInboxItem(input: {
+    teamId: string;
+    inboxItem: InboxItem;
+    limit: number;
+  }): Promise<InboxMatchCandidate[]>;
+  listInboxMatchCandidatesForTransaction(input: {
     teamId: string;
     transaction: Transaction;
     limit: number;
@@ -426,8 +433,8 @@ const correctDocumentExtractionOperation = "document.extraction.correct";
 const matchPendingInboxForTransactionOperation = "inbox.match.pending_for_transaction";
 const acceptInboxMatchOperation = "inbox.match.accept";
 const rejectInboxMatchOperation = "inbox.match.reject";
-const defaultReverseMatchCandidateLimit = 25;
-const maxReverseMatchCandidateLimit = 100;
+const defaultMatchCandidateLimit = 25;
+const maxMatchCandidateLimit = 100;
 
 export async function listDocuments(
   repository: DocumentsInboxUseCaseRepository,
@@ -962,9 +969,8 @@ export async function generateInboxMatchSuggestions(
     "You cannot read transactions for this team",
   );
 
-  const [inboxItem, transactions, aliases, hardNegatives] = await Promise.all([
+  const [inboxItem, aliases, hardNegatives] = await Promise.all([
     repository.getInboxItemForTeam(command.teamId, command.inboxItemId),
-    repository.listTransactionsForReport({ teamId: command.teamId }),
     repository.listTeamAliases(command.teamId),
     repository.listHardNegativeMatches(command.teamId, command.inboxItemId),
   ]);
@@ -973,6 +979,11 @@ export async function generateInboxMatchSuggestions(
     throw new AppError("NOT_FOUND", "Inbox item not found");
   }
 
+  const candidates = await repository.listTransactionMatchCandidatesForInboxItem({
+    teamId: command.teamId,
+    inboxItem,
+    limit: normalizeMatchCandidateLimit(command.limit),
+  });
   const suggestions = suggestInboxTransactionMatches(
     {
       inboxItemId: inboxItem.id,
@@ -981,10 +992,7 @@ export async function generateInboxMatchSuggestions(
       documentText: inboxItem.latestExtraction.rawText,
       fields: inboxItem.latestExtraction.fields,
     },
-    transactions.map((transaction) => ({
-      transaction,
-      providerReference: transaction.providerTransactionId,
-    })),
+    candidates,
     {
       aliases,
       hardNegatives,
@@ -1056,9 +1064,9 @@ export async function matchPendingInboxForTransaction(
       throw new AppError("NOT_FOUND", "Transaction not found");
     }
 
-    const limit = normalizeReverseMatchCandidateLimit(command.limit);
+    const limit = normalizeMatchCandidateLimit(command.limit);
     const [candidateInboxItems, aliases] = await Promise.all([
-      inboxRepository.listPendingInboxMatchCandidatesForTransaction({
+      inboxRepository.listInboxMatchCandidatesForTransaction({
         teamId: command.teamId,
         transaction,
         limit,
@@ -1490,12 +1498,12 @@ export function matchPendingInboxForTransactionFingerprint(
   });
 }
 
-function normalizeReverseMatchCandidateLimit(limit: number | null | undefined) {
+function normalizeMatchCandidateLimit(limit: number | null | undefined) {
   if (!Number.isSafeInteger(limit) || !limit || limit <= 0) {
-    return defaultReverseMatchCandidateLimit;
+    return defaultMatchCandidateLimit;
   }
 
-  return Math.min(limit, maxReverseMatchCandidateLimit);
+  return Math.min(limit, maxMatchCandidateLimit);
 }
 
 function normalizedOptionalText(value: string | null | undefined) {

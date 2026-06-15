@@ -73,6 +73,7 @@ class MemoryMatchingRepository {
   idempotency = new Map<string, { fingerprint: string; result: unknown }>();
   auditEvents: unknown[] = [];
   outboxEvents: unknown[] = [];
+  listTransactionsForReportCalls = 0;
 
   async withTransaction<T>(callback: (repository: DawnRepository) => Promise<T>) {
     return callback(this as unknown as DawnRepository);
@@ -101,6 +102,7 @@ class MemoryMatchingRepository {
   }
 
   async listTransactionsForReport(input: { teamId: string }) {
+    this.listTransactionsForReportCalls += 1;
     return this.transactions.filter((transaction) => transaction.teamId === input.teamId);
   }
 
@@ -114,7 +116,43 @@ class MemoryMatchingRepository {
     );
   }
 
-  async listPendingInboxMatchCandidatesForTransaction(input: {
+  async listTransactionMatchCandidatesForInboxItem(input: {
+    teamId: string;
+    inboxItem: InboxItem;
+    limit: number;
+  }) {
+    return this.transactions
+      .filter((transaction) => transaction.teamId === input.teamId)
+      .filter(
+        (transaction) =>
+          !this.attachments.some(
+            (attachment) =>
+              attachment.documentId === input.inboxItem.documentId ||
+              attachment.transactionId === transaction.id,
+          ),
+      )
+      .filter(
+        (transaction) =>
+          ![...this.suggestions.values()].some(
+            (suggestion) =>
+              suggestion.teamId === input.teamId &&
+              suggestion.inboxItemId === input.inboxItem.id &&
+              suggestion.transactionId === transaction.id &&
+              (suggestion.status === "suggested" || suggestion.status === "accepted"),
+          ),
+      )
+      .sort(
+        (left, right) =>
+          right.postedAt.localeCompare(left.postedAt) || left.id.localeCompare(right.id),
+      )
+      .slice(0, input.limit)
+      .map((transaction) => ({
+        transaction,
+        providerReference: transaction.providerTransactionId,
+      }));
+  }
+
+  async listInboxMatchCandidatesForTransaction(input: {
     teamId: string;
     transaction: Transaction;
     limit: number;
@@ -289,6 +327,37 @@ describe("inbox matching use cases", () => {
     expect(result.suggestions[0]?.transactionId).toBe("txn_1");
     expect(result.suggestions[0]?.score).toBeGreaterThanOrEqual(0.75);
     expect(result.suggestions[0]?.explanation).toContain("Amount matches exactly");
+    expect(repository.listTransactionsForReportCalls).toBe(0);
+  });
+
+  test("ranks multiple bounded transaction candidates through repository retrieval", async () => {
+    const repository = new MemoryMatchingRepository();
+    repository.transactions = [
+      {
+        ...repository.transactions[0]!,
+        id: "txn_amount_date",
+        description: "Card purchase",
+        providerTransactionId: "provider_amount_date",
+      },
+      {
+        ...repository.transactions[0]!,
+        id: "txn_exact",
+        providerTransactionId: "provider_exact",
+      },
+    ];
+
+    const result = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      { teamId: "team_1", inboxItemId: "inbox_1", limit: 2 },
+    );
+
+    expect(result.suggestions.map((suggestion) => suggestion.transactionId)).toEqual([
+      "txn_exact",
+      "txn_amount_date",
+    ]);
+    expect(result.suggestions[0]?.score).toBeGreaterThan(result.suggestions[1]?.score ?? 0);
+    expect(repository.listTransactionsForReportCalls).toBe(0);
   });
 
   test("matches a pending inbox item when a transaction arrives later", async () => {

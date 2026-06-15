@@ -66,9 +66,10 @@ import type {
   TransactionTag,
   WebhookDelivery,
   WebhookSubscription,
+  InboxMatchCandidate,
 } from "@dawn/domain";
 import { calculateInvoiceTotals, ledgerDuplicateKey } from "@dawn/domain";
-import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 
 import { db } from "./index";
 import * as developerPersistence from "./repositories/developer";
@@ -1320,11 +1321,82 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return matches.map(mapHardNegativeMatch);
   }
 
-  async listPendingInboxMatchCandidatesForTransaction(input: {
+  async listTransactionMatchCandidatesForInboxItem(input: {
+    teamId: string;
+    inboxItem: InboxItem;
+    limit: number;
+  }): Promise<InboxMatchCandidate[]> {
+    const extraction = input.inboxItem.latestExtraction;
+
+    if (!extraction) {
+      return [];
+    }
+
+    const conditions: SQL[] = [
+      eq(schema.transaction.teamId, input.teamId),
+      sql`not exists (
+        select 1
+        from ${schema.transactionAttachment}
+        where ${schema.transactionAttachment.teamId} = ${input.teamId}
+          and (
+            ${schema.transactionAttachment.transactionId} = ${schema.transaction.id}
+            or ${schema.transactionAttachment.documentId} = ${input.inboxItem.documentId}
+          )
+      )`,
+      sql`not exists (
+        select 1
+        from ${schema.inboxMatchSuggestion}
+        where ${schema.inboxMatchSuggestion.teamId} = ${input.teamId}
+          and ${schema.inboxMatchSuggestion.inboxItemId} = ${input.inboxItem.id}
+          and ${schema.inboxMatchSuggestion.transactionId} = ${schema.transaction.id}
+          and ${schema.inboxMatchSuggestion.status} in ('suggested', 'accepted')
+      )`,
+    ];
+    const currency = extraction.fields.currency?.trim().toUpperCase();
+
+    if (currency) {
+      conditions.push(eq(schema.transaction.currency, currency));
+    }
+
+    if (extraction.fields.totalAmountMinor != null) {
+      const amountMinor = Math.abs(extraction.fields.totalAmountMinor);
+      conditions.push(sql`abs(${schema.transaction.amountMinor}) = ${amountMinor}`);
+    }
+
+    const issuedAt = parseCandidateDate(extraction.fields.issuedAt);
+
+    if (issuedAt) {
+      conditions.push(gte(schema.transaction.postedAt, daysFrom(issuedAt, -14)));
+      conditions.push(lte(schema.transaction.postedAt, daysFrom(issuedAt, 14)));
+    }
+
+    const rows = await this.client
+      .select({
+        transaction: schema.transaction,
+        counterparty: schema.counterparty,
+      })
+      .from(schema.transaction)
+      .leftJoin(schema.counterparty, eq(schema.counterparty.id, schema.transaction.counterpartyId))
+      .where(and(...conditions))
+      .orderBy(desc(schema.transaction.postedAt), asc(schema.transaction.id))
+      .limit(input.limit);
+
+    return rows.map((row) => ({
+      transaction: mapTransaction(row.transaction),
+      counterpartyName: row.counterparty?.name ?? null,
+      providerReference: row.transaction.providerTransactionId,
+    }));
+  }
+
+  async listInboxMatchCandidatesForTransaction(input: {
     teamId: string;
     transaction: Transaction;
     limit: number;
   }): Promise<InboxItem[]> {
+    const postedAt = new Date(input.transaction.postedAt);
+    const hasPostedAt = !Number.isNaN(postedAt.getTime());
+    const amountMinor = Math.abs(input.transaction.money.amountMinor);
+    const currency = input.transaction.money.currency.toUpperCase();
     const rows = await this.client
       .select({
         item: schema.inboxItem,
@@ -1355,6 +1427,21 @@ export class DrizzleDawnRepository implements DrizzleRepository {
           eq(schema.inboxItem.teamId, input.teamId),
           eq(schema.inboxItem.status, "needs_review"),
           eq(schema.inboxItem.extractionStatus, "completed"),
+          sql`(
+            ${schema.documentExtraction.fields}->>'currency' is null
+            or upper(${schema.documentExtraction.fields}->>'currency') = ${currency}
+          )`,
+          sql`(
+            ${schema.documentExtraction.fields}->>'totalAmountMinor' is null
+            or abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::integer) = ${amountMinor}
+          )`,
+          hasPostedAt
+            ? sql`(
+                ${schema.documentExtraction.fields}->>'issuedAt' is null
+                or (${schema.documentExtraction.fields}->>'issuedAt')::timestamptz
+                  between ${daysFrom(postedAt, -14)} and ${daysFrom(postedAt, 14)}
+              )`
+            : sql`true`,
           sql`not exists (
             select 1
             from ${schema.transactionAttachment}
@@ -3649,6 +3736,19 @@ function mapBankAccount(account: typeof schema.bankAccount.$inferSelect): BankAc
     },
     status: account.status as BankAccount["status"],
   };
+}
+
+function parseCandidateDate(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function daysFrom(date: Date, days: number) {
+  return new Date(date.getTime() + days * 86_400_000);
 }
 
 function mapBusinessDocument(
