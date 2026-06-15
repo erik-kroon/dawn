@@ -1,27 +1,29 @@
-import type {
-  Actor,
-  ApiKey,
-  AutomationRule,
-  AutomationRun,
-  AssistantActionApproval,
-  AssistantMessage,
-  AssistantThread,
-  AssistantToolCall,
-  BusinessInsight,
-  Customer,
-  CustomerContact,
-  InvoiceDraft,
-  InvoicePayment,
-  IntegrationSyncRun,
-  OAuthApp,
-  OAuthGrant,
-  Product,
-  Project,
-  ProjectMember,
-  RecurringInvoiceSchedule,
-  TimeEntry,
-  WebhookDelivery,
-  WebhookSubscription,
+import {
+  isTransactionReadyForAccountantExport,
+  type Actor,
+  type ApiKey,
+  type AutomationRule,
+  type AutomationRun,
+  type AssistantActionApproval,
+  type AssistantMessage,
+  type AssistantThread,
+  type AssistantToolCall,
+  type BusinessInsight,
+  type Customer,
+  type CustomerContact,
+  type InvoiceDraft,
+  type InvoicePayment,
+  type IntegrationSyncRun,
+  type OAuthApp,
+  type OAuthGrant,
+  type Product,
+  type Project,
+  type ProjectMember,
+  type RecurringInvoiceSchedule,
+  type TimeEntry,
+  type Transaction,
+  type WebhookDelivery,
+  type WebhookSubscription,
 } from "@dawn/domain";
 import { outboxDispatchRetryPolicy } from "@dawn/jobs";
 
@@ -48,6 +50,7 @@ import {
 export type OperationsWorkspaceInput = {
   teamId?: string;
   limit?: number;
+  accountantClose?: AccountantClosePeriod;
   audit?: {
     action?: string | null;
     entityType?: string | null;
@@ -67,6 +70,29 @@ export type OperationsMetricSnapshot = {
   syncLagSeconds: number | null;
   apiLatencyP95Ms: number | null;
   aiCostCents: number;
+};
+
+export type AccountantClosePeriod = {
+  from: string;
+  to: string;
+};
+
+export type AccountantCloseReadinessStatus = "empty" | "ready" | "needs_work" | "blocked";
+
+export type AccountantCloseReadiness = {
+  period: AccountantClosePeriod;
+  status: AccountantCloseReadinessStatus;
+  transactionCount: number;
+  readyToExportCount: number;
+  exportedCount: number;
+  missingReceiptCount: number;
+  needsReviewCount: number;
+  exportingCount: number;
+  exportFailedCount: number;
+  excludedCount: number;
+  archivedCount: number;
+  actionableCount: number;
+  nextStep: string;
 };
 
 export type DataWorkflowStatus = {
@@ -210,6 +236,7 @@ export type OperationsWorkspace = {
   recentAutomationRuns: AutomationRun[];
   recentWebhookDeliveries: WebhookDelivery[];
   auditEvents: AuditLogEntry[];
+  accountantClose: AccountantCloseReadiness | null;
   dataWorkflows: DataWorkflowStatus[];
 };
 
@@ -242,6 +269,7 @@ export interface OperationsUseCaseRepository
   extends
     TeamAccessRepository,
     OperationsRepository,
+    Pick<TransactionReviewRepository, "listWorkspace">,
     TransactionalRepository<OperationsWriteRepository>,
     OperationsWriteRepository {}
 
@@ -303,8 +331,161 @@ function normalizeOperationsLimit(limit?: number) {
   return Math.min(Math.max(Number.isInteger(limit) ? (limit ?? 20) : 20, 1), 50);
 }
 
+function normalizeAccountantClosePeriod(
+  period?: AccountantClosePeriod,
+): AccountantClosePeriod | null {
+  if (!period) {
+    return null;
+  }
+
+  const from = normalizeCloseBoundary(period.from, "from");
+  const to = normalizeCloseBoundary(period.to, "to");
+
+  if (new Date(from).getTime() > new Date(to).getTime()) {
+    throw new AppError("CONFLICT", "Accountant close period from must be before to");
+  }
+
+  return { from, to };
+}
+
+function normalizeCloseBoundary(value: string, label: "from" | "to") {
+  const time = new Date(value).getTime();
+
+  if (!Number.isFinite(time)) {
+    throw new AppError("CONFLICT", `Accountant close period ${label} is invalid`);
+  }
+
+  return new Date(time).toISOString();
+}
+
 function normalizeExportLimit(limit?: number) {
   return Math.min(Math.max(Number.isInteger(limit) ? (limit ?? 500) : 500, 1), 1_000);
+}
+
+function buildAccountantCloseReadiness(
+  workspace: ReviewWorkspaceData,
+  period: AccountantClosePeriod,
+): AccountantCloseReadiness {
+  const fromTime = new Date(period.from).getTime();
+  const toTime = new Date(period.to).getTime();
+  const transactions = workspace.transactions.filter((transaction) => {
+    const postedAt = new Date(transaction.postedAt).getTime();
+
+    return Number.isFinite(postedAt) && postedAt >= fromTime && postedAt <= toTime;
+  });
+  const summary: AccountantCloseReadiness = {
+    period,
+    status: "empty",
+    transactionCount: transactions.length,
+    readyToExportCount: 0,
+    exportedCount: 0,
+    missingReceiptCount: 0,
+    needsReviewCount: 0,
+    exportingCount: 0,
+    exportFailedCount: 0,
+    excludedCount: 0,
+    archivedCount: 0,
+    actionableCount: 0,
+    nextStep: "Import or sync transactions for this period before closing it.",
+  };
+
+  for (const transaction of transactions) {
+    const status = accountantStatusForClose(transaction);
+
+    switch (status) {
+      case "ready_to_export":
+        if (isTransactionReadyForAccountantExport(transaction)) {
+          summary.readyToExportCount += 1;
+        } else {
+          summary.needsReviewCount += 1;
+        }
+        break;
+      case "exported":
+        summary.exportedCount += 1;
+        break;
+      case "missing_receipt":
+        summary.missingReceiptCount += 1;
+        break;
+      case "needs_review":
+      case "receipt_found":
+        summary.needsReviewCount += 1;
+        break;
+      case "exporting":
+        summary.exportingCount += 1;
+        break;
+      case "export_failed":
+        summary.exportFailedCount += 1;
+        break;
+      case "excluded":
+        summary.excludedCount += 1;
+        break;
+      case "archived":
+        summary.archivedCount += 1;
+        break;
+    }
+  }
+
+  summary.actionableCount =
+    summary.needsReviewCount + summary.missingReceiptCount + summary.exportFailedCount;
+
+  if (summary.transactionCount === 0) {
+    return summary;
+  }
+
+  if (summary.exportFailedCount > 0) {
+    return {
+      ...summary,
+      status: "blocked",
+      nextStep: "Retry or resolve failed accountant exports before closing this period.",
+    };
+  }
+
+  if (summary.needsReviewCount > 0) {
+    return {
+      ...summary,
+      status: "needs_work",
+      nextStep: "Review and categorize transactions before closing this period.",
+    };
+  }
+
+  if (summary.missingReceiptCount > 0) {
+    return {
+      ...summary,
+      status: "needs_work",
+      nextStep: "Attach or confirm receipt evidence before closing this period.",
+    };
+  }
+
+  if (summary.exportingCount > 0) {
+    return {
+      ...summary,
+      status: "needs_work",
+      nextStep: "Wait for in-progress accountant exports before closing this period.",
+    };
+  }
+
+  if (summary.readyToExportCount > 0) {
+    return {
+      ...summary,
+      status: "ready",
+      nextStep: "Generate or share the accountant packet for this period.",
+    };
+  }
+
+  return {
+    ...summary,
+    status: "ready",
+    nextStep: "Close evidence has already been exported, excluded, or archived for this period.",
+  };
+}
+
+function accountantStatusForClose(
+  transaction: Transaction,
+): NonNullable<Transaction["accountantStatus"]> {
+  return (
+    transaction.accountantStatus ??
+    (transaction.reviewState === "reviewed" ? "missing_receipt" : "needs_review")
+  );
 }
 
 function operationsMetrics(input: {
@@ -462,6 +643,7 @@ export async function listOperationsWorkspace(
     "You cannot read operations for this team",
   );
   const limit = normalizeOperationsLimit(input.limit);
+  const accountantClosePeriod = normalizeAccountantClosePeriod(input.accountantClose);
   const [
     auditEvents,
     outboxEvents,
@@ -470,6 +652,7 @@ export async function listOperationsWorkspace(
     integrationSyncRuns,
     automationRuns,
     webhookDeliveries,
+    closeWorkspace,
   ] = await Promise.all([
     repository.listAuditEvents({
       teamId: access.teamId,
@@ -485,6 +668,9 @@ export async function listOperationsWorkspace(
     repository.listIntegrationSyncRuns(access.teamId, limit),
     repository.listAutomationRuns(access.teamId, limit),
     repository.listWebhookDeliveries(access.teamId, limit),
+    accountantClosePeriod
+      ? repository.listWorkspace(context.actor, access.teamId)
+      : Promise.resolve(null),
   ]);
 
   const redactedOutboxEvents = outboxEvents.map(redactOutboxEvent);
@@ -517,6 +703,10 @@ export async function listOperationsWorkspace(
     recentAutomationRuns: redactedAutomationRuns,
     recentWebhookDeliveries: redactedWebhookDeliveries,
     auditEvents: auditEvents.map(redactAuditLogEntry),
+    accountantClose:
+      accountantClosePeriod && closeWorkspace
+        ? buildAccountantCloseReadiness(closeWorkspace, accountantClosePeriod)
+        : null,
     dataWorkflows: dataWorkflowStatuses(outboxEvents),
   };
 }

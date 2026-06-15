@@ -254,6 +254,12 @@ const operationsWorkspaceInput = z
   .object({
     teamId: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(50).optional(),
+    accountantClose: z
+      .object({
+        from: z.string().min(1),
+        to: z.string().min(1),
+      })
+      .optional(),
     audit: z
       .object({
         action: z.string().trim().min(1).nullable().optional(),
@@ -1238,6 +1244,7 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
               {
                 teamId: input?.teamId,
                 limit: input?.limit,
+                accountantClose: input?.accountantClose,
                 audit: input?.audit,
               },
             );

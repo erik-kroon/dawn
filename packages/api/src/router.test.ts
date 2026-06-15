@@ -4164,6 +4164,55 @@ describe("appRouter", () => {
       createdAt: "2026-06-15T00:00:00.000Z",
       updatedAt: "2026-06-15T00:00:01.000Z",
     });
+    repository.transactions.set("transaction_ready", {
+      id: "transaction_ready",
+      teamId: "team_1",
+      accountId: "account_1",
+      description: "Ready for accountant",
+      postedAt: "2026-06-10T00:00:00.000Z",
+      money: { amountMinor: -4200, currency: "USD" },
+      type: "expense",
+      source: "manual",
+      counterpartyId: null,
+      transferGroupId: null,
+      providerTransactionId: null,
+      categoryId: "category_1",
+      reviewState: "reviewed",
+      accountantStatus: "ready_to_export",
+      accountantStatusReason: null,
+      accountantStatusUpdatedAt: null,
+      duplicateKey: null,
+      updatedAt: "2026-06-10T00:00:00.000Z",
+    });
+    repository.transactions.set("transaction_outside_period", {
+      id: "transaction_outside_period",
+      teamId: "team_1",
+      accountId: "account_1",
+      description: "Outside close period",
+      postedAt: "2026-07-01T00:00:00.000Z",
+      money: { amountMinor: -9900, currency: "USD" },
+      type: "expense",
+      source: "manual",
+      counterpartyId: null,
+      transferGroupId: null,
+      providerTransactionId: null,
+      categoryId: "category_1",
+      reviewState: "reviewed",
+      accountantStatus: "ready_to_export",
+      accountantStatusReason: null,
+      accountantStatusUpdatedAt: null,
+      duplicateKey: null,
+      updatedAt: "2026-07-01T00:00:00.000Z",
+    });
+    repository.packetAttachments.push({
+      transactionId: "transaction_ready",
+      documentId: "document_1",
+      versionId: "version_1",
+      objectKey: "documents/document_1.pdf",
+      fileName: "receipt.pdf",
+      contentType: "application/pdf",
+      byteSize: 128,
+    });
     const router = await createTestRouter(repository);
     const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
 
@@ -4176,6 +4225,10 @@ describe("appRouter", () => {
           entityType: "webhook_delivery",
           entityId: "delivery_1",
           requestId: "request_trace_1",
+        },
+        accountantClose: {
+          from: "2026-06-01T00:00:00.000Z",
+          to: "2026-06-30T23:59:59.999Z",
         },
       },
       context,
@@ -4191,6 +4244,12 @@ describe("appRouter", () => {
     expect(workspace.recentJobRuns[0]?.error).toBe(
       "Bearer [redacted-token] failed for [redacted-email]",
     );
+    expect(workspace.accountantClose).toMatchObject({
+      status: "ready",
+      transactionCount: 1,
+      readyToExportCount: 1,
+      actionableCount: 0,
+    });
   });
 
   test("queues data workflow requests through protected operations routes", async () => {

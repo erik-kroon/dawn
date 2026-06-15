@@ -14,6 +14,7 @@ import {
   type DawnRepository,
   type IdempotencyResult,
   type OperationsUseCaseRepository,
+  type ReviewWorkspaceData,
   type TeamDataExportRepository,
   type JobRun,
   type OutboxEvent,
@@ -24,6 +25,7 @@ import type {
   AutomationRun,
   IntegrationSyncRun,
   TeamRole,
+  Transaction,
   WebhookDelivery,
 } from "@dawn/domain";
 
@@ -37,6 +39,26 @@ class MemoryOperationsRepository {
   automationRuns: AutomationRun[] = [];
   webhookDeliveries: WebhookDelivery[] = [];
   idempotency = new Map<string, IdempotencyResult<unknown>>();
+  workspaceTransactions: Transaction[] = [
+    {
+      id: "transaction_1",
+      teamId: "team_1",
+      accountId: "account_1",
+      description: "Figma subscription",
+      postedAt: "2026-06-14T00:00:00.000Z",
+      money: { amountMinor: -1200, currency: "USD" },
+      type: "expense",
+      source: "manual",
+      reviewState: "needs_review",
+      accountantStatus: "needs_review",
+      accountantStatusReason: null,
+      accountantStatusUpdatedAt: null,
+      categoryId: "category_1",
+      counterpartyId: null,
+      transferGroupId: null,
+      updatedAt: "2026-06-14T00:00:00.000Z",
+    },
+  ];
 
   async withTransaction<T>(callback: (repository: DawnRepository) => Promise<T>) {
     return callback(this as unknown as DawnRepository);
@@ -68,9 +90,9 @@ class MemoryOperationsRepository {
       .slice(0, input.limit);
   }
 
-  async listWorkspace() {
+  async listWorkspace(_actor: Actor, teamId = "team_1"): Promise<ReviewWorkspaceData> {
     return {
-      teamId: "team_1",
+      teamId,
       teamName: "Acme Studio",
       categories: [
         {
@@ -79,25 +101,9 @@ class MemoryOperationsRepository {
           name: "Software",
         },
       ],
-      transactions: [
-        {
-          id: "transaction_1",
-          teamId: "team_1",
-          accountId: "account_1",
-          description: "Figma subscription",
-          postedAt: "2026-06-14T00:00:00.000Z",
-          money: { amountMinor: -1200, currency: "USD" },
-          type: "expense",
-          source: "manual",
-          reviewState: "needs_review",
-          categoryId: "category_1",
-          counterpartyId: null,
-          transferGroupId: null,
-          tagIds: [],
-          createdAt: "2026-06-14T00:00:00.000Z",
-          updatedAt: "2026-06-14T00:00:00.000Z",
-        },
-      ],
+      transactions: this.workspaceTransactions.filter(
+        (transaction) => transaction.teamId === teamId,
+      ),
       sync: {
         collection: "transactions",
         cursor: "2026-06-14T00:00:00.000Z",
@@ -338,6 +344,20 @@ class MemoryOperationsWorkflowRepository implements OperationsUseCaseRepository 
     return role ? { role } : null;
   }
 
+  async listWorkspace(_actor: Actor, teamId: string): Promise<ReviewWorkspaceData> {
+    return {
+      teamId,
+      teamName: "Acme Studio",
+      categories: [],
+      transactions: [],
+      sync: {
+        collection: "transactions",
+        cursor: null,
+        conflictPolicy: "server_wins_for_financial_state",
+      },
+    };
+  }
+
   async listAuditEvents(input: {
     action?: string | null;
     entityId?: string | null;
@@ -429,6 +449,32 @@ class MemoryOperationsWorkflowRepository implements OperationsUseCaseRepository 
 
 const actor = { id: "user_1", type: "user" } as const;
 const context = { actor, requestId: "request_1", teamId: "team_1" };
+
+function operationsTransaction(input: {
+  id: string;
+  postedAt: string;
+  reviewState: Transaction["reviewState"];
+  accountantStatus: NonNullable<Transaction["accountantStatus"]>;
+}): Transaction {
+  return {
+    id: input.id,
+    teamId: "team_1",
+    accountId: "account_1",
+    description: input.id,
+    postedAt: input.postedAt,
+    money: { amountMinor: -1200, currency: "USD" },
+    type: "expense",
+    source: "manual",
+    reviewState: input.reviewState,
+    accountantStatus: input.accountantStatus,
+    accountantStatusReason: null,
+    accountantStatusUpdatedAt: null,
+    categoryId: "category_1",
+    counterpartyId: null,
+    transferGroupId: null,
+    updatedAt: input.postedAt,
+  };
+}
 
 describe("operations workspace", () => {
   test("exposes job failures, dead letters, audit search, and staged data workflows", async () => {
@@ -565,6 +611,79 @@ describe("operations workspace", () => {
       "available",
       "staged",
     ]);
+  });
+
+  test("summarizes accountant close readiness for a selected period", async () => {
+    const repository = new MemoryOperationsRepository();
+    repository.memberships.set("user_1:team_1", "admin");
+    repository.workspaceTransactions = [
+      operationsTransaction({
+        id: "transaction_ready",
+        postedAt: "2026-05-05T00:00:00.000Z",
+        reviewState: "reviewed",
+        accountantStatus: "ready_to_export",
+      }),
+      operationsTransaction({
+        id: "transaction_missing_receipt",
+        postedAt: "2026-05-08T00:00:00.000Z",
+        reviewState: "reviewed",
+        accountantStatus: "missing_receipt",
+      }),
+      operationsTransaction({
+        id: "transaction_needs_review",
+        postedAt: "2026-05-11T00:00:00.000Z",
+        reviewState: "needs_review",
+        accountantStatus: "receipt_found",
+      }),
+      operationsTransaction({
+        id: "transaction_export_failed",
+        postedAt: "2026-05-16T00:00:00.000Z",
+        reviewState: "reviewed",
+        accountantStatus: "export_failed",
+      }),
+      operationsTransaction({
+        id: "transaction_exported",
+        postedAt: "2026-05-20T00:00:00.000Z",
+        reviewState: "reviewed",
+        accountantStatus: "exported",
+      }),
+      operationsTransaction({
+        id: "transaction_outside_period",
+        postedAt: "2026-06-02T00:00:00.000Z",
+        reviewState: "reviewed",
+        accountantStatus: "ready_to_export",
+      }),
+    ];
+
+    const workspace = await listOperationsWorkspace(
+      repository as unknown as OperationsUseCaseRepository,
+      context,
+      {
+        accountantClose: {
+          from: "2026-05-01T00:00:00.000Z",
+          to: "2026-05-31T23:59:59.999Z",
+        },
+      },
+    );
+
+    expect(workspace.accountantClose).toEqual({
+      period: {
+        from: "2026-05-01T00:00:00.000Z",
+        to: "2026-05-31T23:59:59.999Z",
+      },
+      status: "blocked",
+      transactionCount: 5,
+      readyToExportCount: 1,
+      exportedCount: 1,
+      missingReceiptCount: 1,
+      needsReviewCount: 1,
+      exportingCount: 0,
+      exportFailedCount: 1,
+      excludedCount: 0,
+      archivedCount: 0,
+      actionableCount: 3,
+      nextStep: "Retry or resolve failed accountant exports before closing this period.",
+    });
   });
 
   test("queues audited team data export requests idempotently", async () => {

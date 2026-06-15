@@ -49,11 +49,11 @@ Live Gmail OAuth and email delivery should not block completion of local product
 | 1. Accountant Packet Tracer                             | Completed   | Local tracer exports reviewed transactions to a ZIP with `transactions.csv`, `manifest.json`, optional resolved attachments, idempotency, audit, outbox, API, and transactions-page download wiring. Browser smoke reached `/login`; authenticated click smoke still needs a local test account/session.     |
 | 2. Midday-Parity Transaction Lifecycle And Review Queue | Completed   | Added accountant lifecycle status, derived receipt/export readiness, DB persistence, audited/idempotent status transitions, sync invalidation, ready-only export semantics, and transactions-page queue filters/actions. Browser smoke still needs a local test account/session for authenticated UI clicks. |
 | 3. CSV Import Wizard Parity Plus                        | Completed   | Added header auto-detection, mapped column selectors, sign inversion, richer preview metadata, duplicate visibility, synchronous commit, queued large-import sessions, R2-backed payload handoff, worker execution, payload cleanup, and operations-page queued feedback.                                    |
-| 4. Gmail Connector Production Readiness                 | Not started | Live proof depends on Google OAuth credentials.                                                                                                                                                                                                                                                              |
-| 5. Receipt Matching Parity Plus                         | Not started | Bidirectional matching and feedback memory.                                                                                                                                                                                                                                                                  |
-| 6. Accountant Export Package Depth                      | Not started | ZIP/XLSX/email/status/history depth.                                                                                                                                                                                                                                                                         |
-| 7. Accountant Access And Handoff Audit                  | Not started | Uses accountant role for better-than-Midday collaboration.                                                                                                                                                                                                                                                   |
-| 8. Operational Hardening And Accountant Close Loop      | Not started | Monthly close reliability and observability.                                                                                                                                                                                                                                                                 |
+| 4. Gmail Connector Production Readiness                 | Local backend/runtime hardening completed | Gmail config health, scheduled/manual sync locking, skipped-count reporting, and deterministic provider-boundary tests landed. Live OAuth smoke remains blocked on Google credentials and a test mailbox.                                                                                                    |
+| 5. Receipt Matching Parity Plus                         | Completed   | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Browser smoke remains deferred while inbox/transactions UI files are under concurrent coss work.                                                                   |
+| 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, skipped attachment counts, and exported status landed. Signed storage links, email delivery, and queued retry remain open.                                                                                                               |
+| 7. Accountant Access And Handoff Audit                  | Partial     | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Export history, revocation, and package access audit remain blocked on signed export storage.                                                                                            |
+| 8. Operational Hardening And Accountant Close Loop      | Partial     | Operations API now returns selected-period accountant close readiness from lifecycle states. Operations UI, representative monthly fixture, and retry affordances remain open.                                                                                                                                |
 
 ## Outcome
 
@@ -528,6 +528,9 @@ export package storage work from Slice 6.
 
 Make the workflow dependable for repeated monthly closes.
 
+Status: Partially completed on 2026-06-15 for backend/API close readiness.
+Operations UI, full close-loop fixture, and retry affordances remain open.
+
 ## Scope
 
 - Add operations visibility for import sessions, Gmail sync runs, matching jobs, and export jobs.
@@ -549,16 +552,26 @@ Make the workflow dependable for repeated monthly closes.
 ## Acceptance Criteria
 
 - [ ] Operations UI can explain the latest import, sync, match, and export runs.
-- [ ] A user can see whether a month is ready to send to an accountant.
+- [x] Operations API can report whether a selected month is ready to send to an accountant.
 - [ ] Failed jobs have retry affordances and actionable error messages.
 - [ ] A representative monthly close fixture exercises CSV import, Gmail ingestion, matching, review, and export.
 - [ ] The system can rerun the close flow without duplicate transactions, documents, or exports.
 
 ## Verification
 
-- Focused app/job/domain tests for close-loop fixture.
-- Browser smoke for operations visibility and month-ready summary.
-- `bun run check-types`
+- Red tests first confirmed `workspace.accountantClose` was absent from the
+  app and API operations workspace.
+- `bun test packages/app/src/operations.test.ts` passed: 9 tests.
+- `bun test packages/api/src/router.test.ts` passed: 30 tests.
+- `bun run check-types` passed.
+- `bunx oxlint` passed.
+- `bunx oxfmt --check packages/app/src/operations.ts packages/app/src/operations.test.ts packages/api/src/routers/index.ts packages/api/src/router.test.ts`
+  passed.
+- `git diff --check -- packages/app/src/operations.ts packages/app/src/operations.test.ts packages/api/src/routers/index.ts packages/api/src/router.test.ts docs/work/ACCOUNTANT-HANDOFF-SLICES.md`
+  passed.
+- Focused app/job/domain tests for the full close-loop fixture remain open.
+- Browser smoke for operations visibility and month-ready summary remains
+  deferred while operations/web UI files are under concurrent coss work.
 
 ## Dependencies
 
