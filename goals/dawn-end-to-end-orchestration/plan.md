@@ -57,7 +57,7 @@ Touch:
 - `packages/domain/src/`
 - `packages/app/src/`
 - `packages/db/src/schema/`
-- `packages/db/src/transaction-review.ts`
+- `packages/db/src/dawn-repository.ts`
 - `packages/api/src/routers/`
 - `apps/server/src/index.ts`
 - `apps/web/src/routes/_auth/dashboard.tsx`

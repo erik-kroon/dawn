@@ -1,65 +1,86 @@
-Act as the implementing agent for building Dawn fully end-to-end in this workspace. Personally implement the vertical slices in dependency order, keep architecture coherent, verify each delivered behavior, update docs/ADRs as decisions land, and commit or checkpoint only coherent verified units.
+# Dawn Architecture Verticalization Goal
+
+Act as the implementing agent for the Dawn architecture remediation and Midday-informed hardening plan. Implement the slices in `docs/work/ARCHITECTURE-VERTICAL-SLICES.md` in dependency order, keeping the first seven architecture-review slices first unless the user explicitly changes the order.
 
 Authoritative inputs:
 
-- AGENTS.md
-- CONTEXT.md
-- CONTEXT-MAP.md
-- docs/PRD.md
-- docs/work/IMPLEMENTATION-PRD.md
-- docs/work/VERTICAL-SLICES.md
-- docs/adr/README.md
-- goals/dawn-end-to-end-orchestration/goal.md
-- goals/dawn-end-to-end-orchestration/facts.md
-- goals/dawn-end-to-end-orchestration/plan.md
-- .agents/skills/coss/SKILL.md for UI work
+- `AGENTS.md`
+- `CONTEXT.md`
+- `CONTEXT-MAP.md`
+- `docs/PRD.md`
+- `docs/work/IMPLEMENTATION-PRD.md`
+- `docs/work/ARCHITECTURE-VERTICAL-SLICES.md`
+- `docs/work/VERTICAL-SLICES.md` for original product slice context
+- `docs/work/ORCHESTRATION.md` for current implementation and verification status
+- `docs/adr/README.md` and existing ADRs
+- `goals/dawn-end-to-end-orchestration/goal.md`
+- `.agents/skills/coss/SKILL.md` for UI work
 
-Use ref/midday only as read-only reference material.
+Use `ref/midday` only as read-only reference material. Copy product and operational lessons from Midday, not its direct route-to-query business architecture.
 
-End state: the repo implements the complete Cloudflare-first business operating system in the docs: teams/permissions, domain/app layers, Postgres/Drizzle authoritative data, audit/idempotency/outbox, ledger, CSV/banking sync, documents/R2/inbox/extraction/matching, invoicing/payments/recurrence, projects/time tracking, reports/insights, TanStack DB sync/realtime, TanStack AI assistant/tools/approval/evals, automations, integrations, public API/webhooks, desktop improvements, observability, operations, and production gates.
+End state:
+
+- Worker jobs, public API routes, oRPC handlers, sync sockets, automations, AI tools, and UI mutations call application use cases instead of owning business behavior.
+- `packages/app` is feature-modular while preserving stable `@dawn/app` exports.
+- `packages/domain` is split into focused pure modules while preserving stable `@dawn/domain` exports.
+- The outbox/job runner owns claim, stale recovery, fanout, retry behavior, handler routing, and job run records.
+- Actor and Team request intake is consistent across session users, API keys, OAuth apps, system jobs, assistant tools, provider webhooks, and realtime sync.
+- Public API operations are contract-backed and use one source for parsing, scope, idempotency, response mapping, and OpenAPI.
+- Sync collections have one authorization, cursor, invalidation, and realtime fanout contract.
+- Drizzle persistence has narrower repository ports and clearer implementation locality while keeping Postgres authoritative.
+- Dawn gains Midday-inspired worker/runtime visibility, provider organization, public API breadth, dashboard decomposition, and verification gates without weakening the app/domain architecture.
 
 Architecture constraints:
 
-- Business rules live in packages/domain and packages/app.
-- UI, routes, workers, providers, and AI tools call app use cases.
+- Business rules live in `packages/domain` and `packages/app`.
+- Routes, workers, providers, sync sockets, UI components, and AI tools call app use cases.
 - Postgres is authoritative; Durable Objects, TanStack DB, KV, cache, search, and vectors are coordination/projection only.
-- Use Cloudflare Workers, Durable Objects, Queues, Workflows, R2, KV/Hyperdrive where appropriate; Trigger.dev only behind job contracts when justified.
-- Use Coss UI for new UI components.
-- AI actions must be permissioned, auditable, grounded, and approval-gated for risky mutations/external side effects.
-- Financial state uses exact money semantics, never JS float for authoritative calculations.
+- Durable Objects coordinate tenants and realtime fanout; they are not financial storage.
+- Cloudflare Queues and Workflows are the default async path; Trigger.dev remains behind job contracts only when justified.
+- Financial state uses exact money semantics, never JavaScript floating point for authoritative calculations.
 - Sensitive mutations require tenant isolation, permission checks, idempotency, audit logs, and outbox events.
+- Public API endpoints must be versioned, scoped, rate-limited, idempotent where mutating, and use-case-backed.
+- AI actions must be permissioned, auditable, grounded, and approval-gated for risky mutations or external side effects.
+- Use coss UI for new product UI components unless the user explicitly asks otherwise.
+- Do not edit `ref/midday`.
 - Do not spawn Codex CLI workers, create worker worktrees, or delegate implementation unless the user explicitly asks later.
 
 Implementation process:
 
-1. Inspect current git status and docs. Preserve user changes. Do not edit ref/midday.
-2. Rebaseline the current working tree before editing overlapping files. Treat existing implementation changes as user or prior-agent work.
-3. Create/update ADRs before major architecture implementation.
-4. Use docs/work/VERTICAL-SLICES.md as the backlog. Maintain implementation tracking under docs/work with slice status, verification, commits/checkpoints, blockers, and next steps.
-5. Work vertically where possible: deliver domain/app/db/api/UI/test behavior together when a slice requires the full path.
-6. Avoid backend-only/frontend-only/test-only detours unless necessary for a tracked slice or an independently useful foundation.
-7. For each slice, inspect the relevant code, implement the smallest coherent final-shape increment, run relevant verification, update tracking, and only then move on.
-8. If a slice depends on external credentials or deployed infrastructure, implement provider boundaries, local/test adapters, schemas, fixtures, and verification harnesses first. Mark only live wiring blocked.
-9. If a change touches starter compatibility paths, apply zero-tech-debt posture: move toward the intended end-state, delete unused compatibility when caller evidence supports removal, and avoid speculative wrappers/fallbacks.
-10. After each coherent milestone, update docs/ADRs if behavior or decisions changed and rerun impacted checks.
+1. Inspect git status and read the current slice, relevant docs, and touched code before editing.
+2. Preserve user changes. Rebaseline overlapping files before modifying them.
+3. Follow `docs/work/ARCHITECTURE-VERTICAL-SLICES.md` slice order. The first seven are the architecture spine.
+4. Work vertically. Each slice should leave a working boundary or observable behavior, not only a horizontal refactor.
+5. Use existing tests as the first verification surface; add or adjust focused tests only when needed to prove changed behavior.
+6. Keep public exports stable unless the slice explicitly requires a migration.
+7. Update ADRs before spreading a major architecture decision across code.
+8. Keep implementation tracking under `docs/work` with slice status, verification, blockers, and next steps.
+9. If a slice needs external credentials or live infrastructure, implement local/test adapters and mark only the live proof blocked.
+10. After each coherent milestone, run impacted checks, inspect the diff, update tracking, and commit only verified coherent units if committing is part of the active request.
 
 Git/commit policy:
 
-- Commit coherent verified units, usually a completed vertical slice or useful sub-slice foundation.
-- Commit only after inspecting diff and running relevant verification.
-- Do not commit unrelated user changes. Stage paths intentionally.
-- Use conventional, scoped messages, e.g. feat(domain): add transaction review tracer, docs(adr): record outbox decision.
-- Keep commits bisectable. Docs/ADR changes may be separate from implementation when clearer.
-- Before each commit, record in docs/work: slice/task, verification run, result, and commit hash after commit.
+- Commit only coherent verified units.
+- Do not commit unrelated user changes.
+- Stage paths intentionally.
+- Use concise conventional messages, for example `refactor(app): move operations export completion` or `feat(jobs): add outbox runner`.
+- Keep docs/ADR-only changes separate when that makes history clearer.
 - If work is partial, commit only when it is independently useful, verified, and the remaining work is clearly tracked.
 
-Suggested initial sequence:
+Required initial sequence:
 
-- First: verify/update ADR baseline.
-- Second: complete and harden transaction review tracer work.
-- Third: deepen team context and permissions.
-- Then proceed through docs/work/VERTICAL-SLICES.md in dependency order.
+1. Move data export completion into app.
+2. Finish data workflow mutation locality.
+3. Deepen the outbox and job runner.
+4. Deepen Actor and Team intake.
+5. Narrow the persistence seam.
+6. Add the public API operation contract tracer.
+7. Add the sync collection authorization contract.
 
-Completion condition: mark complete only when all required slices and explicit requirements from authoritative docs are implemented, relevant build/type/test/deploy checks pass or credential-dependent blockers are explicitly documented, docs/ADRs match delivered system, git history contains appropriate verified commits for completed work, and no known required slice remains incomplete.
+Then continue through the remaining slices in `docs/work/ARCHITECTURE-VERTICAL-SLICES.md`: app module extraction, domain module extraction, Drizzle repository split, public API contract migration and breadth, worker runtime/registry, sync expansion, dashboard decomposition, and verification closure.
 
-If blocked, keep making adjacent useful implementation progress where possible. Stop only when no defensible path remains, and report blocker, attempted paths, evidence, and exact user input or external change needed.
+Completion condition:
+
+Mark complete only when all slices in `docs/work/ARCHITECTURE-VERTICAL-SLICES.md` are implemented or explicitly blocked by concrete external prerequisites, relevant checks pass, docs/ADRs match the delivered architecture, implementation tracking is current, and no required architecture slice remains unaccounted for.
+
+If blocked, keep making adjacent useful progress within the same slice or dependency chain. Stop only when no defensible path remains, and report the blocker, attempted paths, evidence, and exact user input or external change needed.
