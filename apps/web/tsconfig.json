@@ -13,5 +13,7 @@
       "@/*": ["./src/*"],
       "@dawn/ui/*": ["../../packages/ui/src/*"]
     }
-  }
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

@@ -551,6 +551,12 @@ idempotently, and audits/emits `oauth_consent.granted`; the protected router
 exposes create, preview, and grant procedures for a future browser authorization
 screen.
 
+Slice 23 browser follow-up added a protected `/oauth/authorize` route. The page
+parses OAuth app, redirect URI, scope, team, and state parameters, previews the
+registered consent request through the protected developer API, grants consent
+with a stable idempotency key, and redirects only to the validated registered
+redirect URI with grant metadata or `access_denied`.
+
 Slice 24 foundation added a generic integration provider boundary for
 accounting, payments, messaging, and email. `packages/integrations` now exposes
 mock adapters with declared capabilities, encrypted-token metadata, deterministic
@@ -693,12 +699,13 @@ provider cleanup, and compliance rules.
   approval-required risky actions, run logging, queue job mapping, protected API
   routes, migration generation, typecheck/check, and dashboard build.
 - Slice 23 still needs live public API requests against a migrated local or
-  preview database, OAuth authorization browser UI, and webhook delivery review
-  against a reachable endpoint. Current verification covers hashed scoped API
-  keys, one-time credential replay behavior, OAuth app/consent grant route
-  contracts, protected developer routes, public OpenAPI shape, queue retry
-  signaling, delivery audit records, migration generation, typecheck/check, and
-  focused tests.
+  preview database, authenticated OAuth authorization browser exercise, and
+  webhook delivery review against a reachable endpoint. Current verification
+  covers hashed scoped API keys, one-time credential replay behavior, OAuth
+  app/consent grant route contracts, protected developer routes, browser consent
+  route build/helper tests, public OpenAPI shape, queue retry signaling,
+  delivery audit records, migration generation, typecheck/check, and focused
+  tests.
 - Slice 24 still needs real provider selection/credentials, sandbox contract
   runs where provider SDKs are chosen, and authenticated dashboard review against
   a migrated local or preview database. Current verification covers adapter
