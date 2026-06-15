@@ -1,13 +1,10 @@
 import type { DawnCloudflareBindings } from "@dawn/infra/cloudflare";
-import type {
-  TransactionSyncCollectionId,
-  TransactionSyncInvalidationEvent,
-  TransactionSyncSubscription,
-} from "@dawn/sync";
+import type { SyncCollectionId, SyncInvalidationEvent, SyncSubscription } from "@dawn/sync";
 import {
-  createTransactionSyncSubscriptionAck,
-  isTransactionSyncInvalidationEvent,
-  parseTransactionSyncSubscription,
+  createSyncSubscriptionAck,
+  isSyncInvalidationEvent,
+  parseSyncSubscription,
+  syncCollectionContracts,
 } from "@dawn/sync";
 
 type RealtimeSocket = {
@@ -16,19 +13,24 @@ type RealtimeSocket = {
 
 type TenantSubscription = {
   teamId: string;
-  collections: Set<TransactionSyncCollectionId>;
+  collections: Set<SyncCollectionId>;
 };
 
 export class TenantRealtimeHub {
   private readonly subscriptions = new Map<RealtimeSocket, TenantSubscription>();
 
-  subscribe(socket: RealtimeSocket, subscription: TransactionSyncSubscription) {
+  subscribe(socket: RealtimeSocket, subscription: SyncSubscription) {
     this.subscriptions.set(socket, {
       teamId: subscription.teamId,
       collections: new Set([subscription.collection]),
     });
     socket.send(
-      JSON.stringify(createTransactionSyncSubscriptionAck({ teamId: subscription.teamId })),
+      JSON.stringify(
+        createSyncSubscriptionAck({
+          teamId: subscription.teamId,
+          collection: subscription.collection,
+        }),
+      ),
     );
   }
 
@@ -36,7 +38,7 @@ export class TenantRealtimeHub {
     this.subscriptions.delete(socket);
   }
 
-  fanout(event: TransactionSyncInvalidationEvent) {
+  fanout(event: SyncInvalidationEvent) {
     let delivered = 0;
 
     for (const [socket, subscription] of this.subscriptions) {
@@ -72,11 +74,11 @@ export class TenantCoordinator {
   async fetch(request: Request) {
     const url = new URL(request.url);
 
-    if (url.pathname.endsWith("/subscribe")) {
+    if (isSyncCoordinatorPath(url.pathname, "subscription")) {
       return this.subscribe(request, url);
     }
 
-    if (url.pathname.endsWith("/invalidate")) {
+    if (isSyncCoordinatorPath(url.pathname, "fanout")) {
       return this.invalidate(request);
     }
 
@@ -93,10 +95,10 @@ export class TenantCoordinator {
       return new Response("Expected WebSocket upgrade", { status: 426 });
     }
 
-    let subscription: TransactionSyncSubscription;
+    let subscription: SyncSubscription;
 
     try {
-      subscription = parseTransactionSyncSubscription({
+      subscription = parseSyncSubscription({
         teamId: url.searchParams.get("teamId"),
         collection: url.searchParams.get("collection"),
       });
@@ -124,10 +126,21 @@ export class TenantCoordinator {
   private async invalidate(request: Request) {
     const input: unknown = await request.json();
 
-    if (!isTransactionSyncInvalidationEvent(input)) {
-      return Response.json({ error: "Invalid transaction sync invalidation" }, { status: 400 });
+    if (!isSyncInvalidationEvent(input)) {
+      return Response.json({ error: "Invalid sync invalidation" }, { status: 400 });
     }
 
     return Response.json(this.hub.fanout(input));
   }
+}
+
+function isSyncCoordinatorPath(pathname: string, pathType: "subscription" | "fanout") {
+  return syncCollectionContracts.some((contract) => {
+    const contractPath =
+      pathType === "subscription"
+        ? contract.subscription.coordinatorPath
+        : contract.fanout.coordinatorInvalidationPath;
+
+    return pathname.endsWith(contractPath);
+  });
 }

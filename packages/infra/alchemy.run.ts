@@ -76,6 +76,23 @@ const hyperdrive = maybeDatabaseUrl()
     })
   : undefined;
 
+const dawnRuntimeBindings = {
+  ENVIRONMENT: stage,
+  NODE_ENV: stage === "production" ? "production" : "development",
+  CORS_ORIGIN: requiredEnv("CORS_ORIGIN"),
+  BETTER_AUTH_URL: requiredEnv("BETTER_AUTH_URL"),
+  BETTER_AUTH_SECRET: alchemy.secret(requiredEnv("BETTER_AUTH_SECRET")),
+  // POLAR_ACCESS_TOKEN: alchemy.secret(requiredEnv("POLAR_ACCESS_TOKEN")),
+  POLAR_SUCCESS_URL: requiredEnv("POLAR_SUCCESS_URL"),
+  DATABASE_URL: alchemy.secret(requiredEnv("DATABASE_URL")),
+  DAWN_DOCUMENTS: documentsBucket,
+  DAWN_JOBS: jobsQueue,
+  DAWN_JOBS_DLQ: jobsDeadLetterQueue,
+  DAWN_CACHE: cache,
+  DAWN_TENANT_COORDINATOR: tenantCoordinator,
+  ...(hyperdrive ? { DAWN_HYPERDRIVE: hyperdrive } : {}),
+};
+
 export const api = await Worker("api", {
   cwd: "../../apps/server",
   entrypoint: "./src/index.ts",
@@ -83,22 +100,34 @@ export const api = await Worker("api", {
   compatibilityDate: "2026-06-14",
   name: cloudflareResourceName(stage, "api"),
   url: stageConfig.workerUrl,
-  bindings: {
-    ENVIRONMENT: stage,
-    NODE_ENV: stage === "production" ? "production" : "development",
-    CORS_ORIGIN: requiredEnv("CORS_ORIGIN"),
-    BETTER_AUTH_URL: requiredEnv("BETTER_AUTH_URL"),
-    BETTER_AUTH_SECRET: alchemy.secret(requiredEnv("BETTER_AUTH_SECRET")),
-    POLAR_ACCESS_TOKEN: alchemy.secret(requiredEnv("POLAR_ACCESS_TOKEN")),
-    POLAR_SUCCESS_URL: requiredEnv("POLAR_SUCCESS_URL"),
-    DATABASE_URL: alchemy.secret(requiredEnv("DATABASE_URL")),
-    DAWN_DOCUMENTS: documentsBucket,
-    DAWN_JOBS: jobsQueue,
-    DAWN_JOBS_DLQ: jobsDeadLetterQueue,
-    DAWN_CACHE: cache,
-    DAWN_TENANT_COORDINATOR: tenantCoordinator,
-    ...(hyperdrive ? { DAWN_HYPERDRIVE: hyperdrive } : {}),
+  bindings: dawnRuntimeBindings,
+  observability: {
+    enabled: true,
+    logs: { enabled: true },
+    traces: { enabled: true },
   },
+});
+
+export const worker = await Worker("worker", {
+  cwd: "../../apps/server",
+  entrypoint: "./src/worker.ts",
+  compatibility: "node",
+  compatibilityDate: "2026-06-14",
+  name: cloudflareResourceName(stage, "worker"),
+  url: stageConfig.workerUrl,
+  bindings: dawnRuntimeBindings,
+  eventSources: [
+    {
+      queue: jobsQueue,
+      settings: {
+        batchSize: 25,
+        maxConcurrency: 5,
+        maxRetries: 5,
+        retryDelay: 30,
+        deadLetterQueue: jobsDeadLetterQueue,
+      },
+    },
+  ],
   observability: {
     enabled: true,
     logs: { enabled: true },
@@ -116,6 +145,7 @@ export const web = await Vite("web", {
 
 console.log(`Stage  -> ${stage}`);
 console.log(`API    -> ${api.url ?? "(route-only)"}`);
+console.log(`Worker -> ${worker.url ?? "(queue-only)"}`);
 console.log(`Web    -> ${web.url}`);
 
 await app.finalize();

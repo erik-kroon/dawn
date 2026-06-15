@@ -19,10 +19,8 @@ import {
   createProject,
   createTimeEntry,
   createWebhookSubscription,
-  deliverWebhooksForOutboxEvent,
   dispatchOutboxEvents,
-  generateRecurringInvoice,
-  generateWeeklyInsights,
+  listBankConnections,
   listBillingWorkspace,
   listBusinessReport,
   listDocuments,
@@ -32,26 +30,28 @@ import {
   correctDocumentExtraction,
   rejectInboxMatch,
   requestBankConnectionSyncFromWebhook,
+  resolveAppRequest,
+  resolveScopedActorAppRequest,
+  resolveSessionAppRequest,
   resolveTeamAccess,
   resolvePublicApiKey,
-  runAutomationsForOutboxEvent,
-  syncBankConnection,
+  type CreateLedgerTransactionCommand,
   type DocumentExtractionFields,
-  type WebhookDeliveryProvider,
+  type ResolvedAppRequest,
 } from "@dawn/app";
-import { createMockInsightGenerationProvider } from "@dawn/ai";
 import { auth } from "@dawn/auth";
-import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
+import { DrizzleDawnRepository } from "@dawn/db/dawn-repository";
+import type { PublicApiScope } from "@dawn/domain";
 import { env } from "@dawn/env/server";
 import type { DawnCloudflareBindings } from "@dawn/infra/cloudflare";
 import type { DawnQueueMessage } from "@dawn/jobs";
+import { verifySandboxBankingWebhook } from "@dawn/integrations";
 import {
-  createMockBankingProvider,
-  createSandboxBankingProvider,
-  verifySandboxBankingWebhook,
-  type BankingProvider,
-} from "@dawn/integrations";
-import { transactionSyncCollection } from "@dawn/sync";
+  projectSyncCollectionContract,
+  syncSubscriptionSearchParams,
+  transactionSyncCollectionContract,
+  type SyncCollectionContract,
+} from "@dawn/sync";
 import { initLogger } from "evlog";
 import { createAuthMiddleware, type BetterAuthInstance } from "evlog/better-auth";
 import { evlog, type EvlogVariables } from "evlog/hono";
@@ -59,13 +59,12 @@ import { Hono, type Context as HonoContext } from "hono";
 import { cors } from "hono/cors";
 
 import { resolveCorsOrigin } from "./cors";
-import { processTeamDataExportJob } from "./data-export";
-import { processDocumentExtractionJob } from "./document-extraction";
 import { createR2DocumentObjectStorage } from "./document-storage";
 import { logServerError, requestIdFromHeaders } from "./observability";
 import { createCloudflareOutboxQueuePublisher } from "./outbox-queue";
 import { enforcePublicApiRateLimit } from "./rate-limit";
 import { publishTenantSyncInvalidation } from "./tenant-sync";
+import { handleDawnWorkerQueueBatch } from "./worker-runtime";
 import { RateLimitError } from "@dawn/app/rate-limit";
 
 export { TenantCoordinator } from "./tenant-coordinator";
@@ -83,6 +82,60 @@ type ServerHonoEnv = EvlogVariables & {
   Bindings: DawnCloudflareBindings;
 };
 type PublicApiPermission = Parameters<typeof resolveTeamAccess>[2];
+type PublicApiMethod = "get" | "post";
+type PublicApiIdempotencyPolicy = "none" | "required";
+type PublicApiOperationParameter = {
+  name: string;
+  in: "query" | "header" | "path";
+  required: boolean;
+};
+type PublicApiOperationResponse = {
+  body: unknown;
+  status?: 200 | 201 | 202;
+};
+type PublicApiParseContext = {
+  context: HonoContext<ServerHonoEnv>;
+  body: Record<string, unknown>;
+  idempotencyKey(): string | null;
+};
+type PublicApiExecuteContext<TInput> = {
+  context: HonoContext<ServerHonoEnv>;
+  repository: DrizzleDawnRepository;
+  request: ResolvedAppRequest;
+  input: TInput;
+};
+type PublicApiOperationContract<TInput extends { teamId: string }> = {
+  id: string;
+  method: PublicApiMethod;
+  path: string;
+  summary: string;
+  scope: PublicApiScope;
+  permission: PublicApiPermission;
+  idempotency: PublicApiIdempotencyPolicy;
+  successStatus: 200 | 201 | 202;
+  parameters: PublicApiOperationParameter[];
+  responses: Record<string, { description: string }>;
+  parseInput(context: PublicApiParseContext): TInput;
+  execute(context: PublicApiExecuteContext<TInput>): Promise<PublicApiOperationResponse>;
+};
+type PublicApiOpenApiDocument = {
+  openapi: string;
+  info: {
+    title: string;
+    version: string;
+  };
+  servers: Array<{ url: string }>;
+  components: {
+    securitySchemes: {
+      bearerApiKey: {
+        type: string;
+        scheme: string;
+      };
+    };
+  };
+  security: Array<Record<string, unknown>>;
+  paths: Record<string, Record<string, unknown>>;
+};
 
 const app = new Hono<ServerHonoEnv>();
 
@@ -154,12 +207,13 @@ app.put("/documents/upload/:token", async (c) => {
   });
 
   const result = await completeDocumentUpload(
-    new DrizzleTransactionReviewRepository(),
-    {
+    new DrizzleDawnRepository(),
+    resolveAppRequest({
       actor: { id: payload.actorId, type: "user" },
+      source: "session",
       requestId: payload.requestId,
       teamId: payload.teamId,
-    },
+    }),
     {
       teamId: payload.teamId,
       documentId: payload.documentId,
@@ -199,7 +253,18 @@ app.get("/documents/download/:token", async (c) => {
   });
 });
 
-app.get("/sync/transactions/subscribe", async (c) => {
+app.get(transactionSyncCollectionContract.subscription.publicPath, async (c) => {
+  return handleSyncSubscription(c, transactionSyncCollectionContract);
+});
+
+app.get(projectSyncCollectionContract.subscription.publicPath, async (c) => {
+  return handleSyncSubscription(c, projectSyncCollectionContract);
+});
+
+async function handleSyncSubscription(
+  c: HonoContext<ServerHonoEnv>,
+  contract: SyncCollectionContract,
+) {
   if (c.req.header("Upgrade")?.toLowerCase() !== "websocket") {
     return c.text("Expected WebSocket upgrade", 426);
   }
@@ -218,14 +283,17 @@ app.get("/sync/transactions/subscribe", async (c) => {
 
   try {
     await resolveTeamAccess(
-      new DrizzleTransactionReviewRepository(),
-      {
-        actor: { id: session.user.id, type: "user", email: session.user.email },
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+      new DrizzleDawnRepository(),
+      resolveSessionAppRequest({
+        user: {
+          id: session.user.id,
+          email: session.user.email,
+        },
+        requestId: c.req.header("x-request-id"),
         teamId,
-      },
-      "transactions.read",
-      "You cannot subscribe to this team's transactions",
+      }),
+      contract.authorization.permission,
+      contract.authorization.subscriptionForbiddenMessage,
     );
   } catch (error) {
     if (error instanceof AppError) {
@@ -238,14 +306,14 @@ app.get("/sync/transactions/subscribe", async (c) => {
   const id = c.env.DAWN_TENANT_COORDINATOR.idFromName(teamId);
   const stub = c.env.DAWN_TENANT_COORDINATOR.get(id);
   const url = new URL(c.req.url);
-  url.pathname = "/subscribe";
-  url.search = new URLSearchParams({
+  url.pathname = contract.subscription.coordinatorPath;
+  url.search = syncSubscriptionSearchParams({
     teamId,
-    collection: transactionSyncCollection.id,
+    collection: contract.collection.id,
   }).toString();
 
   return stub.fetch(new Request(url.toString(), c.req.raw));
-});
+}
 
 app.post("/internal/outbox/dispatch", async (c) => {
   const authorization = c.req.header("authorization");
@@ -257,7 +325,7 @@ app.post("/internal/outbox/dispatch", async (c) => {
   const limitQuery = Number(c.req.query("limit") ?? "25");
   const limit = Number.isInteger(limitQuery) && limitQuery > 0 ? Math.min(limitQuery, 100) : 25;
   const result = await dispatchOutboxEvents(
-    new DrizzleTransactionReviewRepository(),
+    new DrizzleDawnRepository(),
     createCloudflareOutboxQueuePublisher(c.env.DAWN_JOBS),
     { limit },
   );
@@ -298,515 +366,759 @@ export const rpcHandler = new RPCHandler(appRouter, {
   ],
 });
 
-app.get("/api/v1/openapi.json", (c) => {
-  return c.json(publicApiOpenApiDocument(c.req.url));
-});
+type TeamScopedPublicApiInput = {
+  teamId: string;
+};
 
-app.get("/api/v1/transactions", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-  const teamId = c.req.query("teamId");
+type CreateTransactionPublicApiInput = {
+  teamId: string;
+  command: CreateLedgerTransactionCommand;
+};
 
-  if (!teamId) {
-    return c.json({ error: "teamId is required" }, 400);
-  }
+type CreateDocumentUploadPublicApiInput = {
+  teamId: string;
+  fileName: string;
+  contentType: string;
+  byteSize: number;
+  checksumSha256: string | null;
+  idempotencyKey: string;
+};
 
-  try {
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "transactions.read");
-    const workspace = await listTransactionReviewWorkspace(repository, {
-      actor,
-      requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-      teamId,
-    });
+type CreateDocumentDownloadPublicApiInput = {
+  teamId: string;
+  documentId: string;
+};
 
-    return c.json({
-      data: workspace.transactions,
-    });
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
+type CorrectDocumentExtractionPublicApiInput = {
+  teamId: string;
+  inboxItemId: string;
+  fields: DocumentExtractionFields;
+  idempotencyKey: string;
+};
 
-app.post("/api/v1/transactions", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
+type ResolveInboxMatchPublicApiInput = {
+  teamId: string;
+  suggestionId: string;
+  reason?: string | null;
+  idempotencyKey: string;
+};
 
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "transactions.write");
-    const result = await createLedgerTransaction(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
+type CreateInvoicePublicApiInput = {
+  teamId: string;
+  customerId: string;
+  invoiceNumber: string;
+  issueDate: string;
+  dueDate: string | null;
+  currency: string;
+  discountBasisPoints: number | null;
+  notes: string | null;
+  lines: ReturnType<typeof requireInvoiceLines>;
+  idempotencyKey: string;
+};
+
+type CreateCustomerPublicApiInput = {
+  teamId: string;
+  name: string;
+  email: string | null;
+  billingAddress: string | null;
+  contactName: string | null;
+  contactEmail: string | null;
+  contactRole: string | null;
+  idempotencyKey: string;
+};
+
+type CreateProductPublicApiInput = {
+  teamId: string;
+  name: string;
+  type: "product" | "service";
+  description: string | null;
+  unitPrice: PublicApiMoney;
+  defaultTaxRateBasisPoints: number | null;
+  idempotencyKey: string;
+};
+
+type CreateProjectPublicApiInput = {
+  teamId: string;
+  customerId: string;
+  name: string;
+  description: string | null;
+  billableRate: PublicApiMoney;
+  idempotencyKey: string;
+};
+
+type CreateTimeEntryPublicApiInput = {
+  teamId: string;
+  projectId: string;
+  actorId: string | null;
+  description: string;
+  occurredOn: string;
+  durationMinutes: number;
+  billableStatus: "billable" | "non_billable";
+  billableRate: PublicApiMoney | null;
+  idempotencyKey: string;
+};
+
+type ReportOverviewPublicApiInput = {
+  teamId: string;
+  from: string | null;
+  to: string | null;
+};
+
+type CreateWebhookSubscriptionPublicApiInput = {
+  teamId: string;
+  url: string;
+  eventTypes: string[];
+  idempotencyKey: string;
+};
+
+const teamIdQueryParameter = {
+  name: "teamId",
+  in: "query",
+  required: true,
+} satisfies PublicApiOperationParameter;
+
+const idempotencyHeaderParameter = {
+  name: "Idempotency-Key",
+  in: "header",
+  required: true,
+} satisfies PublicApiOperationParameter;
+
+const optionalFromQueryParameter = {
+  name: "from",
+  in: "query",
+  required: false,
+} satisfies PublicApiOperationParameter;
+
+const optionalToQueryParameter = {
+  name: "to",
+  in: "query",
+  required: false,
+} satisfies PublicApiOperationParameter;
+
+const documentIdPathParameter = {
+  name: "documentId",
+  in: "path",
+  required: true,
+} satisfies PublicApiOperationParameter;
+
+const inboxItemIdPathParameter = {
+  name: "inboxItemId",
+  in: "path",
+  required: true,
+} satisfies PublicApiOperationParameter;
+
+const suggestionIdPathParameter = {
+  name: "suggestionId",
+  in: "path",
+  required: true,
+} satisfies PublicApiOperationParameter;
+
+const listTransactionsPublicApiOperation: PublicApiOperationContract<TeamScopedPublicApiInput> = {
+  id: "listTransactions",
+  method: "get",
+  path: "/transactions",
+  summary: "List team transactions",
+  scope: "transactions.read",
+  permission: "transactions.read",
+  idempotency: "none",
+  successStatus: 200,
+  parameters: [teamIdQueryParameter],
+  responses: {
+    "200": { description: "Team transaction list" },
+  },
+  parseInput({ context }) {
+    return {
+      teamId: requireQueryString(context, "teamId"),
+    };
+  },
+  async execute({ repository, request }) {
+    const workspace = await listTransactionReviewWorkspace(repository, request);
+
+    return {
+      body: {
+        data: workspace.transactions,
       },
-      {
+    };
+  },
+};
+
+const createTransactionPublicApiOperation: PublicApiOperationContract<CreateTransactionPublicApiInput> =
+  {
+    id: "createTransaction",
+    method: "post",
+    path: "/transactions",
+    summary: "Create a ledger transaction",
+    scope: "transactions.write",
+    permission: "transactions.write",
+    idempotency: "required",
+    successStatus: 201,
+    parameters: [idempotencyHeaderParameter],
+    responses: {
+      "201": { description: "Created ledger transaction" },
+    },
+    parseInput({ body, idempotencyKey }) {
+      const teamId = requireString(body.teamId, "teamId");
+
+      return {
         teamId,
-        accountId: requireString(body.accountId, "accountId"),
-        description: requireString(body.description, "description"),
-        postedAt: requireString(body.postedAt, "postedAt"),
-        money: requireMoney(body.money, "money"),
-        type:
-          (body.type as "income" | "expense" | "transfer" | "fee" | "refund" | "adjustment") ??
-          "expense",
-        source:
-          (body.source as "manual" | "csv_import" | "bank_sync" | "provider_webhook") ?? "manual",
-        categoryId: optionalString(body.categoryId),
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+        command: {
+          teamId,
+          accountId: requireString(body.accountId, "accountId"),
+          description: requireString(body.description, "description"),
+          postedAt: requireString(body.postedAt, "postedAt"),
+          money: requireMoney(body.money, "money"),
+          type:
+            (body.type as "income" | "expense" | "transfer" | "fee" | "refund" | "adjustment") ??
+            "expense",
+          source:
+            (body.source as "manual" | "csv_import" | "bank_sync" | "provider_webhook") ?? "manual",
+          categoryId: optionalString(body.categoryId),
+          idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+        },
+      };
+    },
+    async execute({ repository, request, input }) {
+      const result = await createLedgerTransaction(repository, request, input.command);
+
+      return {
+        body: result,
+        status: 201,
+      };
+    },
+  };
+
+const listBankAccountsPublicApiOperation: PublicApiOperationContract<TeamScopedPublicApiInput> = {
+  id: "listBankAccounts",
+  method: "get",
+  path: "/bank-accounts",
+  summary: "List bank accounts and connections",
+  scope: "bank_accounts.read",
+  permission: "transactions.read",
+  idempotency: "none",
+  successStatus: 200,
+  parameters: [teamIdQueryParameter],
+  responses: {
+    "200": { description: "Team bank account and connection list" },
+  },
+  parseInput({ context }) {
+    return {
+      teamId: requireQueryString(context, "teamId"),
+    };
+  },
+  async execute({ repository, request, input }) {
+    const workspace = await listBankConnections(repository, [], request, { teamId: input.teamId });
+
+    return {
+      body: {
+        data: workspace.connections,
       },
-    );
+    };
+  },
+};
 
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
+const listInvoicesPublicApiOperation: PublicApiOperationContract<TeamScopedPublicApiInput> = {
+  id: "listInvoices",
+  method: "get",
+  path: "/invoices",
+  summary: "List team invoices",
+  scope: "invoices.read",
+  permission: "invoices.read",
+  idempotency: "none",
+  successStatus: 200,
+  parameters: [teamIdQueryParameter],
+  responses: {
+    "200": { description: "Team invoice list" },
+  },
+  parseInput({ context }) {
+    return {
+      teamId: requireQueryString(context, "teamId"),
+    };
+  },
+  async execute({ repository, request }) {
+    const billing = await listBillingWorkspace(repository, request);
 
-app.get("/api/v1/invoices", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-  const teamId = c.req.query("teamId");
-
-  if (!teamId) {
-    return c.json({ error: "teamId is required" }, 400);
-  }
-
-  try {
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.read");
-    const billing = await listBillingWorkspace(repository, {
-      actor,
-      requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-      teamId,
-    });
-
-    return c.json({
-      data: billing.invoices,
-    });
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.get("/api/v1/documents", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-  const teamId = c.req.query("teamId");
-
-  if (!teamId) {
-    return c.json({ error: "teamId is required" }, 400);
-  }
-
-  try {
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "documents.read");
-    const workspace = await listDocuments(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
+    return {
+      body: {
+        data: billing.invoices,
       },
-      { teamId },
-    );
+    };
+  },
+};
 
-    return c.json({
-      data: workspace.documents,
-    });
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
+const createInvoicePublicApiOperation: PublicApiOperationContract<CreateInvoicePublicApiInput> = {
+  id: "createInvoice",
+  method: "post",
+  path: "/invoices",
+  summary: "Create an invoice draft",
+  scope: "invoices.write",
+  permission: "invoices.write",
+  idempotency: "required",
+  successStatus: 201,
+  parameters: [idempotencyHeaderParameter],
+  responses: {
+    "201": { description: "Created invoice draft" },
+  },
+  parseInput({ body, idempotencyKey }) {
+    return {
+      teamId: requireString(body.teamId, "teamId"),
+      customerId: requireString(body.customerId, "customerId"),
+      invoiceNumber: requireString(body.invoiceNumber, "invoiceNumber"),
+      issueDate: requireString(body.issueDate, "issueDate"),
+      dueDate: optionalString(body.dueDate),
+      currency: requireString(body.currency, "currency"),
+      discountBasisPoints: optionalNumber(body.discountBasisPoints),
+      notes: optionalString(body.notes),
+      lines: requireInvoiceLines(body.lines),
+      idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+    };
+  },
+  async execute({ repository, request, input }) {
+    const result = await createDraftInvoice(repository, request, input);
 
-app.post("/api/v1/documents/uploads", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
+    return {
+      body: result,
+      status: 201,
+    };
+  },
+};
 
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "documents.write");
-    const result = await createDocumentUpload(
-      repository,
-      createPublicDocumentUrlSigner(c.env),
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
+const listDocumentsPublicApiOperation: PublicApiOperationContract<TeamScopedPublicApiInput> = {
+  id: "listDocuments",
+  method: "get",
+  path: "/documents",
+  summary: "List team documents",
+  scope: "documents.read",
+  permission: "documents.read",
+  idempotency: "none",
+  successStatus: 200,
+  parameters: [teamIdQueryParameter],
+  responses: {
+    "200": { description: "Team document list" },
+  },
+  parseInput({ context }) {
+    return {
+      teamId: requireQueryString(context, "teamId"),
+    };
+  },
+  async execute({ repository, request, input }) {
+    const workspace = await listDocuments(repository, request, { teamId: input.teamId });
+
+    return {
+      body: {
+        data: workspace.documents,
       },
-      {
-        teamId,
+    };
+  },
+};
+
+const createDocumentUploadPublicApiOperation: PublicApiOperationContract<CreateDocumentUploadPublicApiInput> =
+  {
+    id: "createDocumentUpload",
+    method: "post",
+    path: "/documents/uploads",
+    summary: "Create a signed document upload",
+    scope: "documents.write",
+    permission: "documents.write",
+    idempotency: "required",
+    successStatus: 201,
+    parameters: [idempotencyHeaderParameter],
+    responses: {
+      "201": { description: "Created signed document upload" },
+    },
+    parseInput({ body, idempotencyKey }) {
+      return {
+        teamId: requireString(body.teamId, "teamId"),
         fileName: requireString(body.fileName, "fileName"),
         contentType: requireString(body.contentType, "contentType"),
         byteSize: requirePositiveSafeInteger(body.byteSize, "byteSize"),
         checksumSha256: optionalString(body.checksumSha256),
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+        idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+      };
+    },
+    async execute({ context, repository, request, input }) {
+      const result = await createDocumentUpload(
+        repository,
+        createPublicDocumentUrlSigner(context.env),
+        request,
+        input,
+      );
+
+      return {
+        body: result,
+        status: 201,
+      };
+    },
+  };
+
+const createDocumentDownloadPublicApiOperation: PublicApiOperationContract<CreateDocumentDownloadPublicApiInput> =
+  {
+    id: "createDocumentDownload",
+    method: "post",
+    path: "/documents/:documentId/download",
+    summary: "Create a signed document download",
+    scope: "documents.read",
+    permission: "documents.read",
+    idempotency: "none",
+    successStatus: 200,
+    parameters: [documentIdPathParameter],
+    responses: {
+      "200": { description: "Created signed document download" },
+    },
+    parseInput({ context, body }) {
+      return {
+        teamId: requireString(body.teamId, "teamId"),
+        documentId: requirePathString(context, "documentId"),
+      };
+    },
+    async execute({ context, repository, request, input }) {
+      const result = await createDocumentDownload(
+        repository,
+        createPublicDocumentUrlSigner(context.env),
+        request,
+        input,
+      );
+
+      return {
+        body: result,
+      };
+    },
+  };
+
+const listInboxItemsPublicApiOperation: PublicApiOperationContract<TeamScopedPublicApiInput> = {
+  id: "listInboxItems",
+  method: "get",
+  path: "/inbox-items",
+  summary: "List team inbox items",
+  scope: "inbox.read",
+  permission: "documents.read",
+  idempotency: "none",
+  successStatus: 200,
+  parameters: [teamIdQueryParameter],
+  responses: {
+    "200": { description: "Team inbox item list" },
+  },
+  parseInput({ context }) {
+    return {
+      teamId: requireQueryString(context, "teamId"),
+    };
+  },
+  async execute({ repository, request, input }) {
+    const workspace = await listInboxItems(repository, request, { teamId: input.teamId });
+
+    return {
+      body: {
+        data: workspace.inboxItems,
       },
-    );
+    };
+  },
+};
 
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.post("/api/v1/documents/:documentId/download", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "documents.read");
-    const result = await createDocumentDownload(
-      repository,
-      createPublicDocumentUrlSigner(c.env),
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      {
-        teamId,
-        documentId: c.req.param("documentId"),
-      },
-    );
-
-    return c.json(result);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.get("/api/v1/inbox-items", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-  const teamId = c.req.query("teamId");
-
-  if (!teamId) {
-    return c.json({ error: "teamId is required" }, 400);
-  }
-
-  try {
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "documents.read");
-    const workspace = await listInboxItems(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      { teamId },
-    );
-
-    return c.json({
-      data: workspace.inboxItems,
-    });
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.post("/api/v1/inbox-items/:inboxItemId/extraction-correction", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "documents.write");
-    const result = await correctDocumentExtraction(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      {
-        teamId,
-        inboxItemId: c.req.param("inboxItemId"),
+const correctDocumentExtractionPublicApiOperation: PublicApiOperationContract<CorrectDocumentExtractionPublicApiInput> =
+  {
+    id: "correctDocumentExtraction",
+    method: "post",
+    path: "/inbox-items/:inboxItemId/extraction-correction",
+    summary: "Correct extracted document fields",
+    scope: "inbox.write",
+    permission: "documents.write",
+    idempotency: "required",
+    successStatus: 201,
+    parameters: [inboxItemIdPathParameter, idempotencyHeaderParameter],
+    responses: {
+      "201": { description: "Corrected document extraction" },
+    },
+    parseInput({ context, body, idempotencyKey }) {
+      return {
+        teamId: requireString(body.teamId, "teamId"),
+        inboxItemId: requirePathString(context, "inboxItemId"),
         fields: requireDocumentExtractionFields(body.fields),
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
-      },
-    );
+        idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+      };
+    },
+    async execute({ repository, request, input }) {
+      const result = await correctDocumentExtraction(repository, request, input);
 
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
+      return {
+        body: result,
+        status: 201,
+      };
+    },
+  };
 
-app.post("/api/v1/inbox-matches/:suggestionId/accept", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
+const acceptInboxMatchPublicApiOperation: PublicApiOperationContract<ResolveInboxMatchPublicApiInput> =
+  {
+    id: "acceptInboxMatch",
+    method: "post",
+    path: "/inbox-matches/:suggestionId/accept",
+    summary: "Accept an inbox transaction match",
+    scope: "inbox.write",
+    permission: "transactions.write",
+    idempotency: "required",
+    successStatus: 201,
+    parameters: [suggestionIdPathParameter, idempotencyHeaderParameter],
+    responses: {
+      "201": { description: "Accepted inbox transaction match" },
+    },
+    parseInput({ context, body, idempotencyKey }) {
+      return {
+        teamId: requireString(body.teamId, "teamId"),
+        suggestionId: requirePathString(context, "suggestionId"),
+        idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+      };
+    },
+    async execute({ repository, request, input }) {
+      const result = await acceptInboxMatch(repository, request, input);
 
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "transactions.write");
-    const result = await acceptInboxMatch(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      {
-        teamId,
-        suggestionId: c.req.param("suggestionId"),
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
-      },
-    );
+      return {
+        body: result,
+        status: 201,
+      };
+    },
+  };
 
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.post("/api/v1/inbox-matches/:suggestionId/reject", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "transactions.write");
-    const result = await rejectInboxMatch(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      {
-        teamId,
-        suggestionId: c.req.param("suggestionId"),
+const rejectInboxMatchPublicApiOperation: PublicApiOperationContract<ResolveInboxMatchPublicApiInput> =
+  {
+    id: "rejectInboxMatch",
+    method: "post",
+    path: "/inbox-matches/:suggestionId/reject",
+    summary: "Reject an inbox transaction match",
+    scope: "inbox.write",
+    permission: "transactions.write",
+    idempotency: "required",
+    successStatus: 201,
+    parameters: [suggestionIdPathParameter, idempotencyHeaderParameter],
+    responses: {
+      "201": { description: "Rejected inbox transaction match" },
+    },
+    parseInput({ context, body, idempotencyKey }) {
+      return {
+        teamId: requireString(body.teamId, "teamId"),
+        suggestionId: requirePathString(context, "suggestionId"),
         reason: optionalString(body.reason),
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+        idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+      };
+    },
+    async execute({ repository, request, input }) {
+      const result = await rejectInboxMatch(repository, request, input);
+
+      return {
+        body: result,
+        status: 201,
+      };
+    },
+  };
+
+const listCustomersPublicApiOperation: PublicApiOperationContract<TeamScopedPublicApiInput> = {
+  id: "listCustomers",
+  method: "get",
+  path: "/customers",
+  summary: "List team customers and contacts",
+  scope: "customers.read",
+  permission: "invoices.read",
+  idempotency: "none",
+  successStatus: 200,
+  parameters: [teamIdQueryParameter],
+  responses: {
+    "200": { description: "Team customer and contact list" },
+  },
+  parseInput({ context }) {
+    return {
+      teamId: requireQueryString(context, "teamId"),
+    };
+  },
+  async execute({ repository, request }) {
+    const billing = await listBillingWorkspace(repository, request);
+
+    return {
+      body: {
+        data: billing.customers,
+        contacts: billing.contacts,
       },
-    );
+    };
+  },
+};
 
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
+const createCustomerPublicApiOperation: PublicApiOperationContract<CreateCustomerPublicApiInput> = {
+  id: "createCustomer",
+  method: "post",
+  path: "/customers",
+  summary: "Create a customer",
+  scope: "customers.write",
+  permission: "invoices.write",
+  idempotency: "required",
+  successStatus: 201,
+  parameters: [idempotencyHeaderParameter],
+  responses: {
+    "201": { description: "Created customer" },
+  },
+  parseInput({ body, idempotencyKey }) {
+    return {
+      teamId: requireString(body.teamId, "teamId"),
+      name: requireString(body.name, "name"),
+      email: optionalString(body.email),
+      billingAddress: optionalString(body.billingAddress),
+      contactName: optionalString(body.contactName),
+      contactEmail: optionalString(body.contactEmail),
+      contactRole: optionalString(body.contactRole),
+      idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+    };
+  },
+  async execute({ repository, request, input }) {
+    const result = await createCustomer(repository, request, input);
 
-app.post("/api/v1/invoices", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
+    return {
+      body: result,
+      status: 201,
+    };
+  },
+};
 
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.write");
-    const result = await createDraftInvoice(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
+const listProductsPublicApiOperation: PublicApiOperationContract<TeamScopedPublicApiInput> = {
+  id: "listProducts",
+  method: "get",
+  path: "/products",
+  summary: "List team products",
+  scope: "products.read",
+  permission: "invoices.read",
+  idempotency: "none",
+  successStatus: 200,
+  parameters: [teamIdQueryParameter],
+  responses: {
+    "200": { description: "Team product list" },
+  },
+  parseInput({ context }) {
+    return {
+      teamId: requireQueryString(context, "teamId"),
+    };
+  },
+  async execute({ repository, request }) {
+    const billing = await listBillingWorkspace(repository, request);
+
+    return {
+      body: {
+        data: billing.products,
       },
-      {
-        teamId,
-        customerId: requireString(body.customerId, "customerId"),
-        invoiceNumber: requireString(body.invoiceNumber, "invoiceNumber"),
-        issueDate: requireString(body.issueDate, "issueDate"),
-        dueDate: optionalString(body.dueDate),
-        currency: requireString(body.currency, "currency"),
-        discountBasisPoints: optionalNumber(body.discountBasisPoints),
-        notes: optionalString(body.notes),
-        lines: requireInvoiceLines(body.lines),
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+    };
+  },
+};
+
+const createProductPublicApiOperation: PublicApiOperationContract<CreateProductPublicApiInput> = {
+  id: "createProduct",
+  method: "post",
+  path: "/products",
+  summary: "Create a product",
+  scope: "products.write",
+  permission: "invoices.write",
+  idempotency: "required",
+  successStatus: 201,
+  parameters: [idempotencyHeaderParameter],
+  responses: {
+    "201": { description: "Created product" },
+  },
+  parseInput({ body, idempotencyKey }) {
+    return {
+      teamId: requireString(body.teamId, "teamId"),
+      name: requireString(body.name, "name"),
+      type: requireProductType(body.type),
+      description: optionalString(body.description),
+      unitPrice: requireMoney(body.unitPrice, "unitPrice"),
+      defaultTaxRateBasisPoints: optionalNumber(body.defaultTaxRateBasisPoints),
+      idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+    };
+  },
+  async execute({ repository, request, input }) {
+    const result = await createProduct(repository, request, input);
+
+    return {
+      body: result,
+      status: 201,
+    };
+  },
+};
+
+const listProjectsPublicApiOperation: PublicApiOperationContract<TeamScopedPublicApiInput> = {
+  id: "listProjects",
+  method: "get",
+  path: "/projects",
+  summary: "List team projects and time entries",
+  scope: "projects.read",
+  permission: "projects.read",
+  idempotency: "none",
+  successStatus: 200,
+  parameters: [teamIdQueryParameter],
+  responses: {
+    "200": { description: "Team project workspace" },
+  },
+  parseInput({ context }) {
+    return {
+      teamId: requireQueryString(context, "teamId"),
+    };
+  },
+  async execute({ repository, request, input }) {
+    const workspace = await listProjectWorkspace(repository, request, { teamId: input.teamId });
+
+    return {
+      body: {
+        data: workspace.projects,
+        customers: workspace.customers,
+        projectMembers: workspace.projectMembers,
+        timeEntries: workspace.timeEntries,
+        report: workspace.report,
       },
-    );
+    };
+  },
+};
 
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
+const createProjectPublicApiOperation: PublicApiOperationContract<CreateProjectPublicApiInput> = {
+  id: "createProject",
+  method: "post",
+  path: "/projects",
+  summary: "Create a project",
+  scope: "projects.write",
+  permission: "projects.write",
+  idempotency: "required",
+  successStatus: 201,
+  parameters: [idempotencyHeaderParameter],
+  responses: {
+    "201": { description: "Created project" },
+  },
+  parseInput({ body, idempotencyKey }) {
+    return {
+      teamId: requireString(body.teamId, "teamId"),
+      customerId: requireString(body.customerId, "customerId"),
+      name: requireString(body.name, "name"),
+      description: optionalString(body.description),
+      billableRate: requireMoney(body.billableRate, "billableRate"),
+      idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+    };
+  },
+  async execute({ repository, request, input }) {
+    const result = await createProject(repository, request, input);
 
-app.get("/api/v1/customers", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-  const teamId = c.req.query("teamId");
+    return {
+      body: result,
+      status: 201,
+    };
+  },
+};
 
-  if (!teamId) {
-    return c.json({ error: "teamId is required" }, 400);
-  }
-
-  try {
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.read");
-    const billing = await listBillingWorkspace(repository, {
-      actor,
-      requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-      teamId,
-    });
-
-    return c.json({
-      data: billing.customers,
-      contacts: billing.contacts,
-    });
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.post("/api/v1/customers", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.write");
-    const result = await createCustomer(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      {
-        teamId,
-        name: requireString(body.name, "name"),
-        email: optionalString(body.email),
-        billingAddress: optionalString(body.billingAddress),
-        contactName: optionalString(body.contactName),
-        contactEmail: optionalString(body.contactEmail),
-        contactRole: optionalString(body.contactRole),
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
-      },
-    );
-
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.get("/api/v1/products", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-  const teamId = c.req.query("teamId");
-
-  if (!teamId) {
-    return c.json({ error: "teamId is required" }, 400);
-  }
-
-  try {
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.read");
-    const billing = await listBillingWorkspace(repository, {
-      actor,
-      requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-      teamId,
-    });
-
-    return c.json({
-      data: billing.products,
-    });
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.post("/api/v1/products", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "invoices.write");
-    const result = await createProduct(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      {
-        teamId,
-        name: requireString(body.name, "name"),
-        type: requireProductType(body.type),
-        description: optionalString(body.description),
-        unitPrice: requireMoney(body.unitPrice, "unitPrice"),
-        defaultTaxRateBasisPoints: optionalNumber(body.defaultTaxRateBasisPoints),
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
-      },
-    );
-
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.get("/api/v1/projects", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-  const teamId = c.req.query("teamId");
-
-  if (!teamId) {
-    return c.json({ error: "teamId is required" }, 400);
-  }
-
-  try {
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "projects.read");
-    const workspace = await listProjectWorkspace(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      { teamId },
-    );
-
-    return c.json({
-      data: workspace.projects,
-      customers: workspace.customers,
-      projectMembers: workspace.projectMembers,
-      timeEntries: workspace.timeEntries,
-      report: workspace.report,
-    });
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.post("/api/v1/projects", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "projects.write");
-    const result = await createProject(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      {
-        teamId,
-        customerId: requireString(body.customerId, "customerId"),
-        name: requireString(body.name, "name"),
-        description: optionalString(body.description),
-        billableRate: requireMoney(body.billableRate, "billableRate"),
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
-      },
-    );
-
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.post("/api/v1/time-entries", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "projects.write");
-    const result = await createTimeEntry(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      {
-        teamId,
+const createTimeEntryPublicApiOperation: PublicApiOperationContract<CreateTimeEntryPublicApiInput> =
+  {
+    id: "createTimeEntry",
+    method: "post",
+    path: "/time-entries",
+    summary: "Create a time entry",
+    scope: "time_entries.write",
+    permission: "projects.write",
+    idempotency: "required",
+    successStatus: 201,
+    parameters: [idempotencyHeaderParameter],
+    responses: {
+      "201": { description: "Created time entry" },
+    },
+    parseInput({ body, idempotencyKey }) {
+      return {
+        teamId: requireString(body.teamId, "teamId"),
         projectId: requireString(body.projectId, "projectId"),
         actorId: optionalString(body.actorId),
         description: requireString(body.description, "description"),
@@ -814,76 +1126,114 @@ app.post("/api/v1/time-entries", async (c) => {
         durationMinutes: requireSafeInteger(body.durationMinutes, "durationMinutes"),
         billableStatus: body.billableStatus === "non_billable" ? "non_billable" : "billable",
         billableRate: optionalMoney(body.billableRate),
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
-      },
-    );
+        idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+      };
+    },
+    async execute({ repository, request, input }) {
+      const result = await createTimeEntry(repository, request, input);
 
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
+      return {
+        body: result,
+        status: 201,
+      };
+    },
+  };
 
-app.get("/api/v1/reports/overview", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-  const teamId = c.req.query("teamId");
+const reportOverviewPublicApiOperation: PublicApiOperationContract<ReportOverviewPublicApiInput> = {
+  id: "readReportOverview",
+  method: "get",
+  path: "/reports/overview",
+  summary: "Read business report overview",
+  scope: "reports.read",
+  permission: "transactions.read",
+  idempotency: "none",
+  successStatus: 200,
+  parameters: [teamIdQueryParameter, optionalFromQueryParameter, optionalToQueryParameter],
+  responses: {
+    "200": { description: "Business report overview" },
+  },
+  parseInput({ context }) {
+    return {
+      teamId: requireQueryString(context, "teamId"),
+      from: optionalString(context.req.query("from")),
+      to: optionalString(context.req.query("to")),
+    };
+  },
+  async execute({ repository, request, input }) {
+    const workspace = await listBusinessReport(repository, request, input);
 
-  if (!teamId) {
-    return c.json({ error: "teamId is required" }, 400);
-  }
+    return {
+      body: workspace,
+    };
+  },
+};
 
-  try {
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "transactions.read");
-    const workspace = await listBusinessReport(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      {
-        teamId,
-        from: optionalString(c.req.query("from")),
-        to: optionalString(c.req.query("to")),
-      },
-    );
-
-    return c.json(workspace);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
-});
-
-app.post("/api/v1/webhook-subscriptions", async (c) => {
-  const repository = new DrizzleTransactionReviewRepository();
-
-  try {
-    const body = await c.req.json<Record<string, unknown>>();
-    const teamId = requireString(body.teamId, "teamId");
-    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "webhooks.manage");
-    const result = await createWebhookSubscription(
-      repository,
-      {
-        actor,
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
-        teamId,
-      },
-      {
-        teamId,
+const createWebhookSubscriptionPublicApiOperation: PublicApiOperationContract<CreateWebhookSubscriptionPublicApiInput> =
+  {
+    id: "createWebhookSubscription",
+    method: "post",
+    path: "/webhook-subscriptions",
+    summary: "Create a webhook subscription",
+    scope: "webhooks.manage",
+    permission: "webhooks.manage",
+    idempotency: "required",
+    successStatus: 201,
+    parameters: [idempotencyHeaderParameter],
+    responses: {
+      "201": { description: "Created webhook subscription" },
+    },
+    parseInput({ body, idempotencyKey }) {
+      return {
+        teamId: requireString(body.teamId, "teamId"),
         url: requireString(body.url, "url"),
         eventTypes: Array.isArray(body.eventTypes)
           ? body.eventTypes.filter(
               (eventType): eventType is string => typeof eventType === "string",
             )
           : [],
-        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
-      },
-    );
+        idempotencyKey: requireParsedIdempotencyKey(idempotencyKey()),
+      };
+    },
+    async execute({ repository, request, input }) {
+      const result = await createWebhookSubscription(repository, request, input);
 
-    return c.json(result, 201);
-  } catch (error) {
-    return publicApiError(c, error);
-  }
+      return {
+        body: result,
+        status: 201,
+      };
+    },
+  };
+
+const publicApiOperationContracts = [
+  listTransactionsPublicApiOperation,
+  createTransactionPublicApiOperation,
+  listBankAccountsPublicApiOperation,
+  listInvoicesPublicApiOperation,
+  createInvoicePublicApiOperation,
+  listDocumentsPublicApiOperation,
+  createDocumentUploadPublicApiOperation,
+  createDocumentDownloadPublicApiOperation,
+  listInboxItemsPublicApiOperation,
+  correctDocumentExtractionPublicApiOperation,
+  acceptInboxMatchPublicApiOperation,
+  rejectInboxMatchPublicApiOperation,
+  listCustomersPublicApiOperation,
+  createCustomerPublicApiOperation,
+  listProductsPublicApiOperation,
+  createProductPublicApiOperation,
+  listProjectsPublicApiOperation,
+  createProjectPublicApiOperation,
+  createTimeEntryPublicApiOperation,
+  reportOverviewPublicApiOperation,
+  createWebhookSubscriptionPublicApiOperation,
+] as const;
+
+for (const operation of publicApiOperationContracts) {
+  registerPublicApiOperation(operation);
+}
+
+app.get("/api/v1/openapi.json", (c) => {
+  return c.json(publicApiOpenApiDocument(c.req.url));
 });
 
 app.post("/api/webhooks/banking/sandbox", async (c) => {
@@ -898,16 +1248,17 @@ app.post("/api/webhooks/banking/sandbox", async (c) => {
     return c.json({ error: "Invalid signature" }, 401);
   }
 
-  const repository = new DrizzleTransactionReviewRepository();
+  const repository = new DrizzleDawnRepository();
 
   try {
     const result = await requestBankConnectionSyncFromWebhook(
       repository,
-      {
+      resolveScopedActorAppRequest({
         actor: { id: "provider:sandbox-bank", type: "provider_webhook" },
-        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        source: "provider_webhook",
+        requestId: c.req.header("x-request-id"),
         teamId: verification.teamId,
-      },
+      }),
       {
         teamId: verification.teamId,
         verification,
@@ -972,10 +1323,83 @@ function safeHeaderFileName(fileName: string) {
   return fileName.replace(/["\r\n]/g, "_");
 }
 
-async function requirePublicApiActor(
+class PublicApiHttpError extends Error {
+  constructor(
+    readonly status: 400 | 401 | 403 | 404 | 409,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+function registerPublicApiOperation<TInput extends { teamId: string }>(
+  operation: PublicApiOperationContract<TInput>,
+) {
+  const routePath = `/api/v1${operation.path}`;
+  const handler = (c: HonoContext<ServerHonoEnv>) => handlePublicApiOperation(c, operation);
+
+  if (operation.method === "get") {
+    app.get(routePath, handler);
+    return;
+  }
+
+  app.post(routePath, handler);
+}
+
+async function handlePublicApiOperation<TInput extends { teamId: string }>(
+  c: HonoContext<ServerHonoEnv>,
+  operation: PublicApiOperationContract<TInput>,
+) {
+  const repository = new DrizzleDawnRepository();
+
+  try {
+    const body = operation.method === "post" ? await c.req.json<Record<string, unknown>>() : {};
+    let parsedIdempotencyKey: string | null | undefined;
+    const idempotencyKey = () => {
+      if (parsedIdempotencyKey === undefined) {
+        parsedIdempotencyKey =
+          operation.idempotency === "required"
+            ? idempotencyKeyFromRequest(c.req.raw.headers, body)
+            : null;
+      }
+
+      return parsedIdempotencyKey;
+    };
+    const input = operation.parseInput({
+      context: c,
+      body,
+      idempotencyKey,
+    });
+    const requestIdempotencyKey = idempotencyKey();
+    const request = await requirePublicApiRequest(
+      c.req.raw.headers,
+      repository,
+      operation.scope,
+      operation.permission,
+      {
+        teamId: input.teamId,
+        idempotencyKey: requestIdempotencyKey,
+      },
+    );
+    const response = await operation.execute({
+      context: c,
+      repository,
+      request,
+      input,
+    });
+
+    return c.json(response.body, response.status ?? operation.successStatus);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+}
+
+async function requirePublicApiRequest(
   headers: Headers,
-  repository: DrizzleTransactionReviewRepository,
+  repository: DrizzleDawnRepository,
+  scope: PublicApiScope,
   permission: PublicApiPermission,
+  input: { teamId: string; idempotencyKey?: string | null },
 ) {
   const authorization = headers.get("authorization");
   const token = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : null;
@@ -986,11 +1410,21 @@ async function requirePublicApiActor(
 
   const resolved = await resolvePublicApiKey(repository, token);
 
-  if (!resolved.actor.permissions?.includes(permission)) {
+  if (!resolved.apiKey.scopes.includes(scope)) {
     throw new AppError("FORBIDDEN", "API key scope does not allow this operation");
   }
 
-  return resolved.actor;
+  if (!resolved.actor.permissions?.includes(permission)) {
+    throw new AppError("FORBIDDEN", "API key permission does not allow this operation");
+  }
+
+  return resolveScopedActorAppRequest({
+    actor: resolved.actor,
+    source: "api_key",
+    requestId: headers.get("x-request-id"),
+    teamId: input.teamId,
+    idempotencyKey: input.idempotencyKey,
+  });
 }
 
 function idempotencyKeyFromRequest(headers: Headers, body: Record<string, unknown>) {
@@ -1001,6 +1435,34 @@ function idempotencyKeyFromRequest(headers: Headers, body: Record<string, unknow
   }
 
   return key.trim();
+}
+
+function requireParsedIdempotencyKey(value: string | null) {
+  if (!value) {
+    throw new AppError("CONFLICT", "Idempotency-Key header is required");
+  }
+
+  return value;
+}
+
+function requireQueryString(c: HonoContext<ServerHonoEnv>, name: string) {
+  const value = c.req.query(name);
+
+  if (!value) {
+    throw new PublicApiHttpError(400, `${name} is required`);
+  }
+
+  return value;
+}
+
+function requirePathString(c: HonoContext<ServerHonoEnv>, name: string) {
+  const value = c.req.param(name);
+
+  if (!value) {
+    throw new PublicApiHttpError(400, `${name} is required`);
+  }
+
+  return value;
 }
 
 function requireString(value: unknown, name: string) {
@@ -1146,6 +1608,10 @@ function createPublicDocumentUrlSigner(bindings: DawnCloudflareBindings) {
 }
 
 function publicApiError(c: HonoContext<ServerHonoEnv>, error: unknown) {
+  if (error instanceof PublicApiHttpError) {
+    return c.json({ error: error.message }, error.status);
+  }
+
   if (error instanceof AppError) {
     return c.json({ error: error.message }, appErrorStatus(error));
   }
@@ -1153,7 +1619,36 @@ function publicApiError(c: HonoContext<ServerHonoEnv>, error: unknown) {
   return c.json({ error: errorMessage(error) }, 500);
 }
 
-export function publicApiOpenApiDocument(requestUrl: string) {
+function publicApiOpenApiPaths() {
+  const paths: Record<string, Record<string, unknown>> = {};
+
+  for (const operation of publicApiOperationContracts) {
+    const path = publicApiOpenApiPath(operation.path);
+    paths[path] ??= {};
+    paths[path][operation.method] = publicApiOpenApiOperation(operation);
+  }
+
+  return paths;
+}
+
+function publicApiOpenApiPath(path: string) {
+  return path.replace(/:([A-Za-z0-9_]+)/g, "{$1}");
+}
+
+function publicApiOpenApiOperation<TInput extends { teamId: string }>(
+  operation: PublicApiOperationContract<TInput>,
+) {
+  return {
+    operationId: operation.id,
+    summary: operation.summary,
+    parameters: operation.parameters,
+    responses: operation.responses,
+    "x-required-scope": operation.scope,
+    "x-idempotency": operation.idempotency,
+  };
+}
+
+export function publicApiOpenApiDocument(requestUrl: string): PublicApiOpenApiDocument {
   const url = new URL(requestUrl);
   const origin = `${url.protocol}//${url.host}`;
 
@@ -1173,292 +1668,13 @@ export function publicApiOpenApiDocument(requestUrl: string) {
       },
     },
     security: [{ bearerApiKey: [] }],
-    paths: {
-      "/transactions": {
-        get: {
-          summary: "List team transactions",
-          parameters: [{ name: "teamId", in: "query", required: true }],
-        },
-        post: {
-          summary: "Create a ledger transaction",
-          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
-        },
-      },
-      "/invoices": {
-        get: {
-          summary: "List team invoices",
-          parameters: [{ name: "teamId", in: "query", required: true }],
-        },
-        post: {
-          summary: "Create an invoice draft",
-          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
-        },
-      },
-      "/documents": {
-        get: {
-          summary: "List team documents",
-          parameters: [{ name: "teamId", in: "query", required: true }],
-        },
-      },
-      "/documents/uploads": {
-        post: {
-          summary: "Create a signed document upload",
-          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
-        },
-      },
-      "/documents/{documentId}/download": {
-        post: {
-          summary: "Create a signed document download",
-          parameters: [{ name: "documentId", in: "path", required: true }],
-        },
-      },
-      "/inbox-items": {
-        get: {
-          summary: "List team inbox items",
-          parameters: [{ name: "teamId", in: "query", required: true }],
-        },
-      },
-      "/inbox-items/{inboxItemId}/extraction-correction": {
-        post: {
-          summary: "Correct extracted document fields",
-          parameters: [
-            { name: "inboxItemId", in: "path", required: true },
-            { name: "Idempotency-Key", in: "header", required: true },
-          ],
-        },
-      },
-      "/inbox-matches/{suggestionId}/accept": {
-        post: {
-          summary: "Accept an inbox transaction match",
-          parameters: [
-            { name: "suggestionId", in: "path", required: true },
-            { name: "Idempotency-Key", in: "header", required: true },
-          ],
-        },
-      },
-      "/inbox-matches/{suggestionId}/reject": {
-        post: {
-          summary: "Reject an inbox transaction match",
-          parameters: [
-            { name: "suggestionId", in: "path", required: true },
-            { name: "Idempotency-Key", in: "header", required: true },
-          ],
-        },
-      },
-      "/customers": {
-        get: {
-          summary: "List team customers and contacts",
-          parameters: [{ name: "teamId", in: "query", required: true }],
-        },
-        post: {
-          summary: "Create a customer",
-          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
-        },
-      },
-      "/products": {
-        get: {
-          summary: "List team products",
-          parameters: [{ name: "teamId", in: "query", required: true }],
-        },
-        post: {
-          summary: "Create a product",
-          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
-        },
-      },
-      "/projects": {
-        get: {
-          summary: "List team projects and time entries",
-          parameters: [{ name: "teamId", in: "query", required: true }],
-        },
-        post: {
-          summary: "Create a project",
-          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
-        },
-      },
-      "/time-entries": {
-        post: {
-          summary: "Create a time entry",
-          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
-        },
-      },
-      "/reports/overview": {
-        get: {
-          summary: "Read business report overview",
-          parameters: [
-            { name: "teamId", in: "query", required: true },
-            { name: "from", in: "query", required: false },
-            { name: "to", in: "query", required: false },
-          ],
-        },
-      },
-      "/webhook-subscriptions": {
-        post: {
-          summary: "Create a webhook subscription",
-          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
-        },
-      },
-    },
+    paths: publicApiOpenApiPaths(),
   };
-}
-
-async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnCloudflareBindings) {
-  if (message.body.type === "sync.invalidate") {
-    await publishTenantSyncInvalidation(env, message.body);
-  }
-
-  if (message.body.type === "document.extract") {
-    await processDocumentExtractionJob({
-      repository: new DrizzleTransactionReviewRepository(),
-      storage: createR2DocumentObjectStorage(env.DAWN_DOCUMENTS),
-      message: message.body,
-    });
-  }
-
-  if (message.body.type === "invoice.recurring.generate") {
-    await generateRecurringInvoice(new DrizzleTransactionReviewRepository(), {
-      teamId: message.body.teamId,
-      scheduleId: message.body.scheduleId,
-      runAt: message.body.runAt,
-      idempotencyKey: message.body.idempotencyKey,
-    });
-  }
-
-  if (message.body.type === "insights.weekly.generate") {
-    await generateWeeklyInsights(
-      new DrizzleTransactionReviewRepository(),
-      createMockInsightGenerationProvider(),
-      {
-        teamId: message.body.teamId,
-        periodStart: message.body.periodStart,
-        periodEnd: message.body.periodEnd,
-        idempotencyKey: message.body.idempotencyKey,
-      },
-    );
-  }
-
-  if (message.body.type === "automation.run") {
-    await runAutomationsForOutboxEvent(
-      new DrizzleTransactionReviewRepository(),
-      {
-        actor: { id: "system:automation", type: "user" },
-        requestId: message.body.idempotencyKey,
-        teamId: message.body.teamId,
-      },
-      {
-        teamId: message.body.teamId,
-        outboxEventId: message.body.sourceOutboxEventId,
-        enforceCallerPermission: false,
-      },
-    );
-  }
-
-  if (message.body.type === "bank.sync") {
-    await syncBankConnection(
-      new DrizzleTransactionReviewRepository(),
-      requireBankingProvider(message.body.provider),
-      {
-        actor: { id: "system:bank-sync", type: "system" },
-        requestId: message.body.idempotencyKey,
-        teamId: message.body.teamId,
-      },
-      {
-        teamId: message.body.teamId,
-        connectionId: message.body.connectionId,
-        idempotencyKey: message.body.idempotencyKey,
-        enforceCallerPermission: false,
-      },
-    );
-  }
-
-  if (message.body.type === "webhook.deliver") {
-    const result = await deliverWebhooksForOutboxEvent(
-      new DrizzleTransactionReviewRepository(),
-      createFetchWebhookDeliveryProvider(),
-      {
-        teamId: message.body.teamId,
-        outboxEventId: message.body.sourceOutboxEventId,
-      },
-    );
-
-    if (result.failed > 0) {
-      throw new Error(`${result.failed} webhook deliveries failed`);
-    }
-  }
-
-  if (message.body.type === "team_data.export") {
-    await processTeamDataExportJob({
-      repository: new DrizzleTransactionReviewRepository(),
-      storage: createR2DocumentObjectStorage(env.DAWN_DOCUMENTS),
-      message: message.body,
-    });
-  }
-
-  if (message.body.type === "team_data.delete") {
-    await new DrizzleTransactionReviewRepository().appendAuditEvent({
-      teamId: message.body.teamId,
-      actorId: "system:data-workflow",
-      requestId: message.body.idempotencyKey,
-      action: "team_data.deletion_job_gated",
-      entityType: "team",
-      entityId: message.body.teamId,
-      metadata: {
-        sourceOutboxEventId: message.body.sourceOutboxEventId,
-        nextStep: "retention_provider_r2_cleanup_confirmation",
-      },
-    });
-  }
-}
-
-function createFetchWebhookDeliveryProvider(): WebhookDeliveryProvider {
-  return {
-    async deliver(input) {
-      const response = await fetch(input.url, {
-        method: "POST",
-        headers: input.headers,
-        body: JSON.stringify(input.body),
-      });
-
-      return {
-        status: response.status,
-        body: await response.text(),
-      };
-    },
-  };
-}
-
-function requireBankingProvider(providerName: string): BankingProvider {
-  const providers = [
-    createMockBankingProvider(),
-    createSandboxBankingProvider({
-      appUrl: env.BETTER_AUTH_URL,
-      webhookSecret: env.BETTER_AUTH_SECRET,
-    }),
-  ];
-  const provider = providers.find((candidate) => candidate.provider === providerName);
-
-  if (!provider) {
-    throw new Error(`Unsupported banking provider: ${providerName}`);
-  }
-
-  return provider;
 }
 
 export default {
   fetch: app.fetch.bind(app),
   async queue(batch, env) {
-    for (const message of batch.messages) {
-      try {
-        await handleQueueMessage(message, env);
-        message.ack();
-      } catch (error) {
-        logServerError(error, {
-          operation: message.body.type,
-          requestId: message.body.idempotencyKey,
-          teamId: message.body.teamId,
-          actorType: "system",
-        });
-        message.retry();
-      }
-    }
+    await handleDawnWorkerQueueBatch(batch, env);
   },
 } satisfies ExportedHandler<DawnCloudflareBindings, DawnQueueMessage>;

@@ -14,13 +14,22 @@ describe("OAuth authorization route helpers", () => {
         teamId: "team_1",
         appId: "app_1",
         redirectUri: "https://partner.example.com/callback",
-        scope: "transactions.read documents.write invoices.read projects.read unknown.scope",
+        scope:
+          "transactions.read bank_accounts.read inbox.write customers.read products.write reports.read time_entries.write unknown.scope",
       }),
     ).toEqual({
       teamId: "team_1",
       appId: "app_1",
       redirectUri: "https://partner.example.com/callback",
-      scopes: ["transactions.read", "documents.write", "invoices.read", "projects.read"],
+      scopes: [
+        "transactions.read",
+        "bank_accounts.read",
+        "inbox.write",
+        "customers.read",
+        "products.write",
+        "reports.read",
+        "time_entries.write",
+      ],
     });
   });
 

@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { TransactionSyncRecord } from "@dawn/sync";
 import {
   createOptimisticTransactionReview,
+  createTransactionSyncSubscriptionUrl,
   isTransactionSyncInvalidationEvent,
   transactionSyncCollection,
   transactionSyncRecordsFromChanges,
@@ -74,7 +75,12 @@ export function useTransactionSync(teamId?: string) {
 
     const connect = () => {
       setRealtimeStatus((status) => (status === "idle" ? "connecting" : "reconnecting"));
-      socket = new WebSocket(transactionSyncSubscriptionUrl(teamId));
+      socket = new WebSocket(
+        createTransactionSyncSubscriptionUrl({
+          baseUrl: env.VITE_SERVER_URL,
+          teamId,
+        }),
+      );
 
       socket.addEventListener("open", () => {
         setRealtimeStatus("connected");
@@ -143,15 +149,6 @@ function parseRealtimeMessage(data: string) {
   } catch {
     return null;
   }
-}
-
-function transactionSyncSubscriptionUrl(teamId: string) {
-  const url = new URL(env.VITE_SERVER_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = "/sync/transactions/subscribe";
-  url.search = new URLSearchParams({ teamId }).toString();
-
-  return url.toString();
 }
 
 async function reviewTransactionOptimistically(

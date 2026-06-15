@@ -9,6 +9,7 @@ export const outboxDispatchRetryPolicy = {
   maxAttempts: 8,
   initialDelaySeconds: 30,
   maxDelaySeconds: 3_600,
+  leaseSeconds: 300,
 } as const;
 
 export const outboxEventForJobSchema = z.object({
@@ -35,7 +36,7 @@ export const outboxDispatchJobSchema = z.object({
 export const syncInvalidationJobSchema = z.object({
   type: z.literal("sync.invalidate"),
   teamId: z.string().min(1),
-  collection: z.literal("transactions"),
+  collection: z.enum(["transactions", "projects"]),
   cursor: z.string().nullable(),
   changedIds: z.array(z.string().min(1)),
   sourceOutboxEventId: z.string().min(1),
@@ -136,6 +137,28 @@ export type WebhookDeliveryJob = z.infer<typeof webhookDeliveryJobSchema>;
 export type TeamDataExportJob = z.infer<typeof teamDataExportJobSchema>;
 export type TeamDataDeletionJob = z.infer<typeof teamDataDeletionJobSchema>;
 export type DawnQueueMessage = z.infer<typeof dawnQueueMessageSchema>;
+export type DawnQueueMessageType = DawnQueueMessage["type"];
+export type DawnQueueMessageForType<Type extends DawnQueueMessageType> = Extract<
+  DawnQueueMessage,
+  { type: Type }
+>;
+export type DawnQueueMessageHandlers = {
+  [Type in DawnQueueMessageType]: (message: DawnQueueMessageForType<Type>) => Promise<void> | void;
+};
+export type DawnQueueMessageHandlerRegistry = {
+  handle(message: DawnQueueMessage): Promise<void>;
+};
+
+export function createDawnQueueMessageHandlerRegistry(
+  handlers: DawnQueueMessageHandlers,
+): DawnQueueMessageHandlerRegistry {
+  return {
+    async handle(message) {
+      const handler = handlers[message.type] as (message: DawnQueueMessage) => Promise<void> | void;
+      await handler(message);
+    },
+  };
+}
 
 export function createOutboxDispatchJob(event: OutboxEventForJob): OutboxDispatchJob {
   const parsed = outboxEventForJobSchema.parse(event);
@@ -194,6 +217,24 @@ export function outboxDispatchIdempotencyKey(outboxEventId: string, attempt: num
 }
 
 function createSyncInvalidationJob(event: OutboxEventForJob): SyncInvalidationJob | null {
+  if (event.type === "project.created") {
+    const changedIds = projectIdsForEvent(event);
+
+    if (changedIds.length === 0) {
+      return null;
+    }
+
+    return {
+      type: "sync.invalidate",
+      teamId: event.teamId,
+      collection: "projects",
+      cursor: null,
+      changedIds,
+      sourceOutboxEventId: event.id,
+      idempotencyKey: `sync:projects:${event.id}`,
+    };
+  }
+
   if (
     event.type !== "transaction.created" &&
     event.type !== "transaction.transfer_pair.created" &&
@@ -374,6 +415,20 @@ function transactionIdsForEvent(event: OutboxEventForJob) {
   if (Array.isArray(event.payload.transactionIds)) {
     return event.payload.transactionIds.filter(
       (transactionId): transactionId is string => typeof transactionId === "string",
+    );
+  }
+
+  return [];
+}
+
+function projectIdsForEvent(event: OutboxEventForJob) {
+  if (typeof event.payload.projectId === "string") {
+    return [event.payload.projectId];
+  }
+
+  if (Array.isArray(event.payload.projectIds)) {
+    return event.payload.projectIds.filter(
+      (projectId): projectId is string => typeof projectId === "string",
     );
   }
 

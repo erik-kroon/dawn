@@ -11,6 +11,7 @@ import {
   connectIntegration,
   createDeterministicInvoicePdfRenderer,
   createBankConnectionSession,
+  createBankingProviderRegistry,
   connectMockBankConnection,
   createApiKey,
   createCustomer,
@@ -48,6 +49,7 @@ import {
   listBusinessReport,
   listOperationsWorkspace,
   listProjectWorkspace,
+  listProjectSyncCollection,
   listTeamDirectory,
   listTeams,
   listTransactionSyncCollection,
@@ -79,7 +81,8 @@ import {
   updateTeamMemberRole,
 } from "@dawn/app";
 import { RateLimitError } from "@dawn/app/rate-limit";
-import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
+import { DrizzleDawnRepository } from "@dawn/db/dawn-repository";
+import { publicApiScopes } from "@dawn/domain";
 import { env } from "@dawn/env/server";
 import {
   createMockBankingProvider,
@@ -93,11 +96,12 @@ import {
 import { z } from "zod";
 
 import { protectedProcedure, publicProcedure } from "../index";
+import { appRequestFromSession } from "../context";
 import { createDocumentUrlSigner } from "../document-url";
 import { enforceAssistantRateLimit } from "../rate-limit";
 
 export type AppRouterDependencies = {
-  transactionReviewRepository: DawnRepository;
+  dawnRepository: DawnRepository;
   bankingProviders: readonly BankingProvider[];
   integrationProviders: readonly IntegrationProvider[];
   documentUrlSigner: DocumentUrlSigner;
@@ -195,17 +199,7 @@ const runAutomationForOutboxEventInput = z.object({
   outboxEventId: z.string().min(1),
 });
 
-const publicApiScopeInput = z.enum([
-  "transactions.read",
-  "transactions.write",
-  "documents.read",
-  "documents.write",
-  "invoices.read",
-  "invoices.write",
-  "projects.read",
-  "projects.write",
-  "webhooks.manage",
-]);
+const publicApiScopeInput = z.enum(publicApiScopes);
 
 const developerWorkspaceInput = z
   .object({
@@ -606,7 +600,7 @@ const teamContextInput = z
   })
   .optional();
 
-const transactionSyncInput = z
+const syncCollectionInput = z
   .object({
     teamId: z.string().min(1).optional(),
     cursor: z.iso.datetime().nullable().optional(),
@@ -650,22 +644,9 @@ function mapAppError(error: unknown): never {
   throw error;
 }
 
-function requireBankingProvider(
-  providers: readonly BankingProvider[],
-  providerName?: string | null,
-): BankingProvider {
-  const provider = providers.find((candidate) => candidate.provider === providerName);
-
-  if (!provider) {
-    throw new AppError("NOT_FOUND", "Bank provider not found");
-  }
-
-  return provider;
-}
-
 function createDefaultDependencies(): AppRouterDependencies {
   return {
-    transactionReviewRepository: new DrizzleTransactionReviewRepository(),
+    dawnRepository: new DrizzleDawnRepository(),
     bankingProviders: [
       createMockBankingProvider(),
       createSandboxBankingProvider({
@@ -690,8 +671,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     integrationProviders,
     invoiceEmailDeliveryProvider,
     invoicePdfRenderer,
-    transactionReviewRepository,
+    dawnRepository,
   } = dependencies;
+  const bankingProviderRegistry = createBankingProviderRegistry(bankingProviders);
 
   return {
     healthCheck: publicProcedure.handler(() => {
@@ -700,40 +682,27 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     teams: {
       list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
         try {
-          return await listTeams(transactionReviewRepository, {
-            actor: { id: context.session.user.id, type: "user" },
-            requestId: context.requestId,
-            teamId: input?.teamId,
-          });
+          return await listTeams(
+            dawnRepository,
+            appRequestFromSession(context, { teamId: input?.teamId }),
+          );
         } catch (error) {
           mapAppError(error);
         }
       }),
       create: protectedProcedure.input(createTeamInput).handler(async ({ context, input }) => {
         try {
-          return await createTeam(
-            transactionReviewRepository,
-            {
-              actor: { id: context.session.user.id, type: "user" },
-              requestId: context.requestId,
-            },
-            input,
-          );
+          return await createTeam(dawnRepository, appRequestFromSession(context), input);
         } catch (error) {
           mapAppError(error);
         }
       }),
       directory: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
         try {
-          return await listTeamDirectory(transactionReviewRepository, {
-            actor: {
-              id: context.session.user.id,
-              type: "user",
-              email: context.session.user.email,
-            },
-            requestId: context.requestId,
-            teamId: input?.teamId,
-          });
+          return await listTeamDirectory(
+            dawnRepository,
+            appRequestFromSession(context, { teamId: input?.teamId }),
+          );
         } catch (error) {
           mapAppError(error);
         }
@@ -743,16 +712,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await inviteTeamMember(
-              transactionReviewRepository,
-              {
-                actor: {
-                  id: context.session.user.id,
-                  type: "user",
-                  email: context.session.user.email,
-                },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -763,18 +724,7 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .input(acceptTeamInviteInput)
         .handler(async ({ context, input }) => {
           try {
-            return await acceptTeamInvite(
-              transactionReviewRepository,
-              {
-                actor: {
-                  id: context.session.user.id,
-                  type: "user",
-                  email: context.session.user.email,
-                },
-                requestId: context.requestId,
-              },
-              input,
-            );
+            return await acceptTeamInvite(dawnRepository, appRequestFromSession(context), input);
           } catch (error) {
             mapAppError(error);
           }
@@ -784,16 +734,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await updateTeamMemberRole(
-              transactionReviewRepository,
-              {
-                actor: {
-                  id: context.session.user.id,
-                  type: "user",
-                  email: context.session.user.email,
-                },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -804,11 +746,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     transactionReview: {
       list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
         try {
-          return await listTransactionReviewWorkspace(transactionReviewRepository, {
-            actor: { id: context.session.user.id, type: "user" },
-            requestId: context.requestId,
-            teamId: input?.teamId,
-          });
+          return await listTransactionReviewWorkspace(
+            dawnRepository,
+            appRequestFromSession(context, { teamId: input?.teamId }),
+          );
         } catch (error) {
           mapAppError(error);
         }
@@ -818,12 +759,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await reviewTransaction(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -833,16 +770,25 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     },
     sync: {
       transactions: protectedProcedure
-        .input(transactionSyncInput)
+        .input(syncCollectionInput)
         .handler(async ({ context, input }) => {
           try {
             return await listTransactionSyncCollection(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input?.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input?.teamId }),
+              { teamId: input?.teamId, cursor: input?.cursor ?? null },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      projects: protectedProcedure
+        .input(syncCollectionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listProjectSyncCollection(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input?.teamId }),
               { teamId: input?.teamId, cursor: input?.cursor ?? null },
             );
           } catch (error) {
@@ -854,12 +800,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
       summary: protectedProcedure.input(ledgerSummaryInput).handler(async ({ context, input }) => {
         try {
           return await listLedgerSummary(
-            transactionReviewRepository,
-            {
-              actor: { id: context.session.user.id, type: "user" },
-              requestId: context.requestId,
-              teamId: input?.teamId,
-            },
+            dawnRepository,
+            appRequestFromSession(context, { teamId: input?.teamId }),
             input,
           );
         } catch (error) {
@@ -871,12 +813,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createLedgerTransaction(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 categoryId: input.categoryId ?? null,
@@ -898,12 +836,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createLedgerCounterparty(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -915,12 +849,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createTransactionTag(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -932,12 +862,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createLedgerTransferPair(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -951,12 +877,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await listBusinessReport(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input?.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input?.teamId }),
               {
                 teamId: input?.teamId,
                 from: input?.from ?? null,
@@ -973,11 +895,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .input(assistantWorkspaceInput)
         .handler(async ({ context, input }) => {
           try {
-            return await listAssistantWorkspace(transactionReviewRepository, {
-              actor: { id: context.session.user.id, type: "user" },
-              requestId: context.requestId,
-              teamId: input?.teamId,
-            });
+            return await listAssistantWorkspace(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input?.teamId }),
+            );
           } catch (error) {
             mapAppError(error);
           }
@@ -987,12 +908,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await getAssistantConversation(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 teamId: input.teamId,
                 threadId: input.threadId,
@@ -1009,12 +926,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             teamId: input.teamId,
           });
           return await sendAssistantMessage(
-            transactionReviewRepository,
-            {
-              actor: { id: context.session.user.id, type: "user" },
-              requestId: context.requestId,
-              teamId: input.teamId,
-            },
+            dawnRepository,
+            appRequestFromSession(context, { teamId: input.teamId }),
             {
               teamId: input.teamId,
               threadId: input.threadId ?? null,
@@ -1030,14 +943,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await approveAssistantAction(
-              transactionReviewRepository,
+              dawnRepository,
               invoicePdfRenderer,
               invoiceEmailDeliveryProvider,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1049,12 +958,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await rejectAssistantAction(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 reason: input.reason ?? null,
@@ -1070,11 +975,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .input(automationWorkspaceInput)
         .handler(async ({ context, input }) => {
           try {
-            return await listAutomationWorkspace(transactionReviewRepository, {
-              actor: { id: context.session.user.id, type: "user" },
-              requestId: context.requestId,
-              teamId: input?.teamId,
-            });
+            return await listAutomationWorkspace(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input?.teamId }),
+            );
           } catch (error) {
             mapAppError(error);
           }
@@ -1084,12 +988,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createAutomationRule(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1101,12 +1001,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await runAutomationsForOutboxEvent(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1119,11 +1015,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .input(developerWorkspaceInput)
         .handler(async ({ context, input }) => {
           try {
-            return await listDeveloperWorkspace(transactionReviewRepository, {
-              actor: { id: context.session.user.id, type: "user" },
-              requestId: context.requestId,
-              teamId: input?.teamId,
-            });
+            return await listDeveloperWorkspace(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input?.teamId }),
+            );
           } catch (error) {
             mapAppError(error);
           }
@@ -1133,12 +1028,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createApiKey(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1150,12 +1041,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createOAuthApp(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1167,12 +1054,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await previewOAuthConsent(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1184,12 +1067,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await grantOAuthConsent(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1201,12 +1080,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createWebhookSubscription(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1220,12 +1095,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await listOperationsWorkspace(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input?.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input?.teamId }),
               {
                 teamId: input?.teamId,
                 limit: input?.limit,
@@ -1241,12 +1112,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await requestTeamDataExport(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1258,12 +1125,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await requestTeamDataDeletion(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1275,13 +1138,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
       list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
         try {
           return await listBankConnections(
-            transactionReviewRepository,
-            bankingProviders,
-            {
-              actor: { id: context.session.user.id, type: "user" },
-              requestId: context.requestId,
-              teamId: input?.teamId,
-            },
+            dawnRepository,
+            bankingProviderRegistry,
+            appRequestFromSession(context, { teamId: input?.teamId }),
             input,
           );
         } catch (error) {
@@ -1293,13 +1152,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await connectMockBankConnection(
-              transactionReviewRepository,
-              requireBankingProvider(bankingProviders, "mock-bank"),
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              bankingProviderRegistry,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1311,13 +1166,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createBankConnectionSession(
-              transactionReviewRepository,
-              bankingProviders,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              bankingProviderRegistry,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1329,13 +1180,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await completeBankConnection(
-              transactionReviewRepository,
-              bankingProviders,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              bankingProviderRegistry,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1346,18 +1193,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .input(syncBankConnectionInput)
         .handler(async ({ context, input }) => {
           try {
-            const connection = await transactionReviewRepository.getBankConnectionForTeam(
-              input.teamId,
-              input.connectionId,
-            );
             return await syncBankConnection(
-              transactionReviewRepository,
-              requireBankingProvider(bankingProviders, connection?.provider),
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              bankingProviderRegistry,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1368,18 +1207,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .input(disconnectBankConnectionInput)
         .handler(async ({ context, input }) => {
           try {
-            const connection = await transactionReviewRepository.getBankConnectionForTeam(
-              input.teamId,
-              input.connectionId,
-            );
             return await disconnectBankConnection(
-              transactionReviewRepository,
-              requireBankingProvider(bankingProviders, connection?.provider),
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              bankingProviderRegistry,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1393,13 +1224,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await listIntegrationWorkspace(
-              transactionReviewRepository,
+              dawnRepository,
               integrationProviders,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input?.teamId,
-              },
+              appRequestFromSession(context, { teamId: input?.teamId }),
             );
           } catch (error) {
             mapAppError(error);
@@ -1410,13 +1237,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await connectIntegration(
-              transactionReviewRepository,
+              dawnRepository,
               integrationProviders,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1426,13 +1249,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
       sync: protectedProcedure.input(syncIntegrationInput).handler(async ({ context, input }) => {
         try {
           return await syncIntegration(
-            transactionReviewRepository,
+            dawnRepository,
             integrationProviders,
-            {
-              actor: { id: context.session.user.id, type: "user" },
-              requestId: context.requestId,
-              teamId: input.teamId,
-            },
+            appRequestFromSession(context, { teamId: input.teamId }),
             input,
           );
         } catch (error) {
@@ -1444,13 +1263,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await exportAccountingIntegration(
-              transactionReviewRepository,
+              dawnRepository,
               integrationProviders,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1462,13 +1277,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await recordPaymentProviderEvent(
-              transactionReviewRepository,
+              dawnRepository,
               integrationProviders,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1480,13 +1291,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await sendIntegrationMessage(
-              transactionReviewRepository,
+              dawnRepository,
               integrationProviders,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1498,13 +1305,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await sendIntegrationEmail(
-              transactionReviewRepository,
+              dawnRepository,
               integrationProviders,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1516,12 +1319,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await disableIntegration(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1532,11 +1331,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     billing: {
       list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
         try {
-          return await listBillingWorkspace(transactionReviewRepository, {
-            actor: { id: context.session.user.id, type: "user" },
-            requestId: context.requestId,
-            teamId: input?.teamId,
-          });
+          return await listBillingWorkspace(
+            dawnRepository,
+            appRequestFromSession(context, { teamId: input?.teamId }),
+          );
         } catch (error) {
           mapAppError(error);
         }
@@ -1546,12 +1344,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createCustomer(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 email: input.email ?? null,
@@ -1570,12 +1364,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createProduct(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 description: input.description ?? null,
@@ -1591,12 +1381,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createDraftInvoice(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 dueDate: input.dueDate ?? null,
@@ -1619,12 +1405,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await updateDraftInvoice(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 dueDate: input.dueDate ?? null,
@@ -1647,13 +1429,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await previewInvoicePdf(
-              transactionReviewRepository,
+              dawnRepository,
               invoicePdfRenderer,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1665,14 +1443,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await sendInvoice(
-              transactionReviewRepository,
+              dawnRepository,
               invoicePdfRenderer,
               invoiceEmailDeliveryProvider,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 toEmail: input.toEmail ?? null,
@@ -1689,14 +1463,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await sendInvoiceReminder(
-              transactionReviewRepository,
+              dawnRepository,
               invoicePdfRenderer,
               invoiceEmailDeliveryProvider,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 toEmail: input.toEmail ?? null,
@@ -1713,12 +1483,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await recordInvoicePayment(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 method: input.method ?? null,
@@ -1734,12 +1500,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createRecurringInvoiceSchedule(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1750,11 +1512,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     projects: {
       list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
         try {
-          return await listProjectWorkspace(transactionReviewRepository, {
-            actor: { id: context.session.user.id, type: "user" },
-            requestId: context.requestId,
-            teamId: input?.teamId,
-          });
+          return await listProjectWorkspace(
+            dawnRepository,
+            appRequestFromSession(context, { teamId: input?.teamId }),
+          );
         } catch (error) {
           mapAppError(error);
         }
@@ -1764,12 +1525,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createProject(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 description: input.description ?? null,
@@ -1784,12 +1541,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createTimeEntry(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 actorId: input.actorId ?? null,
@@ -1805,12 +1558,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createInvoiceFromTimeEntries(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 dueDate: input.dueDate ?? null,
@@ -1824,11 +1573,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     documents: {
       list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
         try {
-          return await listDocuments(transactionReviewRepository, {
-            actor: { id: context.session.user.id, type: "user" },
-            requestId: context.requestId,
-            teamId: input?.teamId,
-          });
+          return await listDocuments(
+            dawnRepository,
+            appRequestFromSession(context, { teamId: input?.teamId }),
+          );
         } catch (error) {
           mapAppError(error);
         }
@@ -1838,13 +1586,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createDocumentUpload(
-              transactionReviewRepository,
+              dawnRepository,
               documentUrlSigner,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 checksumSha256: input.checksumSha256 ?? null,
@@ -1859,13 +1603,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createDocumentDownload(
-              transactionReviewRepository,
+              dawnRepository,
               documentUrlSigner,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1876,11 +1616,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     inbox: {
       list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
         try {
-          return await listInboxItems(transactionReviewRepository, {
-            actor: { id: context.session.user.id, type: "user" },
-            requestId: context.requestId,
-            teamId: input?.teamId,
-          });
+          return await listInboxItems(
+            dawnRepository,
+            appRequestFromSession(context, { teamId: input?.teamId }),
+          );
         } catch (error) {
           mapAppError(error);
         }
@@ -1890,12 +1629,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await correctDocumentExtraction(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 fields: input.fields as DocumentExtractionFields,
@@ -1910,12 +1645,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await generateInboxMatchSuggestions(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1927,12 +1658,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await acceptInboxMatch(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1944,12 +1671,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await rejectInboxMatch(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
           } catch (error) {
@@ -1963,12 +1686,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await previewCsvTransactionImport(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 mapping: {
@@ -1987,12 +1706,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await commitCsvTransactionImport(
-              transactionReviewRepository,
-              {
-                actor: { id: context.session.user.id, type: "user" },
-                requestId: context.requestId,
-                teamId: input.teamId,
-              },
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 fileName: input.fileName ?? null,

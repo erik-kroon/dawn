@@ -1,0 +1,14 @@
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: dawn_test
+      POSTGRES_PASSWORD: dawn
+      POSTGRES_USER: dawn
+    ports:
+      - "54329:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dawn -d dawn_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20

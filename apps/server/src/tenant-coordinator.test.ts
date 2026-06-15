@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createTransactionSyncInvalidation } from "@dawn/sync";
+import { createProjectSyncInvalidation, createTransactionSyncInvalidation } from "@dawn/sync";
 
 import { TenantRealtimeHub } from "./tenant-coordinator";
 import { normalizeTenantSyncInvalidation } from "./tenant-sync";
@@ -18,14 +18,14 @@ describe("TenantRealtimeHub", () => {
     const socket = new FakeRealtimeSocket();
 
     hub.subscribe(socket, {
-      type: "sync.transactions.subscribe",
+      type: "sync.subscribe",
       teamId: "team_1",
       collection: "transactions",
     });
 
     expect(socket.messages).toEqual([
       JSON.stringify({
-        type: "sync.transactions.subscribed",
+        type: "sync.subscribed",
         teamId: "team_1",
         collection: "transactions",
         reconnect: "refetch_by_cursor",
@@ -45,12 +45,12 @@ describe("TenantRealtimeHub", () => {
     });
 
     hub.subscribe(firstTeamSocket, {
-      type: "sync.transactions.subscribe",
+      type: "sync.subscribe",
       teamId: "team_1",
       collection: "transactions",
     });
     hub.subscribe(secondTeamSocket, {
-      type: "sync.transactions.subscribe",
+      type: "sync.subscribe",
       teamId: "team_2",
       collection: "transactions",
     });
@@ -58,6 +58,32 @@ describe("TenantRealtimeHub", () => {
     expect(hub.fanout(event)).toEqual({ delivered: 1, subscribers: 2 });
     expect(firstTeamSocket.messages.at(-1)).toBe(JSON.stringify(event));
     expect(secondTeamSocket.messages).toHaveLength(1);
+  });
+
+  test("fans out project invalidations only to project subscribers", () => {
+    const hub = new TenantRealtimeHub();
+    const projectSocket = new FakeRealtimeSocket();
+    const transactionSocket = new FakeRealtimeSocket();
+    const event = createProjectSyncInvalidation({
+      teamId: "team_1",
+      cursor: "2026-06-15T10:00:00.000Z",
+      changedIds: ["project_1"],
+    });
+
+    hub.subscribe(projectSocket, {
+      type: "sync.subscribe",
+      teamId: "team_1",
+      collection: "projects",
+    });
+    hub.subscribe(transactionSocket, {
+      type: "sync.subscribe",
+      teamId: "team_1",
+      collection: "transactions",
+    });
+
+    expect(hub.fanout(event)).toEqual({ delivered: 1, subscribers: 2 });
+    expect(projectSocket.messages.at(-1)).toBe(JSON.stringify(event));
+    expect(transactionSocket.messages).toHaveLength(1);
   });
 
   test("removes closed sockets from future fanout", () => {
@@ -69,7 +95,7 @@ describe("TenantRealtimeHub", () => {
     });
 
     hub.subscribe(socket, {
-      type: "sync.transactions.subscribe",
+      type: "sync.subscribe",
       teamId: "team_1",
       collection: "transactions",
     });
@@ -96,6 +122,26 @@ describe("TenantRealtimeHub", () => {
       collection: "transactions",
       cursor: null,
       changedIds: ["txn_1"],
+    });
+  });
+
+  test("normalizes sync queue jobs into project invalidation events", () => {
+    expect(
+      normalizeTenantSyncInvalidation({
+        type: "sync.invalidate",
+        teamId: "team_1",
+        collection: "projects",
+        cursor: null,
+        changedIds: ["project_1"],
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "sync:projects:outbox_1",
+      }),
+    ).toEqual({
+      type: "sync.projects.invalidated",
+      teamId: "team_1",
+      collection: "projects",
+      cursor: null,
+      changedIds: ["project_1"],
     });
   });
 });

@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import { permissionsForPublicApiScopes, permissionsForRole, roleHasPermission } from "./index";
+import {
+  permissionsForPublicApiScopes,
+  permissionsForRole,
+  publicApiScopeLabels,
+  publicApiScopes,
+  publicApiScopesByResource,
+  roleHasPermission,
+} from "./index";
 
 describe("team role permissions", () => {
   test("owners can manage team and billing settings", () => {
@@ -36,10 +43,31 @@ describe("team role permissions", () => {
     expect(
       permissionsForPublicApiScopes([
         "documents.read",
-        "documents.write",
-        "projects.read",
-        "projects.write",
+        "customers.read",
+        "inbox.write",
+        "reports.read",
+        "time_entries.write",
       ]),
-    ).toEqual(["documents.read", "documents.write", "projects.read", "projects.write"]);
+    ).toEqual([
+      "documents.read",
+      "invoices.read",
+      "documents.write",
+      "transactions.write",
+      "transactions.read",
+      "projects.write",
+    ]);
+  });
+
+  test("public API scopes are grouped and labelled by product resource", () => {
+    expect(publicApiScopesByResource).toMatchObject({
+      transactions: ["transactions.read", "transactions.write"],
+      bankAccounts: ["bank_accounts.read"],
+      inbox: ["inbox.read", "inbox.write"],
+      customers: ["customers.read", "customers.write"],
+      products: ["products.read", "products.write"],
+      timeEntries: ["time_entries.write"],
+      reports: ["reports.read"],
+    });
+    expect(Object.keys(publicApiScopeLabels)).toEqual([...publicApiScopes]);
   });
 });

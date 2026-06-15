@@ -1,4 +1,4 @@
-import type { PublicApiScope } from "@dawn/domain";
+import { publicApiScopes, type PublicApiScope } from "@dawn/domain";
 
 export type OAuthAuthorizeSearch = {
   teamId?: string;
@@ -9,17 +9,7 @@ export type OAuthAuthorizeSearch = {
   state?: string;
 };
 
-const publicApiScopes = new Set<PublicApiScope>([
-  "transactions.read",
-  "transactions.write",
-  "documents.read",
-  "documents.write",
-  "invoices.read",
-  "invoices.write",
-  "projects.read",
-  "projects.write",
-  "webhooks.manage",
-]);
+const supportedPublicApiScopes = new Set<PublicApiScope>(publicApiScopes);
 
 export function searchParam(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -48,7 +38,7 @@ function oauthScopesFromSearch(search: OAuthAuthorizeSearch): PublicApiScope[] {
   }
 
   return [...new Set(raw.split(/[\s,]+/).filter(Boolean))].filter(
-    (scope): scope is PublicApiScope => publicApiScopes.has(scope as PublicApiScope),
+    (scope): scope is PublicApiScope => supportedPublicApiScopes.has(scope as PublicApiScope),
   );
 }
 

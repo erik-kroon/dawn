@@ -5,6 +5,7 @@ import {
   createInvoiceFromTimeEntries,
   createProject,
   createTimeEntry,
+  listProjectSyncCollection,
   listProjectWorkspace,
   type DawnRepository,
 } from "./index";
@@ -71,6 +72,24 @@ class MemoryProjectRepository {
 
   async listProjects(teamId: string) {
     return [...this.projects.values()].filter((project) => project.teamId === teamId);
+  }
+
+  async listProjectsForSync(input: { teamId: string; cursor?: string | null }) {
+    const cursorTime = input.cursor ? new Date(input.cursor).getTime() : null;
+
+    return [...this.projects.values()]
+      .filter((project) => project.teamId === input.teamId)
+      .filter((project) => {
+        if (cursorTime === null) {
+          return true;
+        }
+
+        return project.updatedAt ? new Date(project.updatedAt).getTime() > cursorTime : false;
+      })
+      .sort(
+        (left, right) =>
+          new Date(left.updatedAt ?? 0).getTime() - new Date(right.updatedAt ?? 0).getTime(),
+      );
   }
 
   async listProjectMembers(teamId: string) {
@@ -331,5 +350,52 @@ describe("project time use cases", () => {
     });
     expect(repository.auditEvents).toHaveLength(5);
     expect(repository.outboxEvents).toHaveLength(5);
+  });
+
+  test("lists project sync changes by cursor", async () => {
+    const repository = new MemoryProjectRepository();
+    repository.projects.set("project_old", {
+      id: "project_old",
+      teamId: "team_1",
+      customerId: "customer_1",
+      name: "Old project",
+      description: null,
+      status: "active",
+      billableRate: { amountMinor: 12_000, currency: "USD" },
+      createdByActorId: "user_1",
+      createdAt: "2026-06-14T09:00:00.000Z",
+      updatedAt: "2026-06-14T09:00:00.000Z",
+    });
+    repository.projects.set("project_new", {
+      id: "project_new",
+      teamId: "team_1",
+      customerId: "customer_1",
+      name: "New project",
+      description: null,
+      status: "active",
+      billableRate: { amountMinor: 15_000, currency: "USD" },
+      createdByActorId: "user_1",
+      createdAt: "2026-06-15T09:00:00.000Z",
+      updatedAt: "2026-06-15T09:00:00.000Z",
+    });
+
+    const response = await listProjectSyncCollection(
+      repository as unknown as DawnRepository,
+      context,
+      {
+        teamId: "team_1",
+        cursor: "2026-06-14T12:00:00.000Z",
+      },
+    );
+
+    expect(response).toMatchObject({
+      collection: "projects",
+      teamId: "team_1",
+      cursor: "2026-06-15T09:00:00.000Z",
+      conflictPolicy: "server_wins_for_operational_state",
+    });
+    expect(
+      response.changes.map((change) => (change.type === "upsert" ? change.record.id : "")),
+    ).toEqual(["project_new"]);
   });
 });

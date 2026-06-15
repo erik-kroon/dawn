@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   AppError,
   buildTeamDataExportSnapshot,
+  completeTeamDataExport,
+  gateTeamDataDeletion,
   listOperationsWorkspace,
   redactOperationalText,
   redactOperationalValue,
@@ -11,6 +13,8 @@ import {
   type AuditLogEntry,
   type DawnRepository,
   type IdempotencyResult,
+  type OperationsUseCaseRepository,
+  type TeamDataExportRepository,
   type JobRun,
   type OutboxEvent,
   type ProviderSyncRun,
@@ -291,6 +295,8 @@ class MemoryOperationsRepository {
 
   async appendOutboxEvent(input: {
     teamId: string;
+    actorId: string;
+    requestId: string;
     type: string;
     version: number;
     payload: Record<string, unknown>;
@@ -306,6 +312,116 @@ class MemoryOperationsRepository {
       lastError: null,
       nextAttemptAt: null,
       occurredAt: new Date("2026-06-15T00:00:00.000Z").toISOString(),
+      processedAt: null,
+    });
+  }
+}
+
+class MemoryOperationsWorkflowRepository implements OperationsUseCaseRepository {
+  memberships = new Map<string, TeamRole>();
+  auditEvents: AuditLogEntry[] = [];
+  outboxEvents: OutboxEvent[] = [];
+  idempotency = new Map<string, IdempotencyResult<unknown>>();
+
+  async withTransaction<T>(
+    callback: (repository: OperationsUseCaseRepository) => Promise<T>,
+  ): Promise<T> {
+    return callback(this);
+  }
+
+  async ensureDefaultWorkspace() {
+    return { teamId: "team_1" };
+  }
+
+  async getMembership(actor: Actor, teamId: string) {
+    const role = this.memberships.get(`${actor.id}:${teamId}`);
+    return role ? { role } : null;
+  }
+
+  async listAuditEvents(input: {
+    action?: string | null;
+    entityId?: string | null;
+    entityType?: string | null;
+    limit: number;
+    requestId?: string | null;
+    teamId: string;
+  }) {
+    return this.auditEvents
+      .filter((event) => event.teamId === input.teamId)
+      .filter((event) => !input.action || event.action === input.action)
+      .filter((event) => !input.entityType || event.entityType === input.entityType)
+      .filter((event) => !input.entityId || event.entityId === input.entityId)
+      .filter((event) => !input.requestId || event.requestId === input.requestId)
+      .slice(0, input.limit);
+  }
+
+  async listOutboxEvents(teamId: string, limit: number) {
+    return this.outboxEvents.filter((event) => event.teamId === teamId).slice(0, limit);
+  }
+
+  async listJobRuns() {
+    return [];
+  }
+
+  async listProviderSyncRuns() {
+    return [];
+  }
+
+  async listIntegrationSyncRuns() {
+    return [];
+  }
+
+  async listAutomationRuns() {
+    return [];
+  }
+
+  async listWebhookDeliveries() {
+    return [];
+  }
+
+  async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
+    return this.idempotency.get(`${teamId}:${actorId}:${operation}:${key}`) ?? null;
+  }
+
+  async saveIdempotencyResult(input: {
+    teamId: string;
+    actorId: string;
+    operation: string;
+    key: string;
+    fingerprint: string;
+    result: unknown;
+  }) {
+    this.idempotency.set(`${input.teamId}:${input.actorId}:${input.operation}:${input.key}`, {
+      fingerprint: input.fingerprint,
+      result: input.result,
+    });
+  }
+
+  async appendAuditEvent(input: Omit<AuditLogEntry, "id" | "occurredAt">) {
+    this.auditEvents.unshift({
+      id: `audit_${this.auditEvents.length + 1}`,
+      occurredAt: "2026-06-15T00:00:00.000Z",
+      ...input,
+    });
+  }
+
+  async appendOutboxEvent(input: {
+    teamId: string;
+    type: string;
+    version: number;
+    payload: Record<string, unknown>;
+  }) {
+    this.outboxEvents.unshift({
+      id: `outbox_${this.outboxEvents.length + 1}`,
+      teamId: input.teamId,
+      type: input.type,
+      version: input.version,
+      payload: input.payload,
+      status: "pending",
+      dispatchAttempts: 0,
+      lastError: null,
+      nextAttemptAt: null,
+      occurredAt: "2026-06-15T00:00:00.000Z",
       processedAt: null,
     });
   }
@@ -411,7 +527,7 @@ describe("operations workspace", () => {
     });
 
     const workspace = await listOperationsWorkspace(
-      repository as unknown as DawnRepository,
+      repository as unknown as OperationsUseCaseRepository,
       context,
       {
         audit: { action: "invoice.sent", entityType: "invoice", entityId: "invoice_1" },
@@ -452,18 +568,18 @@ describe("operations workspace", () => {
   });
 
   test("queues audited team data export requests idempotently", async () => {
-    const repository = new MemoryOperationsRepository();
+    const repository = new MemoryOperationsWorkflowRepository();
     repository.memberships.set("user_1:team_1", "admin");
 
-    const result = await requestTeamDataExport(repository as unknown as DawnRepository, context, {
+    const result = await requestTeamDataExport(repository as OperationsUseCaseRepository, context, {
       teamId: "team_1",
       idempotencyKey: "export_1",
     });
-    const replay = await requestTeamDataExport(repository as unknown as DawnRepository, context, {
+    const replay = await requestTeamDataExport(repository as OperationsUseCaseRepository, context, {
       teamId: "team_1",
       idempotencyKey: "export_1",
     });
-    const workspace = await listOperationsWorkspace(repository as unknown as DawnRepository, {
+    const workspace = await listOperationsWorkspace(repository as OperationsUseCaseRepository, {
       ...context,
       requestId: "request_2",
     });
@@ -514,11 +630,14 @@ describe("operations workspace", () => {
       occurredAt: "2026-06-15T00:00:00.000Z",
     });
 
-    const snapshot = await buildTeamDataExportSnapshot(repository as unknown as DawnRepository, {
-      teamId: "team_1",
-      sourceOutboxEventId: "outbox_1",
-      generatedAt: "2026-06-15T00:00:02.000Z",
-    });
+    const snapshot = await buildTeamDataExportSnapshot(
+      repository as unknown as TeamDataExportRepository,
+      {
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        generatedAt: "2026-06-15T00:00:02.000Z",
+      },
+    );
 
     expect(snapshot).toMatchObject({
       schemaVersion: 1,
@@ -553,12 +672,96 @@ describe("operations workspace", () => {
     });
   });
 
-  test("requires owner confirmation for tenant deletion requests", async () => {
+  test("completes team data export archives idempotently", async () => {
     const repository = new MemoryOperationsRepository();
+    repository.outboxEvents.push({
+      id: "outbox_1",
+      teamId: "team_1",
+      type: "team_data.export_requested",
+      version: 1,
+      payload: { accessToken: "secret", email: "owner@example.com" },
+      dispatchAttempts: 0,
+      status: "dispatched",
+      lastError: null,
+      nextAttemptAt: null,
+      occurredAt: "2026-06-15T00:00:00.000Z",
+      processedAt: "2026-06-15T00:00:01.000Z",
+    });
+    const storedObjects = new Map<
+      string,
+      { body: ArrayBuffer; contentType: string; byteSize: number }
+    >();
+    let writeCount = 0;
+    const storage = {
+      async put(input: { objectKey: string; body: ArrayBuffer; contentType: string }) {
+        writeCount += 1;
+        storedObjects.set(input.objectKey, {
+          body: input.body,
+          contentType: input.contentType,
+          byteSize: input.body.byteLength,
+        });
+      },
+    };
+
+    const result = await completeTeamDataExport(
+      repository as unknown as TeamDataExportRepository,
+      storage,
+      {
+        teamId: "team_1",
+        format: "json",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "team-data:export:outbox_1",
+        generatedAt: "2026-06-15T00:00:02.000Z",
+      },
+    );
+    const replay = await completeTeamDataExport(
+      repository as unknown as TeamDataExportRepository,
+      storage,
+      {
+        teamId: "team_1",
+        format: "json",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "team-data:export:outbox_1",
+        generatedAt: "2026-06-15T00:00:04.000Z",
+      },
+    );
+
+    expect(result.objectKey).toBe("teams/team_1/exports/outbox_1.json");
+    expect(result.contentType).toBe("application/json; charset=utf-8");
+    expect(replay.replayed).toBe(true);
+    expect(writeCount).toBe(1);
+    const stored = storedObjects.get(result.objectKey);
+    expect(stored?.contentType).toBe("application/json; charset=utf-8");
+    const archive = JSON.parse(new TextDecoder().decode(stored?.body)) as {
+      operations: { outboxEvents: Array<{ payload: Record<string, unknown> }> };
+    };
+    expect(archive.operations.outboxEvents[0]?.payload).toEqual({
+      accessToken: "[redacted]",
+      email: "[redacted]",
+    });
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.auditEvents[0]).toMatchObject({
+      actorId: "system:data-workflow",
+      requestId: "team-data:export:outbox_1",
+      action: "team_data.export_archive_written",
+      entityType: "team",
+      entityId: "team_1",
+      metadata: {
+        objectKey: "teams/team_1/exports/outbox_1.json",
+        sourceOutboxEventId: "outbox_1",
+        byteSize: result.byteSize,
+        contentType: "application/json; charset=utf-8",
+        generatedAt: "2026-06-15T00:00:02.000Z",
+      },
+    });
+  });
+
+  test("requires owner confirmation for tenant deletion requests", async () => {
+    const repository = new MemoryOperationsWorkflowRepository();
     repository.memberships.set("user_1:team_1", "admin");
 
     await expect(
-      requestTeamDataDeletion(repository as unknown as DawnRepository, context, {
+      requestTeamDataDeletion(repository as OperationsUseCaseRepository, context, {
         teamId: "team_1",
         confirmTeamId: "team_1",
         idempotencyKey: "delete_1",
@@ -570,7 +773,7 @@ describe("operations workspace", () => {
 
     repository.memberships.set("user_1:team_1", "owner");
     await expect(
-      requestTeamDataDeletion(repository as unknown as DawnRepository, context, {
+      requestTeamDataDeletion(repository as OperationsUseCaseRepository, context, {
         teamId: "team_1",
         confirmTeamId: "wrong_team",
         idempotencyKey: "delete_2",
@@ -580,12 +783,16 @@ describe("operations workspace", () => {
       message: "Confirm the team ID before requesting deletion",
     });
 
-    const result = await requestTeamDataDeletion(repository as unknown as DawnRepository, context, {
-      teamId: "team_1",
-      confirmTeamId: "team_1",
-      reason: "customer requested closure",
-      idempotencyKey: "delete_3",
-    });
+    const result = await requestTeamDataDeletion(
+      repository as OperationsUseCaseRepository,
+      context,
+      {
+        teamId: "team_1",
+        confirmTeamId: "team_1",
+        reason: "customer requested closure",
+        idempotencyKey: "delete_3",
+      },
+    );
 
     expect(result.workflow).toMatchObject({ type: "team_data_deletion", status: "queued" });
     expect(repository.auditEvents[0]).toMatchObject({
@@ -598,12 +805,46 @@ describe("operations workspace", () => {
     });
   });
 
+  test("gates team data deletion jobs idempotently in app", async () => {
+    const repository = new MemoryOperationsWorkflowRepository();
+
+    const result = await gateTeamDataDeletion(repository as OperationsUseCaseRepository, {
+      teamId: "team_1",
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "team-data:delete:outbox_1",
+    });
+    const replay = await gateTeamDataDeletion(repository as OperationsUseCaseRepository, {
+      teamId: "team_1",
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "team-data:delete:outbox_1",
+    });
+
+    expect(result).toMatchObject({
+      teamId: "team_1",
+      sourceOutboxEventId: "outbox_1",
+      nextStep: "retention_provider_r2_cleanup_confirmation",
+    });
+    expect(replay.replayed).toBe(true);
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.auditEvents[0]).toMatchObject({
+      actorId: "system:data-workflow",
+      requestId: "team-data:delete:outbox_1",
+      action: "team_data.deletion_job_gated",
+      entityType: "team",
+      entityId: "team_1",
+      metadata: {
+        sourceOutboxEventId: "outbox_1",
+        nextStep: "retention_provider_r2_cleanup_confirmation",
+      },
+    });
+  });
+
   test("requires operations read permission", async () => {
-    const repository = new MemoryOperationsRepository();
+    const repository = new MemoryOperationsWorkflowRepository();
     repository.memberships.set("user_1:team_1", "viewer");
 
     await expect(
-      listOperationsWorkspace(repository as unknown as DawnRepository, context),
+      listOperationsWorkspace(repository as OperationsUseCaseRepository, context),
     ).rejects.toBeInstanceOf(AppError);
   });
 

@@ -1,6 +1,7 @@
 import {
   createDeterministicDocumentExtractor,
-  runDocumentExtraction,
+  resolveAppRequest,
+  runStoredDocumentExtraction,
   type DawnRepository,
 } from "@dawn/app";
 import type { DocumentExtractionJob } from "@dawn/jobs";
@@ -12,35 +13,26 @@ export async function processDocumentExtractionJob(input: {
   storage: DocumentObjectStorage;
   message: DocumentExtractionJob;
 }) {
-  const version = await input.repository.getDocumentVersionForTeam(
-    input.message.teamId,
-    input.message.versionId,
-  );
-
-  if (!version || version.documentId !== input.message.documentId) {
-    throw new Error("Document version not found");
-  }
-
-  const object = await input.storage.get(version.objectKey);
-
-  if (!object) {
-    throw new Error("Document object not found");
-  }
-
-  return runDocumentExtraction(
+  return runStoredDocumentExtraction(
     input.repository,
-    createDeterministicDocumentExtractor(),
     {
+      async readText(readInput) {
+        const object = await input.storage.get(readInput.objectKey);
+        return object ? documentObjectText(object.body) : null;
+      },
+    },
+    createDeterministicDocumentExtractor(),
+    resolveAppRequest({
       actor: { id: input.message.actorId, type: "user" },
+      source: "system_job",
       requestId: input.message.idempotencyKey,
       teamId: input.message.teamId,
-    },
+    }),
     {
       teamId: input.message.teamId,
       inboxItemId: input.message.inboxItemId,
       documentId: input.message.documentId,
       versionId: input.message.versionId,
-      rawText: documentObjectText(object.body),
       idempotencyKey: input.message.idempotencyKey,
     },
   );

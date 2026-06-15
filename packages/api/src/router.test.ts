@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { call } from "@orpc/server";
 import { createDeterministicInvoicePdfRenderer } from "@dawn/app";
+import { MemoryAppRepository } from "@dawn/app/testkit/memory-repository";
 import type {
-  Actor,
   ApiKey,
   AutomationRule,
   AutomationRun,
@@ -11,8 +11,6 @@ import type {
   AssistantThread,
   AssistantToolCall,
   BusinessInsight,
-  Category,
-  Counterparty,
   Customer,
   CustomerContact,
   IntegrationCategory,
@@ -23,27 +21,20 @@ import type {
   InvoiceDraft,
   InvoiceLineDraft,
   InvoicePayment,
-  LedgerAccount,
-  LedgerTransactionDraft,
   Product,
   Project,
   ProjectMember,
   ReportSourceRef,
   RecurringInvoiceSchedule,
   TeamInvite,
-  TeamMember,
-  TeamMembership,
   TeamRole,
   TimeEntry,
-  Transaction,
-  TransactionTag,
   OAuthApp,
   OAuthGrant,
   WebhookDelivery,
   WebhookSubscription,
 } from "@dawn/domain";
 import type {
-  ActorTeam,
   AuditLogEntry,
   BankAccount,
   BankConnection,
@@ -55,7 +46,6 @@ import type {
   DocumentExtractionFields,
   DocumentUrlSigner,
   HardNegativeTransactionMatch,
-  IdempotencyResult,
   InboxItem,
   InboxTransactionMatchSuggestion,
   InboxSource,
@@ -63,9 +53,7 @@ import type {
   JobRun,
   OutboxEvent,
   ProviderSyncRun,
-  ReviewWorkspaceData,
   TeamAlias,
-  TransactionImportSession,
 } from "@dawn/app";
 import {
   createMockBankingProvider,
@@ -73,14 +61,17 @@ import {
   createMockIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
 } from "@dawn/integrations";
+import {
+  createApiTestContext as testContext,
+  createScopedActorApiTestContext,
+  createUnauthenticatedApiTestContext,
+  withSelectedTeam,
+} from "./testkit/context";
 
-class MemoryTransactionReviewRepository implements DawnRepository {
-  auditEvents: AuditLogEntry[] = [];
-  outboxEvents: unknown[] = [];
+class MemoryTransactionReviewRepository extends MemoryAppRepository implements DawnRepository {
+  declare auditEvents: AuditLogEntry[];
   bankAccounts = new Map<string, BankAccount>();
   bankConnections = new Map<string, BankConnection>();
-  categories = new Map<string, Category>();
-  counterparties = new Map<string, Counterparty>();
   customers = new Map<string, Customer>();
   customerContacts = new Map<string, CustomerContact>();
   documents = new Map<string, BusinessDocument>();
@@ -88,9 +79,6 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   extractions = new Map<string, DocumentExtraction>();
   inboxItems = new Map<string, InboxItem>();
   inboxSources = new Map<string, InboxSource>();
-  accounts = new Map<string, LedgerAccount>();
-  idempotency = new Map<string, IdempotencyResult<unknown>>();
-  importSessions: TransactionImportSession[] = [];
   invites = new Map<string, TeamInvite>();
   matchSuggestions = new Map<string, InboxTransactionMatchSuggestion>();
   products = new Map<string, Product>();
@@ -120,151 +108,10 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   aliases: TeamAlias[] = [];
   hardNegatives: HardNegativeTransactionMatch[] = [];
   attachments: { transactionId: string; documentId: string }[] = [];
-  memberships = new Map<string, TeamRole>();
   providerObjects = new Map<string, Record<string, unknown>>();
   syncRuns: ProviderSyncRun[] = [];
-  tagAssignments: { transactionId: string; tagId: string }[] = [];
-  tags = new Map<string, TransactionTag>();
   teams = new Map<string, string>();
-  transactions = new Map<string, Transaction>();
   users = new Map<string, { email: string; name: string }>();
-
-  async withTransaction<T>(callback: (repository: DawnRepository) => Promise<T>): Promise<T> {
-    return callback(this);
-  }
-
-  async ensureDefaultWorkspace(actor: Actor) {
-    const existingTeamId = [...this.memberships.keys()]
-      .find((key) => key.startsWith(`${actor.id}:`))
-      ?.split(":")[1];
-
-    if (existingTeamId) {
-      return { teamId: existingTeamId };
-    }
-
-    const team = await this.createTeam({ actor, name: "Default Team" });
-    return { teamId: team.id };
-  }
-
-  async listActorTeams(actor: Actor): Promise<ActorTeam[]> {
-    return [...this.memberships.entries()]
-      .filter(([key]) => key.startsWith(`${actor.id}:`))
-      .map(([key, role]) => {
-        const teamId = key.split(":")[1] ?? "team_1";
-        return { id: teamId, name: this.teams.get(teamId) ?? teamId, role };
-      });
-  }
-
-  async createTeam(input: { actor: Actor; name: string }): Promise<ActorTeam> {
-    const teamId = `team_${this.teams.size + 1}`;
-    this.teams.set(teamId, input.name);
-    this.memberships.set(`${input.actor.id}:${teamId}`, "owner");
-    return { id: teamId, name: input.name, role: "owner" };
-  }
-
-  async listWorkspace(_actor: Actor, teamId: string): Promise<ReviewWorkspaceData> {
-    return {
-      teamId,
-      teamName: this.teams.get(teamId) ?? teamId,
-      categories: [...this.categories.values()].filter((category) => category.teamId === teamId),
-      transactions: [...this.transactions.values()].filter(
-        (transaction) => transaction.teamId === teamId,
-      ),
-      sync: {
-        collection: "transactions",
-        cursor: null,
-        conflictPolicy: "server_wins_for_financial_state",
-      },
-    };
-  }
-
-  async getMembership(actor: Actor, teamId: string) {
-    const role = this.memberships.get(`${actor.id}:${teamId}`);
-    return role ? { role } : null;
-  }
-
-  async getTransactionForTeam(teamId: string, transactionId: string) {
-    const transaction = this.transactions.get(transactionId);
-    return transaction?.teamId === teamId ? transaction : null;
-  }
-
-  async getCategoryForTeam(teamId: string, categoryId: string) {
-    const category = this.categories.get(categoryId);
-    return category?.teamId === teamId ? category : null;
-  }
-
-  async listCounterparties(teamId: string) {
-    return [...this.counterparties.values()].filter(
-      (counterparty) => counterparty.teamId === teamId,
-    );
-  }
-
-  async listTransactionTags(teamId: string) {
-    return [...this.tags.values()].filter((tag) => tag.teamId === teamId);
-  }
-
-  async getCounterpartyForTeam(teamId: string, counterpartyId: string) {
-    const counterparty = this.counterparties.get(counterpartyId);
-    return counterparty?.teamId === teamId ? counterparty : null;
-  }
-
-  async getTransactionTagForTeam(teamId: string, tagId: string) {
-    const tag = this.tags.get(tagId);
-    return tag?.teamId === teamId ? tag : null;
-  }
-
-  async upsertCounterparty(input: { teamId: string; name: string }) {
-    const existing = [...this.counterparties.values()].find(
-      (counterparty) => counterparty.teamId === input.teamId && counterparty.name === input.name,
-    );
-
-    if (existing) {
-      return existing;
-    }
-
-    const counterparty = {
-      id: `counterparty_${this.counterparties.size + 1}`,
-      teamId: input.teamId,
-      name: input.name,
-    };
-    this.counterparties.set(counterparty.id, counterparty);
-    return counterparty;
-  }
-
-  async upsertTransactionTag(input: { teamId: string; name: string }) {
-    const existing = [...this.tags.values()].find(
-      (tag) => tag.teamId === input.teamId && tag.name === input.name,
-    );
-
-    if (existing) {
-      return existing;
-    }
-
-    const tag = {
-      id: `tag_${this.tags.size + 1}`,
-      teamId: input.teamId,
-      name: input.name,
-    };
-    this.tags.set(tag.id, tag);
-    return tag;
-  }
-
-  async listLedgerAccounts(teamId: string) {
-    return [...this.accounts.values()].filter((account) => account.teamId === teamId);
-  }
-
-  async getLedgerAccountForTeam(teamId: string, accountId: string) {
-    const account = this.accounts.get(accountId);
-    return account?.teamId === teamId ? account : null;
-  }
-
-  async getTransactionByDuplicateKey(teamId: string, duplicateKey: string) {
-    return (
-      [...this.transactions.values()].find(
-        (transaction) => transaction.teamId === teamId && transaction.duplicateKey === duplicateKey,
-      ) ?? null
-    );
-  }
 
   async getTransactionByProviderTransactionId(teamId: string, providerTransactionId: string) {
     return (
@@ -274,113 +121,6 @@ class MemoryTransactionReviewRepository implements DawnRepository {
           transaction.providerTransactionId === providerTransactionId,
       ) ?? null
     );
-  }
-
-  async listTransactionsForReport(input: { teamId: string; accountId?: string }) {
-    return [...this.transactions.values()].filter(
-      (transaction) =>
-        transaction.teamId === input.teamId &&
-        (!input.accountId || transaction.accountId === input.accountId),
-    );
-  }
-
-  async listTransactionsForSync(input: { teamId: string; cursor?: string | null }) {
-    const cursorTime = input.cursor ? new Date(input.cursor).getTime() : null;
-
-    return [...this.transactions.values()]
-      .filter((transaction) => transaction.teamId === input.teamId)
-      .filter((transaction) => {
-        if (cursorTime === null) {
-          return true;
-        }
-
-        return transaction.updatedAt
-          ? new Date(transaction.updatedAt).getTime() > cursorTime
-          : false;
-      })
-      .sort(
-        (left, right) =>
-          new Date(left.updatedAt ?? 0).getTime() - new Date(right.updatedAt ?? 0).getTime(),
-      );
-  }
-
-  async createLedgerTransactionForTeam(input: {
-    draft: LedgerTransactionDraft;
-    duplicateKey: string;
-  }) {
-    const transaction = {
-      id: `txn_${this.transactions.size + 1}`,
-      teamId: input.draft.teamId,
-      accountId: input.draft.accountId,
-      description: input.draft.description,
-      postedAt: input.draft.postedAt,
-      money: input.draft.money,
-      type: input.draft.type,
-      source: input.draft.source,
-      counterpartyId: input.draft.counterpartyId ?? null,
-      transferGroupId: input.draft.transferGroupId ?? null,
-      providerTransactionId: input.draft.providerTransactionId ?? null,
-      categoryId: input.draft.categoryId ?? null,
-      reviewState: "needs_review" as const,
-      duplicateKey: input.duplicateKey,
-      updatedAt: new Date().toISOString(),
-    };
-    this.transactions.set(transaction.id, transaction);
-    this.tagAssignments.push(
-      ...(input.draft.tagIds ?? []).map((tagId) => ({ transactionId: transaction.id, tagId })),
-    );
-    return transaction;
-  }
-
-  async createTransactionImportSession(input: {
-    teamId: string;
-    accountId: string;
-    actorId: string;
-    fileName?: string | null;
-    rowCount: number;
-    importedCount: number;
-    duplicateCount: number;
-    invalidCount: number;
-  }) {
-    const importSession = {
-      id: `import_${this.importSessions.length + 1}`,
-      teamId: input.teamId,
-      accountId: input.accountId,
-      source: "csv" as const,
-      fileName: input.fileName ?? null,
-      status: "committed" as const,
-      rowCount: input.rowCount,
-      importedCount: input.importedCount,
-      duplicateCount: input.duplicateCount,
-      invalidCount: input.invalidCount,
-    };
-    this.importSessions.push(importSession);
-    return importSession;
-  }
-
-  async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
-    return this.idempotency.get(`${teamId}:${actorId}:${operation}:${key}`) ?? null;
-  }
-
-  async updateTransactionReviewForTeam(input: {
-    teamId: string;
-    transactionId: string;
-    categoryId: string;
-    reviewState: Transaction["reviewState"];
-  }) {
-    const transaction = this.transactions.get(input.transactionId);
-
-    if (!transaction || transaction.teamId !== input.teamId) {
-      throw new Error("missing transaction");
-    }
-
-    const updated = {
-      ...transaction,
-      categoryId: input.categoryId,
-      reviewState: input.reviewState,
-    };
-    this.transactions.set(input.transactionId, updated);
-    return updated;
   }
 
   async appendAuditEvent(input: {
@@ -1337,6 +1077,24 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return [...this.projects.values()].filter((project) => project.teamId === teamId);
   }
 
+  async listProjectsForSync(input: { teamId: string; cursor?: string | null }) {
+    const cursorTime = input.cursor ? new Date(input.cursor).getTime() : null;
+
+    return [...this.projects.values()]
+      .filter((project) => project.teamId === input.teamId)
+      .filter((project) => {
+        if (cursorTime === null) {
+          return true;
+        }
+
+        return project.updatedAt ? new Date(project.updatedAt).getTime() > cursorTime : false;
+      })
+      .sort(
+        (left, right) =>
+          new Date(left.updatedAt ?? 0).getTime() - new Date(right.updatedAt ?? 0).getTime(),
+      );
+  }
+
   async listProjectMembers(teamId: string) {
     return [...this.projectMembers.values()].filter((member) => member.teamId === teamId);
   }
@@ -2291,14 +2049,6 @@ function calculateFixtureInvoiceTotals(input: {
   };
 }
 
-function testContext(user?: { id: string; email: string }) {
-  return {
-    auth: null,
-    requestId: "request_1",
-    session: user ? { user } : null,
-  };
-}
-
 const testDocumentUrlSigner: DocumentUrlSigner = {
   async createUploadUrl(input) {
     return {
@@ -2324,7 +2074,7 @@ async function createTestRouter(repository: DawnRepository) {
 
   const { createAppRouter } = await import("./routers/index");
   return createAppRouter({
-    transactionReviewRepository: repository,
+    dawnRepository: repository,
     bankingProviders: [
       createMockBankingProvider(),
       createSandboxBankingProvider({
@@ -2344,7 +2094,9 @@ describe("appRouter", () => {
     const router = await createTestRouter(new MemoryTransactionReviewRepository());
 
     await expect(
-      call(router.teams.directory, { teamId: "team_1" }, { context: testContext() }),
+      call(router.teams.directory, withSelectedTeam({}), {
+        context: createUnauthenticatedApiTestContext(),
+      }),
     ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
   });
 
@@ -2355,13 +2107,9 @@ describe("appRouter", () => {
     const router = await createTestRouter(repository);
 
     await expect(
-      call(
-        router.teams.directory,
-        { teamId: "team_1" },
-        {
-          context: testContext({ id: "user_1", email: "viewer@example.com" }),
-        },
-      ),
+      call(router.teams.directory, withSelectedTeam({}), {
+        context: createScopedActorApiTestContext({ email: "viewer@example.com" }),
+      }),
     ).rejects.toMatchObject({
       code: "FORBIDDEN",
       message: "You cannot manage members for this team",
@@ -2496,12 +2244,14 @@ describe("appRouter", () => {
     await expect(
       call(
         router.transactionReview.review,
-        {
-          teamId: "team_2",
-          transactionId: "txn_1",
-          categoryId: "cat_1",
-          idempotencyKey: "idem_1",
-        },
+        withSelectedTeam(
+          {
+            transactionId: "txn_1",
+            categoryId: "cat_1",
+            idempotencyKey: "idem_1",
+          },
+          "team_2",
+        ),
         {
           context: testContext({ id: "user_1", email: "admin@example.com" }),
         },
@@ -2571,6 +2321,68 @@ describe("appRouter", () => {
     ).toEqual(["txn_new"]);
   });
 
+  test("returns cursor-scoped project sync changes through the protected router", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.teams.set("team_2", "Other Team");
+    repository.memberships.set("user_1:team_1", "viewer");
+    repository.projects.set("project_old", {
+      id: "project_old",
+      teamId: "team_1",
+      customerId: "customer_1",
+      name: "Old project",
+      description: null,
+      status: "active",
+      billableRate: { amountMinor: 12_000, currency: "USD" },
+      createdByActorId: "user_1",
+      createdAt: "2026-06-14T09:00:00.000Z",
+      updatedAt: "2026-06-14T09:00:00.000Z",
+    });
+    repository.projects.set("project_new", {
+      id: "project_new",
+      teamId: "team_1",
+      customerId: "customer_1",
+      name: "New project",
+      description: "Recent work",
+      status: "active",
+      billableRate: { amountMinor: 15_000, currency: "USD" },
+      createdByActorId: "user_1",
+      createdAt: "2026-06-15T09:00:00.000Z",
+      updatedAt: "2026-06-15T09:00:00.000Z",
+    });
+    repository.projects.set("project_other", {
+      id: "project_other",
+      teamId: "team_2",
+      customerId: "customer_2",
+      name: "Other team",
+      description: null,
+      status: "active",
+      billableRate: { amountMinor: 15_000, currency: "USD" },
+      createdByActorId: "user_2",
+      createdAt: "2026-06-16T09:00:00.000Z",
+      updatedAt: "2026-06-16T09:00:00.000Z",
+    });
+    const router = await createTestRouter(repository);
+
+    const response = await call(
+      router.sync.projects,
+      { teamId: "team_1", cursor: "2026-06-14T12:00:00.000Z" },
+      {
+        context: testContext({ id: "user_1", email: "viewer@example.com" }),
+      },
+    );
+
+    expect(response).toMatchObject({
+      collection: "projects",
+      teamId: "team_1",
+      cursor: "2026-06-15T09:00:00.000Z",
+      conflictPolicy: "server_wins_for_operational_state",
+    });
+    expect(
+      response.changes.map((change) => (change.type === "upsert" ? change.record.id : "")),
+    ).toEqual(["project_new"]);
+  });
+
   test("maps sync permission denials to typed oRPC errors", async () => {
     const repository = new MemoryTransactionReviewRepository();
     repository.teams.set("team_1", "Test Team");
@@ -2589,6 +2401,18 @@ describe("appRouter", () => {
     ).rejects.toMatchObject({
       code: "FORBIDDEN",
       message: "You cannot sync transactions for this team",
+    });
+    await expect(
+      call(
+        router.sync.projects,
+        { teamId: "team_2", cursor: null },
+        {
+          context: testContext({ id: "user_1", email: "viewer@example.com" }),
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: "You cannot sync projects for this team",
     });
   });
 

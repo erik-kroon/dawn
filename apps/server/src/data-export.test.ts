@@ -1,12 +1,19 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AuditLogEntry, DawnRepository, OutboxEvent, ReviewWorkspaceData } from "@dawn/app";
+import type {
+  AuditLogEntry,
+  DawnRepository,
+  IdempotencyResult,
+  OutboxEvent,
+  ReviewWorkspaceData,
+} from "@dawn/app";
 
 import { processTeamDataExportJob } from "./data-export";
 import { createMemoryDocumentObjectStorage } from "./document-storage";
 
 class MemoryDataExportRepository {
   auditEvents: AuditLogEntry[] = [];
+  idempotency = new Map<string, IdempotencyResult<unknown>>();
   outboxEvents: OutboxEvent[] = [
     {
       id: "outbox_1",
@@ -22,6 +29,10 @@ class MemoryDataExportRepository {
       processedAt: "2026-06-15T00:00:01.000Z",
     },
   ];
+
+  async withTransaction<T>(callback: (repository: DawnRepository) => Promise<T>) {
+    return callback(this as unknown as DawnRepository);
+  }
 
   async listWorkspace(): Promise<ReviewWorkspaceData> {
     return {
@@ -176,6 +187,24 @@ class MemoryDataExportRepository {
 
   async listProviderSyncRuns() {
     return [];
+  }
+
+  async getIdempotencyResult(teamId: string, actorId: string, operation: string, key: string) {
+    return this.idempotency.get(`${teamId}:${actorId}:${operation}:${key}`) ?? null;
+  }
+
+  async saveIdempotencyResult(input: {
+    teamId: string;
+    actorId: string;
+    operation: string;
+    key: string;
+    fingerprint: string;
+    result: unknown;
+  }) {
+    this.idempotency.set(`${input.teamId}:${input.actorId}:${input.operation}:${input.key}`, {
+      fingerprint: input.fingerprint,
+      result: input.result,
+    });
   }
 
   async appendAuditEvent(input: Omit<AuditLogEntry, "id" | "occurredAt">) {

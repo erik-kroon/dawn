@@ -6,6 +6,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@dawn/ui/components/card";
+import { publicApiScopeLabels } from "@dawn/domain";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { ExternalLinkIcon, ShieldCheckIcon, XIcon } from "lucide-react";
@@ -115,7 +116,7 @@ function OAuthAuthorizeRoute() {
                 <div className="flex flex-wrap gap-2">
                   {preview.data.scopes.map((scope) => (
                     <span className="border bg-muted px-2 py-1 text-xs" key={scope}>
-                      {scope}
+                      {publicApiScopeLabels[scope]}
                     </span>
                   ))}
                 </div>

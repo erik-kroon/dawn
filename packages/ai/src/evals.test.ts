@@ -10,9 +10,13 @@ import {
 describe("AI evaluation harness", () => {
   test("runs deterministic fixtures with release-gate metrics", async () => {
     const result = await runAiEvaluationSuite();
+    const permissionFixtureCount = defaultAiEvalFixtures.filter(
+      (fixture) => fixture.category === "permission_enforcement",
+    ).length;
 
     expect(result.releaseGate.passed).toBe(true);
     expect(result.metrics.totalCases).toBe(defaultAiEvalFixtures.length);
+    expect(result.metrics.totalCases).toBeGreaterThan(8);
     expect(result.metrics.accuracy).toBe(1);
     expect(result.metrics.falseMutations).toBe(0);
     expect(result.metrics.hallucinatedSources).toBe(0);
@@ -20,7 +24,15 @@ describe("AI evaluation harness", () => {
     expect(result.metrics.refusalFailures).toBe(0);
     expect(result.metrics.userCorrections).toBe(1);
     expect(result.metrics.acceptedCorrections).toBe(1);
-    expect(result.metrics.byCategory.permission_enforcement.passed).toBe(1);
+    expect(result.metrics.byCategory.permission_enforcement.passed).toBe(permissionFixtureCount);
+    expect(
+      result.cases.find((item) => item.fixture.id === "reject-cross-currency-receipt-match")?.output
+        .prediction.transactionId,
+    ).toBeNull();
+    expect(
+      result.cases.find((item) => item.fixture.id === "select-send-invoice-approval-tool")?.output
+        .approvalRequested,
+    ).toBe(true);
   });
 
   test("reports actionable failures for unsafe or ungrounded outputs", async () => {

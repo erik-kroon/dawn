@@ -23,14 +23,21 @@ class MemoryOutboxDispatchRepository implements OutboxDispatchRepository {
     return [...this.events.values()]
       .filter(
         (event) =>
-          (event.status === "pending" || event.status === "failed") &&
-          (!event.nextAttemptAt || new Date(event.nextAttemptAt) <= input.now),
+          ((event.status === "pending" || event.status === "failed") &&
+            (!event.nextAttemptAt || new Date(event.nextAttemptAt) <= input.now)) ||
+          (event.status === "dispatching" &&
+            Boolean(event.nextAttemptAt) &&
+            new Date(event.nextAttemptAt as string) <= input.now),
       )
       .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt))
       .slice(0, input.limit);
   }
 
-  async claimOutboxEventForDispatch(input: { outboxEventId: string; now: Date }) {
+  async claimOutboxEventForDispatch(input: {
+    outboxEventId: string;
+    now: Date;
+    leaseExpiresAt: Date;
+  }) {
     if (this.skipClaims.has(input.outboxEventId)) {
       return null;
     }
@@ -39,8 +46,12 @@ class MemoryOutboxDispatchRepository implements OutboxDispatchRepository {
 
     if (
       !event ||
-      (event.status !== "pending" && event.status !== "failed") ||
-      (event.nextAttemptAt && new Date(event.nextAttemptAt) > input.now)
+      ((event.status === "pending" || event.status === "failed") &&
+        event.nextAttemptAt &&
+        new Date(event.nextAttemptAt) > input.now) ||
+      (event.status === "dispatching" &&
+        (!event.nextAttemptAt || new Date(event.nextAttemptAt) > input.now)) ||
+      (event.status !== "pending" && event.status !== "failed" && event.status !== "dispatching")
     ) {
       return null;
     }
@@ -50,7 +61,7 @@ class MemoryOutboxDispatchRepository implements OutboxDispatchRepository {
       status: "dispatching" as const,
       dispatchAttempts: event.dispatchAttempts + 1,
       lastError: null,
-      nextAttemptAt: null,
+      nextAttemptAt: input.leaseExpiresAt.toISOString(),
     };
     this.events.set(input.outboxEventId, claimed);
 
@@ -256,6 +267,40 @@ describe("dispatchOutboxEvents", () => {
       status: "dispatched",
       dispatchAttempts: 2,
       lastError: null,
+    });
+  });
+
+  test("recovers stale dispatching events after the lease expires", async () => {
+    const repository = new MemoryOutboxDispatchRepository();
+    const publisher = new MemoryOutboxQueuePublisher();
+    repository.events.set(
+      "outbox_1",
+      outboxEvent({
+        status: "dispatching",
+        dispatchAttempts: 1,
+        nextAttemptAt: "2026-06-15T09:59:00.000Z",
+      }),
+    );
+
+    const result = await dispatchOutboxEvents(repository, publisher, {
+      now: new Date("2026-06-15T10:00:00.000Z"),
+    });
+
+    expect(result).toMatchObject({ scanned: 1, dispatched: 1, failed: 0 });
+    expect(publisher.messages[0]).toMatchObject({
+      type: "outbox.dispatch",
+      attempt: 2,
+      idempotencyKey: "outbox:outbox_1:attempt:2",
+    });
+    expect(repository.jobRuns[0]).toMatchObject({
+      attempt: 2,
+      idempotencyKey: "outbox:outbox_1:attempt:2",
+    });
+    expect(repository.events.get("outbox_1")).toMatchObject({
+      status: "dispatched",
+      dispatchAttempts: 2,
+      processedAt: "2026-06-15T10:00:00.000Z",
+      nextAttemptAt: null,
     });
   });
 });

@@ -71,14 +71,14 @@ import { calculateInvoiceTotals, ledgerDuplicateKey } from "@dawn/domain";
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 
 import { db } from "./index";
+import * as developerPersistence from "./repositories/developer";
+import * as integrationPersistence from "./repositories/integrations";
+import type { QueryClient } from "./repositories/types";
 import * as schema from "./schema";
 
-type Database = typeof db;
-type TransactionClient = Parameters<Parameters<Database["transaction"]>[0]>[0];
-type QueryClient = Database | TransactionClient;
-type DrizzleRepository = DawnRepository & OutboxDispatchRepository;
+export type DrizzleRepository = DawnRepository & OutboxDispatchRepository;
 
-export class DrizzleTransactionReviewRepository implements DrizzleRepository {
+export class DrizzleDawnRepository implements DrizzleRepository {
   constructor(private readonly client: QueryClient = db) {}
 
   async withTransaction<T>(callback: (repository: DrizzleRepository) => Promise<T>): Promise<T> {
@@ -87,7 +87,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     }
 
     return this.client.transaction((transactionClient) =>
-      callback(new DrizzleTransactionReviewRepository(transactionClient)),
+      callback(new DrizzleDawnRepository(transactionClient)),
     );
   }
 
@@ -754,44 +754,18 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
   }
 
   async listIntegrationConnectionSummaries(teamId: string) {
-    const [connections, syncRuns] = await Promise.all([
-      this.client
-        .select()
-        .from(schema.integrationConnection)
-        .where(eq(schema.integrationConnection.teamId, teamId))
-        .orderBy(desc(schema.integrationConnection.createdAt)),
-      this.client
-        .select()
-        .from(schema.integrationSyncRun)
-        .where(eq(schema.integrationSyncRun.teamId, teamId))
-        .orderBy(desc(schema.integrationSyncRun.startedAt)),
-    ]);
-
-    return connections.map((connection) => ({
-      connection: mapIntegrationConnection(connection),
-      latestSyncRun:
-        syncRuns
-          .map(mapIntegrationSyncRun)
-          .find((syncRun) => syncRun.integrationConnectionId === connection.id) ?? null,
-    }));
+    return integrationPersistence.listIntegrationConnectionSummaries(this.client, teamId);
   }
 
   async getIntegrationConnectionForTeam(
     teamId: string,
     connectionId: string,
   ): Promise<IntegrationConnection | null> {
-    const [connection] = await this.client
-      .select()
-      .from(schema.integrationConnection)
-      .where(
-        and(
-          eq(schema.integrationConnection.teamId, teamId),
-          eq(schema.integrationConnection.id, connectionId),
-        ),
-      )
-      .limit(1);
-
-    return connection ? mapIntegrationConnection(connection) : null;
+    return integrationPersistence.getIntegrationConnectionForTeam(
+      this.client,
+      teamId,
+      connectionId,
+    );
   }
 
   async upsertIntegrationConnection(input: {
@@ -808,68 +782,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     rawPayload: Record<string, unknown>;
     createdByActorId: string;
   }): Promise<IntegrationConnection> {
-    const [existing] = await this.client
-      .select()
-      .from(schema.integrationConnection)
-      .where(
-        and(
-          eq(schema.integrationConnection.teamId, input.teamId),
-          eq(schema.integrationConnection.provider, input.provider),
-          eq(schema.integrationConnection.providerConnectionId, input.providerConnectionId),
-        ),
-      )
-      .limit(1);
-
-    if (existing) {
-      const [updated] = await this.client
-        .update(schema.integrationConnection)
-        .set({
-          category: input.category,
-          displayName: input.displayName,
-          status: "connected",
-          capabilities: input.capabilities,
-          tokenCiphertext: input.tokenCiphertext,
-          tokenKeyId: input.tokenKeyId,
-          tokenLastFour: input.tokenLastFour,
-          rawPayload: input.rawPayload,
-          lastError: null,
-          disabledAt: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.integrationConnection.id, existing.id))
-        .returning();
-
-      if (!updated) {
-        throw new Error("Integration connection was not updated");
-      }
-
-      return mapIntegrationConnection(updated);
-    }
-
-    const [connection] = await this.client
-      .insert(schema.integrationConnection)
-      .values({
-        id: input.connectionId,
-        teamId: input.teamId,
-        category: input.category,
-        provider: input.provider,
-        providerConnectionId: input.providerConnectionId,
-        displayName: input.displayName,
-        status: "connected",
-        capabilities: input.capabilities,
-        tokenCiphertext: input.tokenCiphertext,
-        tokenKeyId: input.tokenKeyId,
-        tokenLastFour: input.tokenLastFour,
-        rawPayload: input.rawPayload,
-        createdByActorId: input.createdByActorId,
-      })
-      .returning();
-
-    if (!connection) {
-      throw new Error("Failed to create integration connection");
-    }
-
-    return mapIntegrationConnection(connection);
+    return integrationPersistence.upsertIntegrationConnection(this.client, input);
   }
 
   async createIntegrationSyncRun(input: {
@@ -879,24 +792,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     category: IntegrationCategory;
     provider: string;
   }): Promise<IntegrationSyncRun> {
-    const [syncRun] = await this.client
-      .insert(schema.integrationSyncRun)
-      .values({
-        id: input.syncRunId,
-        teamId: input.teamId,
-        integrationConnectionId: input.integrationConnectionId,
-        category: input.category,
-        provider: input.provider,
-        status: "running",
-        rawPayload: {},
-      })
-      .returning();
-
-    if (!syncRun) {
-      throw new Error("Failed to create integration sync run");
-    }
-
-    return mapIntegrationSyncRun(syncRun);
+    return integrationPersistence.createIntegrationSyncRun(this.client, input);
   }
 
   async finishIntegrationSyncRun(input: {
@@ -906,23 +802,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     error?: string | null;
     rawPayload: Record<string, unknown>;
   }): Promise<IntegrationSyncRun> {
-    const [syncRun] = await this.client
-      .update(schema.integrationSyncRun)
-      .set({
-        status: input.status,
-        completedAt: new Date(),
-        recordsSynced: input.recordsSynced,
-        error: input.error ?? null,
-        rawPayload: input.rawPayload,
-      })
-      .where(eq(schema.integrationSyncRun.id, input.syncRunId))
-      .returning();
-
-    if (!syncRun) {
-      throw new Error("Integration sync run was not updated");
-    }
-
-    return mapIntegrationSyncRun(syncRun);
+    return integrationPersistence.finishIntegrationSyncRun(this.client, input);
   }
 
   async markIntegrationConnectionSynced(input: {
@@ -931,43 +811,14 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     status: IntegrationConnection["status"];
     lastError?: string | null;
   }): Promise<IntegrationConnection> {
-    const [connection] = await this.client
-      .update(schema.integrationConnection)
-      .set({
-        lastSyncAt: input.syncedAt,
-        status: input.status,
-        lastError: input.lastError ?? null,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.integrationConnection.id, input.connectionId))
-      .returning();
-
-    if (!connection) {
-      throw new Error("Integration connection was not updated");
-    }
-
-    return mapIntegrationConnection(connection);
+    return integrationPersistence.markIntegrationConnectionSynced(this.client, input);
   }
 
   async disableIntegrationConnection(input: {
     connectionId: string;
     disabledAt: Date;
   }): Promise<IntegrationConnection> {
-    const [connection] = await this.client
-      .update(schema.integrationConnection)
-      .set({
-        status: "disabled",
-        disabledAt: input.disabledAt,
-        updatedAt: input.disabledAt,
-      })
-      .where(eq(schema.integrationConnection.id, input.connectionId))
-      .returning();
-
-    if (!connection) {
-      throw new Error("Integration connection was not updated");
-    }
-
-    return mapIntegrationConnection(connection);
+    return integrationPersistence.disableIntegrationConnection(this.client, input);
   }
 
   async listDocuments(teamId: string): Promise<BusinessDocument[]> {
@@ -2265,6 +2116,22 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return projects.map(mapProject);
   }
 
+  async listProjectsForSync(input: { teamId: string; cursor?: string | null }) {
+    const conditions = [eq(schema.project.teamId, input.teamId)];
+
+    if (input.cursor) {
+      conditions.push(gt(schema.project.updatedAt, new Date(input.cursor)));
+    }
+
+    const projects = await this.client
+      .select()
+      .from(schema.project)
+      .where(and(...conditions))
+      .orderBy(asc(schema.project.updatedAt));
+
+    return projects.map(mapProject);
+  }
+
   async listProjectMembers(teamId: string): Promise<ProjectMember[]> {
     const members = await this.client
       .select()
@@ -2898,81 +2765,35 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
   }
 
   async listApiKeys(teamId: string): Promise<ApiKey[]> {
-    const keys = await this.client
-      .select()
-      .from(schema.apiKey)
-      .where(eq(schema.apiKey.teamId, teamId))
-      .orderBy(desc(schema.apiKey.createdAt));
-
-    return keys.map(mapApiKey);
+    return developerPersistence.listApiKeys(this.client, teamId);
   }
 
   async listOAuthApps(teamId: string): Promise<OAuthApp[]> {
-    const apps = await this.client
-      .select()
-      .from(schema.oauthApp)
-      .where(eq(schema.oauthApp.teamId, teamId))
-      .orderBy(desc(schema.oauthApp.createdAt));
-
-    return apps.map(mapOAuthApp);
+    return developerPersistence.listOAuthApps(this.client, teamId);
   }
 
   async listOAuthGrants(teamId: string): Promise<OAuthGrant[]> {
-    const grants = await this.client
-      .select()
-      .from(schema.oauthGrant)
-      .where(eq(schema.oauthGrant.teamId, teamId))
-      .orderBy(desc(schema.oauthGrant.createdAt));
-
-    return grants.map(mapOAuthGrant);
+    return developerPersistence.listOAuthGrants(this.client, teamId);
   }
 
   async listWebhookSubscriptions(teamId: string): Promise<WebhookSubscription[]> {
-    const subscriptions = await this.client
-      .select()
-      .from(schema.webhookSubscription)
-      .where(eq(schema.webhookSubscription.teamId, teamId))
-      .orderBy(desc(schema.webhookSubscription.createdAt));
-
-    return subscriptions.map(mapWebhookSubscription);
+    return developerPersistence.listWebhookSubscriptions(this.client, teamId);
   }
 
   async listWebhookDeliveries(teamId: string, limit: number): Promise<WebhookDelivery[]> {
-    const deliveries = await this.client
-      .select()
-      .from(schema.webhookDelivery)
-      .where(eq(schema.webhookDelivery.teamId, teamId))
-      .orderBy(desc(schema.webhookDelivery.createdAt))
-      .limit(limit);
-
-    return deliveries.map(mapWebhookDelivery);
+    return developerPersistence.listWebhookDeliveries(this.client, teamId, limit);
   }
 
   async getApiKeyByHash(keyHash: string): Promise<ApiKey | null> {
-    const [apiKey] = await this.client
-      .select()
-      .from(schema.apiKey)
-      .where(eq(schema.apiKey.keyHash, keyHash))
-      .limit(1);
-
-    return apiKey ? mapApiKey(apiKey) : null;
+    return developerPersistence.getApiKeyByHash(this.client, keyHash);
   }
 
   async getOAuthAppForTeam(teamId: string, appId: string): Promise<OAuthApp | null> {
-    const [app] = await this.client
-      .select()
-      .from(schema.oauthApp)
-      .where(and(eq(schema.oauthApp.teamId, teamId), eq(schema.oauthApp.id, appId)))
-      .limit(1);
-
-    return app ? mapOAuthApp(app) : null;
+    return developerPersistence.getOAuthAppForTeam(this.client, teamId, appId);
   }
 
   async markApiKeyUsed(input: { apiKeyId: string; lastUsedAt: string }): Promise<void> {
-    await this.client
-      .update(schema.apiKey)
-      .set({ lastUsedAt: new Date(input.lastUsedAt) })
-      .where(eq(schema.apiKey.id, input.apiKeyId));
+    return developerPersistence.markApiKeyUsed(this.client, input);
   }
 
   async createApiKey(input: {
@@ -2984,24 +2805,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     scopes: ApiKey["scopes"];
     createdByActorId: string;
   }): Promise<ApiKey> {
-    const [apiKey] = await this.client
-      .insert(schema.apiKey)
-      .values({
-        id: input.apiKeyId,
-        teamId: input.teamId,
-        name: input.name,
-        keyHash: input.keyHash,
-        keyPrefix: input.keyPrefix,
-        scopes: input.scopes,
-        createdByActorId: input.createdByActorId,
-      })
-      .returning();
-
-    if (!apiKey) {
-      throw new Error("Failed to create API key");
-    }
-
-    return mapApiKey(apiKey);
+    return developerPersistence.createApiKey(this.client, input);
   }
 
   async createOAuthApp(input: {
@@ -3012,23 +2816,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     scopes: OAuthApp["scopes"];
     createdByActorId: string;
   }): Promise<OAuthApp> {
-    const [app] = await this.client
-      .insert(schema.oauthApp)
-      .values({
-        id: input.appId,
-        teamId: input.teamId,
-        name: input.name,
-        redirectUris: input.redirectUris,
-        scopes: input.scopes,
-        createdByActorId: input.createdByActorId,
-      })
-      .returning();
-
-    if (!app) {
-      throw new Error("Failed to create OAuth app");
-    }
-
-    return mapOAuthApp(app);
+    return developerPersistence.createOAuthApp(this.client, input);
   }
 
   async createOAuthGrant(input: {
@@ -3038,22 +2826,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     actorId: string;
     scopes: OAuthGrant["scopes"];
   }): Promise<OAuthGrant> {
-    const [grant] = await this.client
-      .insert(schema.oauthGrant)
-      .values({
-        id: input.grantId,
-        teamId: input.teamId,
-        appId: input.appId,
-        actorId: input.actorId,
-        scopes: input.scopes,
-      })
-      .returning();
-
-    if (!grant) {
-      throw new Error("Failed to create OAuth grant");
-    }
-
-    return mapOAuthGrant(grant);
+    return developerPersistence.createOAuthGrant(this.client, input);
   }
 
   async createWebhookSubscription(input: {
@@ -3064,43 +2837,14 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     signingSecretHash: string;
     createdByActorId: string;
   }): Promise<WebhookSubscription> {
-    const [subscription] = await this.client
-      .insert(schema.webhookSubscription)
-      .values({
-        id: input.subscriptionId,
-        teamId: input.teamId,
-        url: input.url,
-        eventTypes: input.eventTypes,
-        signingSecretHash: input.signingSecretHash,
-        status: "active",
-        createdByActorId: input.createdByActorId,
-      })
-      .returning();
-
-    if (!subscription) {
-      throw new Error("Failed to create webhook subscription");
-    }
-
-    return mapWebhookSubscription(subscription);
+    return developerPersistence.createWebhookSubscription(this.client, input);
   }
 
   async listActiveWebhookSubscriptionsForEvent(input: {
     teamId: string;
     eventType: string;
   }): Promise<WebhookSubscription[]> {
-    const subscriptions = await this.client
-      .select()
-      .from(schema.webhookSubscription)
-      .where(
-        and(
-          eq(schema.webhookSubscription.teamId, input.teamId),
-          eq(schema.webhookSubscription.status, "active"),
-        ),
-      );
-
-    return subscriptions
-      .map(mapWebhookSubscription)
-      .filter((subscription) => subscription.eventTypes.includes(input.eventType));
+    return developerPersistence.listActiveWebhookSubscriptionsForEvent(this.client, input);
   }
 
   async createWebhookDelivery(input: {
@@ -3117,29 +2861,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     nextAttemptAt?: string | null;
     deliveredAt?: string | null;
   }): Promise<WebhookDelivery> {
-    const [delivery] = await this.client
-      .insert(schema.webhookDelivery)
-      .values({
-        id: input.deliveryId,
-        teamId: input.teamId,
-        subscriptionId: input.subscriptionId,
-        outboxEventId: input.outboxEventId,
-        status: input.status,
-        attempt: input.attempt,
-        requestPayload: input.requestPayload,
-        responseStatus: input.responseStatus ?? null,
-        responseBody: input.responseBody ?? null,
-        error: input.error ?? null,
-        nextAttemptAt: input.nextAttemptAt ? new Date(input.nextAttemptAt) : null,
-        deliveredAt: input.deliveredAt ? new Date(input.deliveredAt) : null,
-      })
-      .returning();
-
-    if (!delivery) {
-      throw new Error("Failed to create webhook delivery");
-    }
-
-    return mapWebhookDelivery(delivery);
+    return developerPersistence.createWebhookDelivery(this.client, input);
   }
 
   private async insertInvoiceLines(input: {
@@ -3488,7 +3210,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       .orderBy(desc(schema.integrationSyncRun.startedAt))
       .limit(limit);
 
-    return runs.map(mapIntegrationSyncRun);
+    return runs.map(integrationPersistence.mapIntegrationSyncRun);
   }
 
   async listDispatchableOutboxEvents(input: { limit: number; now: Date }): Promise<OutboxEvent[]> {
@@ -3496,10 +3218,16 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       .select()
       .from(schema.outboxEvent)
       .where(
-        and(
-          inArray(schema.outboxEvent.status, ["pending", "failed"]),
-          or(
-            isNull(schema.outboxEvent.nextAttemptAt),
+        or(
+          and(
+            inArray(schema.outboxEvent.status, ["pending", "failed"]),
+            or(
+              isNull(schema.outboxEvent.nextAttemptAt),
+              lte(schema.outboxEvent.nextAttemptAt, input.now),
+            ),
+          ),
+          and(
+            eq(schema.outboxEvent.status, "dispatching"),
             lte(schema.outboxEvent.nextAttemptAt, input.now),
           ),
         ),
@@ -3513,6 +3241,7 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
   async claimOutboxEventForDispatch(input: {
     outboxEventId: string;
     now: Date;
+    leaseExpiresAt: Date;
   }): Promise<OutboxEvent | null> {
     const [event] = await this.client
       .update(schema.outboxEvent)
@@ -3520,15 +3249,23 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
         status: "dispatching",
         dispatchAttempts: sql`${schema.outboxEvent.dispatchAttempts} + 1`,
         lastError: null,
-        nextAttemptAt: null,
+        nextAttemptAt: input.leaseExpiresAt,
       })
       .where(
         and(
           eq(schema.outboxEvent.id, input.outboxEventId),
-          inArray(schema.outboxEvent.status, ["pending", "failed"]),
           or(
-            isNull(schema.outboxEvent.nextAttemptAt),
-            lte(schema.outboxEvent.nextAttemptAt, input.now),
+            and(
+              inArray(schema.outboxEvent.status, ["pending", "failed"]),
+              or(
+                isNull(schema.outboxEvent.nextAttemptAt),
+                lte(schema.outboxEvent.nextAttemptAt, input.now),
+              ),
+            ),
+            and(
+              eq(schema.outboxEvent.status, "dispatching"),
+              lte(schema.outboxEvent.nextAttemptAt, input.now),
+            ),
           ),
         ),
       )
@@ -4279,79 +4016,6 @@ function mapAutomationRun(run: typeof schema.automationRun.$inferSelect): Automa
   };
 }
 
-function mapApiKey(apiKey: typeof schema.apiKey.$inferSelect): ApiKey {
-  return {
-    id: apiKey.id,
-    teamId: apiKey.teamId,
-    name: apiKey.name,
-    keyPrefix: apiKey.keyPrefix,
-    scopes: apiKey.scopes as ApiKey["scopes"],
-    createdByActorId: apiKey.createdByActorId,
-    lastUsedAt: apiKey.lastUsedAt?.toISOString() ?? null,
-    revokedAt: apiKey.revokedAt?.toISOString() ?? null,
-    createdAt: apiKey.createdAt.toISOString(),
-  };
-}
-
-function mapOAuthApp(app: typeof schema.oauthApp.$inferSelect): OAuthApp {
-  return {
-    id: app.id,
-    teamId: app.teamId,
-    name: app.name,
-    redirectUris: app.redirectUris,
-    scopes: app.scopes as OAuthApp["scopes"],
-    createdByActorId: app.createdByActorId,
-    createdAt: app.createdAt.toISOString(),
-    updatedAt: app.updatedAt.toISOString(),
-  };
-}
-
-function mapOAuthGrant(grant: typeof schema.oauthGrant.$inferSelect): OAuthGrant {
-  return {
-    id: grant.id,
-    teamId: grant.teamId,
-    appId: grant.appId,
-    actorId: grant.actorId,
-    scopes: grant.scopes as OAuthGrant["scopes"],
-    revokedAt: grant.revokedAt?.toISOString() ?? null,
-    createdAt: grant.createdAt.toISOString(),
-  };
-}
-
-function mapWebhookSubscription(
-  subscription: typeof schema.webhookSubscription.$inferSelect,
-): WebhookSubscription {
-  return {
-    id: subscription.id,
-    teamId: subscription.teamId,
-    url: subscription.url,
-    eventTypes: subscription.eventTypes,
-    status: subscription.status as WebhookSubscription["status"],
-    createdByActorId: subscription.createdByActorId,
-    createdAt: subscription.createdAt.toISOString(),
-    updatedAt: subscription.updatedAt.toISOString(),
-  };
-}
-
-function mapWebhookDelivery(delivery: typeof schema.webhookDelivery.$inferSelect): WebhookDelivery {
-  return {
-    id: delivery.id,
-    teamId: delivery.teamId,
-    subscriptionId: delivery.subscriptionId,
-    outboxEventId: delivery.outboxEventId,
-    status: delivery.status as WebhookDelivery["status"],
-    attempt: delivery.attempt,
-    requestPayload: delivery.requestPayload,
-    responseStatus: delivery.responseStatus,
-    responseBody: delivery.responseBody,
-    error: delivery.error,
-    nextAttemptAt: delivery.nextAttemptAt?.toISOString() ?? null,
-    deliveredAt: delivery.deliveredAt?.toISOString() ?? null,
-    createdAt: delivery.createdAt.toISOString(),
-    updatedAt: delivery.updatedAt.toISOString(),
-  };
-}
-
 function mapDocumentExtraction(
   extraction: typeof schema.documentExtraction.$inferSelect,
 ): DocumentExtraction {
@@ -4466,47 +4130,6 @@ function mapProviderSyncRun(syncRun: typeof schema.providerSyncRun.$inferSelect)
     transactionsImported: syncRun.transactionsImported,
     duplicateCount: syncRun.duplicateCount,
     error: syncRun.error,
-  };
-}
-
-function mapIntegrationConnection(
-  connection: typeof schema.integrationConnection.$inferSelect,
-): IntegrationConnection {
-  return {
-    id: connection.id,
-    teamId: connection.teamId,
-    category: connection.category as IntegrationConnection["category"],
-    provider: connection.provider,
-    providerConnectionId: connection.providerConnectionId,
-    displayName: connection.displayName,
-    status: connection.status as IntegrationConnection["status"],
-    capabilities: connection.capabilities,
-    tokenKeyId: connection.tokenKeyId,
-    tokenLastFour: connection.tokenLastFour,
-    lastSyncAt: connection.lastSyncAt?.toISOString() ?? null,
-    lastError: connection.lastError,
-    disabledAt: connection.disabledAt?.toISOString() ?? null,
-    createdByActorId: connection.createdByActorId,
-    createdAt: connection.createdAt.toISOString(),
-    updatedAt: connection.updatedAt.toISOString(),
-  };
-}
-
-function mapIntegrationSyncRun(
-  syncRun: typeof schema.integrationSyncRun.$inferSelect,
-): IntegrationSyncRun {
-  return {
-    id: syncRun.id,
-    teamId: syncRun.teamId,
-    integrationConnectionId: syncRun.integrationConnectionId,
-    category: syncRun.category as IntegrationSyncRun["category"],
-    provider: syncRun.provider,
-    status: syncRun.status as IntegrationSyncRun["status"],
-    startedAt: syncRun.startedAt.toISOString(),
-    completedAt: syncRun.completedAt?.toISOString() ?? null,
-    recordsSynced: syncRun.recordsSynced,
-    error: syncRun.error,
-    rawPayload: syncRun.rawPayload,
   };
 }
 

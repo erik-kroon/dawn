@@ -11,6 +11,8 @@
   },
   "scripts": {
     "db:push": "drizzle-kit push",
+    "db:pull": "drizzle-kit introspect",
+    "db:introspect": "drizzle-kit introspect",
     "db:generate": "drizzle-kit generate",
     "db:studio": "drizzle-kit studio",
     "db:migrate": "drizzle-kit migrate"
@@ -26,6 +28,7 @@
   },
   "devDependencies": {
     "@dawn/config": "workspace:*",
+    "@electric-sql/pglite": "^0.5.2",
     "@types/pg": "^8.16.0",
     "drizzle-kit": "^0.31.8",
     "typescript": "catalog:"

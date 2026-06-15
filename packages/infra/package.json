@@ -9,7 +9,7 @@
   "scripts": {
     "check-types": "tsgo --noEmit",
     "test": "bun test src/**/*.test.ts",
-    "dev": "alchemy dev",
+    "dev-dont-remove": "alchemy dev",
     "deploy": "alchemy deploy",
     "plan": "alchemy run",
     "destroy": "alchemy destroy"

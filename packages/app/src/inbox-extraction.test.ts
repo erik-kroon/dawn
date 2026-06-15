@@ -4,6 +4,7 @@ import {
   correctDocumentExtraction,
   createDeterministicDocumentExtractor,
   runDocumentExtraction,
+  runStoredDocumentExtraction,
   type BusinessDocument,
   type BusinessDocumentVersion,
   type DawnRepository,
@@ -261,6 +262,56 @@ describe("inbox extraction use cases", () => {
     expect(repository.auditEvents[0]).toMatchObject({ action: "document.extracted" });
     expect(repository.outboxEvents).toHaveLength(1);
     expect(repository.outboxEvents[0]).toMatchObject({ type: "document.extracted" });
+  });
+
+  test("runs stored document extraction through an app-owned storage adapter", async () => {
+    const repository = seededRepository();
+    const reads: string[] = [];
+
+    const result = await runStoredDocumentExtraction(
+      repository as unknown as DawnRepository,
+      {
+        async readText(input) {
+          reads.push(input.objectKey);
+          return "Acme Supplies\nReceipt R-100\nTotal USD 42.50";
+        },
+      },
+      createDeterministicDocumentExtractor(),
+      { actor: { id: "user_1", type: "user" }, requestId: "request_1", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        idempotencyKey: "extract_1",
+      },
+    );
+    const replay = await runStoredDocumentExtraction(
+      repository as unknown as DawnRepository,
+      {
+        async readText() {
+          throw new Error("storage should not be read on replay");
+        },
+      },
+      createDeterministicDocumentExtractor(),
+      { actor: { id: "user_1", type: "user" }, requestId: "request_2", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        idempotencyKey: "extract_1",
+      },
+    );
+
+    expect(reads).toEqual(["teams/team_1/documents/doc_1/versions/ver_1/receipt.txt"]);
+    expect(result.extraction.fields).toMatchObject({
+      merchantName: "Acme Supplies",
+      totalAmountMinor: 4250,
+      currency: "USD",
+    });
+    expect(replay.replayed).toBe(true);
+    expect(repository.auditEvents).toHaveLength(1);
   });
 
   test("persists user corrections as a new extraction version", async () => {

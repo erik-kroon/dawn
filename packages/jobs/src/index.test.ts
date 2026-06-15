@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { createOutboxDispatchJob, nextOutboxRetryAt, outboxEventToQueueMessages } from "./index";
+import {
+  createDawnQueueMessageHandlerRegistry,
+  createOutboxDispatchJob,
+  nextOutboxRetryAt,
+  outboxEventToQueueMessages,
+  type DawnQueueMessageHandlers,
+} from "./index";
 
 const event = {
   id: "outbox_1",
@@ -99,6 +105,43 @@ describe("job contracts", () => {
         idempotencyKey: "automation:run:outbox_1",
       },
       webhookDeliveryJob("transaction.transfer_pair.created"),
+    ]);
+  });
+
+  test("maps project outbox events to project invalidation input", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "project.created",
+        payload: { projectId: "project_1" },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "project.created",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "sync.invalidate",
+        teamId: "team_1",
+        collection: "projects",
+        cursor: null,
+        changedIds: ["project_1"],
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "sync:projects:outbox_1",
+      },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "project.created",
+        idempotencyKey: "automation:run:outbox_1",
+      },
+      webhookDeliveryJob("project.created"),
     ]);
   });
 
@@ -373,5 +416,34 @@ describe("job contracts", () => {
 
     expect(nextOutboxRetryAt({ attempt: 1, now }).toISOString()).toBe("2026-06-15T10:00:30.000Z");
     expect(nextOutboxRetryAt({ attempt: 20, now }).toISOString()).toBe("2026-06-15T11:00:00.000Z");
+  });
+
+  test("routes queue messages through registered handlers", async () => {
+    const handled: string[] = [];
+    const record = (expectedType: string) => async (message: { type: string }) => {
+      handled.push(`${expectedType}:${message.type}`);
+    };
+    const handlers: DawnQueueMessageHandlers = {
+      "outbox.dispatch": record("outbox.dispatch"),
+      "sync.invalidate": record("sync.invalidate"),
+      "document.extract": record("document.extract"),
+      "invoice.recurring.generate": record("invoice.recurring.generate"),
+      "insights.weekly.generate": record("insights.weekly.generate"),
+      "automation.run": record("automation.run"),
+      "bank.sync": record("bank.sync"),
+      "webhook.deliver": record("webhook.deliver"),
+      "team_data.export": record("team_data.export"),
+      "team_data.delete": record("team_data.delete"),
+    };
+    const registry = createDawnQueueMessageHandlerRegistry(handlers);
+
+    await registry.handle({
+      type: "team_data.delete",
+      teamId: "team_1",
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "team-data:delete:outbox_1",
+    });
+
+    expect(handled).toEqual(["team_data.delete:team_data.delete"]);
   });
 });

@@ -1,4 +1,5 @@
 import { auth } from "@dawn/auth";
+import { resolveSessionAppRequest, type ResolvedAppRequest } from "@dawn/app";
 import type { Context as HonoContext } from "hono";
 
 export type CreateContextOptions = {
@@ -20,3 +21,28 @@ export async function createContext({ context }: CreateContextOptions) {
 }
 
 export type Context = Awaited<ReturnType<typeof createContext>>;
+
+export function appRequestFromSession(
+  context: {
+    requestId: string;
+    session: NonNullable<Context["session"]>;
+  },
+  input: {
+    teamId?: string | null;
+    idempotencyKey?: string | null;
+    locale?: string | null;
+    timezone?: string | null;
+  } = {},
+): ResolvedAppRequest {
+  return resolveSessionAppRequest({
+    user: {
+      id: context.session.user.id,
+      email: context.session.user.email,
+    },
+    requestId: context.requestId,
+    teamId: input.teamId,
+    idempotencyKey: input.idempotencyKey,
+    locale: input.locale,
+    timezone: input.timezone,
+  });
+}
