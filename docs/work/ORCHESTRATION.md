@@ -277,7 +277,7 @@ pass, and the implementing agent has inspected the diff.
 | `c8e1d92` | Desktop quick capture shell          | Added Dawn deep links, tray quick capture, file association metadata, dashboard capture handoff, and shell helper tests.         |
 | `3a040c7` | Observability workspace              | Added operations permission, request tracing, redacted logs, operations read model/API/UI, and controlled failure tests.         |
 | `9f1f29c` | Security release gates               | Added release gate scripts/CI, rate limits, signed file URL policy, webhook signature verification, and tenant isolation tests.  |
-| Pending   | Data workflow queueing               | Adds audited/idempotent export and deletion requests, queue contracts, protected routes, dashboard controls, and CORS fallback.  |
+| `b5ab62e` | Data workflow queueing               | Adds audited/idempotent export and deletion requests, queue contracts, protected routes, dashboard controls, and CORS fallback.  |
 
 ## Implementation Notes
 
