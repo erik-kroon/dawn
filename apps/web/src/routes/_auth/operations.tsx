@@ -1,8 +1,13 @@
 import { Badge } from "@dawn/ui/components/badge";
 import { Button } from "@dawn/ui/components/button";
+import { Checkbox } from "@dawn/ui/components/checkbox";
 import { Input } from "@dawn/ui/components/input";
 import { Label } from "@dawn/ui/components/label";
-import { formatMoney } from "@dawn/domain";
+import {
+  detectCsvTransactionColumnMapping,
+  formatMoney,
+  parseCsvTransactionRows,
+} from "@dawn/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useBlocker, useNavigate } from "@tanstack/react-router";
 import {
@@ -55,6 +60,7 @@ type CsvImportMappingState = {
   debit: string;
   credit: string;
   currency: string;
+  invertAmount: boolean;
   categoryId: string;
 };
 
@@ -63,6 +69,16 @@ type CsvImportPreviewData = {
   readyCount: number;
   duplicateCount: number;
   invalidCount: number;
+  headers: string[];
+  detectedMapping: {
+    postedAt?: string | null;
+    description?: string | null;
+    amount?: string | null;
+    debit?: string | null;
+    credit?: string | null;
+    currency?: string | null;
+    invertAmount?: boolean | null;
+  };
   rows: {
     rowNumber: number;
     status: "ready" | "duplicate" | "invalid";
@@ -114,8 +130,10 @@ function OperationsRoute() {
     debit: "",
     credit: "",
     currency: "",
+    invertAmount: false,
     categoryId: "",
   });
+  const [csvParseError, setCsvParseError] = useState<string | null>(null);
   const [sandboxBankSession, setSandboxBankSession] = useState<{
     providerSessionId: string;
     linkToken: string;
@@ -367,6 +385,18 @@ function OperationsRoute() {
   );
   const hasCsvImportDraft =
     Boolean(csvFileName || csvText.trim() || csvPreviewMutation.data) && !csvCommitMutation.data;
+  const csvRows = useMemo(() => {
+    if (!csvText.trim()) {
+      return [];
+    }
+
+    try {
+      return parseCsvTransactionRows(csvText);
+    } catch {
+      return [];
+    }
+  }, [csvText]);
+  const csvHeaders = useMemo(() => Object.keys(csvRows[0]?.values ?? {}), [csvRows]);
 
   useBlocker({
     disabled: !hasCsvImportDraft,
@@ -958,7 +988,7 @@ function OperationsRoute() {
                         <p className="font-medium">{provider.displayName}</p>
                         <p className="text-xs text-muted-foreground">{provider.category}</p>
                       </div>
-                      <Badge variant={connected ? "outline" : "muted"}>
+                      <Badge variant={connected ? "outline" : "secondary"}>
                         {connected ? "Connected" : "Available"}
                       </Badge>
                     </div>
@@ -1276,8 +1306,26 @@ function OperationsRoute() {
                       return;
                     }
 
+                    const text = await file.text();
+
                     setCsvFileName(file.name);
-                    setCsvText(await file.text());
+                    setCsvText(text);
+                    setCsvParseError(null);
+                    try {
+                      const rows = parseCsvTransactionRows(text);
+                      const detected = mappingStateFromDetected(
+                        detectCsvTransactionColumnMapping(rows),
+                      );
+
+                      setCsvMapping((mapping) => ({
+                        ...detected,
+                        categoryId: mapping.categoryId,
+                      }));
+                    } catch (error) {
+                      setCsvParseError(
+                        error instanceof Error ? error.message : "CSV import file is invalid",
+                      );
+                    }
                     csvPreviewMutation.reset();
                     csvCommitMutation.reset();
                   }}
@@ -1299,46 +1347,59 @@ function OperationsRoute() {
                 </select>
               </Label>
             </div>
+            {csvHeaders.length > 0 ? (
+              <div className="grid gap-2 border border-border bg-card/30 p-3 text-xs text-muted-foreground md:grid-cols-4">
+                <span>{csvHeaders.length} detected columns</span>
+                <span>Date: {csvMapping.postedAt || "not mapped"}</span>
+                <span>Description: {csvMapping.description || "not mapped"}</span>
+                <span>
+                  Amount:{" "}
+                  {csvMapping.amount ||
+                    [csvMapping.debit, csvMapping.credit].filter(Boolean).join(" / ") ||
+                    "not mapped"}
+                </span>
+              </div>
+            ) : null}
             <div className="grid gap-2 md:grid-cols-3">
-              <Input
-                aria-label="CSV date column"
-                onChange={(event) =>
-                  setCsvMapping((mapping) => ({ ...mapping, postedAt: event.target.value }))
-                }
-                placeholder="Date column"
+              <ColumnSelect
+                headers={csvHeaders}
+                label="Date column"
+                onChange={(value) => setCsvMapping((mapping) => ({ ...mapping, postedAt: value }))}
+                required
                 value={csvMapping.postedAt}
               />
-              <Input
-                aria-label="CSV description column"
-                onChange={(event) =>
-                  setCsvMapping((mapping) => ({ ...mapping, description: event.target.value }))
+              <ColumnSelect
+                headers={csvHeaders}
+                label="Description column"
+                onChange={(value) =>
+                  setCsvMapping((mapping) => ({ ...mapping, description: value }))
                 }
-                placeholder="Description column"
+                required
                 value={csvMapping.description}
               />
-              <Input
-                aria-label="CSV signed amount column"
-                onChange={(event) =>
-                  setCsvMapping((mapping) => ({ ...mapping, amount: event.target.value }))
-                }
-                placeholder="Signed amount"
+              <ColumnSelect
+                headers={csvHeaders}
+                label="Signed amount"
+                onChange={(value) => setCsvMapping((mapping) => ({ ...mapping, amount: value }))}
                 value={csvMapping.amount}
               />
-              <Input
-                aria-label="CSV debit column"
-                onChange={(event) =>
-                  setCsvMapping((mapping) => ({ ...mapping, debit: event.target.value }))
-                }
-                placeholder="Debit optional"
+              <ColumnSelect
+                headers={csvHeaders}
+                label="Debit optional"
+                onChange={(value) => setCsvMapping((mapping) => ({ ...mapping, debit: value }))}
                 value={csvMapping.debit}
               />
-              <Input
-                aria-label="CSV credit column"
-                onChange={(event) =>
-                  setCsvMapping((mapping) => ({ ...mapping, credit: event.target.value }))
-                }
-                placeholder="Credit optional"
+              <ColumnSelect
+                headers={csvHeaders}
+                label="Credit optional"
+                onChange={(value) => setCsvMapping((mapping) => ({ ...mapping, credit: value }))}
                 value={csvMapping.credit}
+              />
+              <ColumnSelect
+                headers={csvHeaders}
+                label="Currency optional"
+                onChange={(value) => setCsvMapping((mapping) => ({ ...mapping, currency: value }))}
+                value={csvMapping.currency}
               />
               <select
                 aria-label="CSV category"
@@ -1355,7 +1416,21 @@ function OperationsRoute() {
                   </option>
                 ))}
               </select>
+              <label className="flex h-9 items-center gap-2 border border-border px-3 text-sm text-muted-foreground">
+                <Checkbox
+                  checked={csvMapping.invertAmount}
+                  disabled={!csvMapping.amount}
+                  onCheckedChange={(checked) =>
+                    setCsvMapping((mapping) => ({
+                      ...mapping,
+                      invertAmount: Boolean(checked),
+                    }))
+                  }
+                />
+                Invert signed amount
+              </label>
             </div>
+            {csvParseError ? <p className="text-xs text-destructive">{csvParseError}</p> : null}
             <div className="flex flex-wrap gap-2">
               <Button
                 disabled={!currentTeamId || !canImportCsv(csvText, csvAccountId, csvMapping)}
@@ -1636,11 +1711,68 @@ function normalizedCsvMapping(mapping: CsvImportMappingState) {
     debit: mapping.debit.trim() || null,
     credit: mapping.credit.trim() || null,
     currency: mapping.currency.trim() || null,
+    invertAmount: mapping.invertAmount,
     categoryId: mapping.categoryId || null,
   };
 }
 
+function mappingStateFromDetected(mapping: {
+  postedAt?: string | null;
+  description?: string | null;
+  amount?: string | null;
+  debit?: string | null;
+  credit?: string | null;
+  currency?: string | null;
+  invertAmount?: boolean | null;
+}): CsvImportMappingState {
+  return {
+    postedAt: mapping.postedAt ?? "",
+    description: mapping.description ?? "",
+    amount: mapping.amount ?? "",
+    debit: mapping.debit ?? "",
+    credit: mapping.credit ?? "",
+    currency: mapping.currency ?? "",
+    invertAmount: Boolean(mapping.invertAmount),
+    categoryId: "",
+  };
+}
+
+function ColumnSelect({
+  headers,
+  label,
+  onChange,
+  required = false,
+  value,
+}: {
+  headers: string[];
+  label: string;
+  onChange: (value: string) => void;
+  required?: boolean;
+  value: string;
+}) {
+  return (
+    <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+      {label}
+      <select
+        aria-label={`CSV ${label}`}
+        className="h-9 rounded-none border border-border bg-background px-2 text-sm text-foreground"
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      >
+        <option value="">{required ? "Select column" : "Not mapped"}</option>
+        {headers.map((header) => (
+          <option key={header} value={header}>
+            {header}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
+  const detected = mappingStateFromDetected(preview.detectedMapping);
+
   return (
     <div className="grid gap-2 border border-border p-3">
       <div className="grid gap-2 text-sm sm:grid-cols-4">
@@ -1657,6 +1789,11 @@ function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
           <span className="font-medium">{preview.totalRows}</span> total
         </p>
       </div>
+      <div className="grid gap-2 text-xs text-muted-foreground md:grid-cols-3">
+        <span>{preview.headers.length} columns scanned</span>
+        <span>Date: {detected.postedAt || "not detected"}</span>
+        <span>Amount: {detected.amount || detected.debit || "not detected"}</span>
+      </div>
       <div className="max-h-64 overflow-auto border border-border">
         {preview.rows.slice(0, 25).map((row) => (
           <div
@@ -1668,15 +1805,21 @@ function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
             <span>
               {row.errors.length > 0
                 ? row.errors.join(", ")
-                : `${row.values.Description ?? row.values.description ?? "transaction"} · ${
-                    row.values.Amount ?? row.values.amount ?? ""
-                  }`}
+                : `${mappedCsvValue(row.values, detected.description, "transaction")} · ${mappedCsvValue(
+                    row.values,
+                    detected.amount || detected.debit || detected.credit,
+                    "",
+                  )}`}
             </span>
           </div>
         ))}
       </div>
     </div>
   );
+}
+
+function mappedCsvValue(values: Record<string, string>, column: string, fallback: string) {
+  return column ? values[column] || fallback : fallback;
 }
 
 function parseMoneyInputToMinor(value: string) {

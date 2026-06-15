@@ -112,6 +112,7 @@ export type CsvTransactionColumnMapping = {
   debit?: string | null;
   credit?: string | null;
   currency?: string | null;
+  invertAmount?: boolean;
 };
 
 export type CsvTransactionImportRow = {
@@ -287,6 +288,45 @@ export function parseCsvTransactionRows(csv: string): CsvTransactionImportRow[] 
     }));
 }
 
+export function detectCsvTransactionColumnMapping(
+  rows: readonly CsvTransactionImportRow[],
+): CsvTransactionColumnMapping {
+  const headers = Object.keys(rows[0]?.values ?? {});
+
+  return {
+    postedAt:
+      preferredHeader(headers, [
+        "date",
+        "posted date",
+        "posting date",
+        "transaction date",
+        "booked date",
+        "value date",
+      ]) ?? "",
+    description:
+      preferredHeader(headers, [
+        "description",
+        "merchant",
+        "merchant name",
+        "name",
+        "details",
+        "memo",
+        "narrative",
+        "transaction",
+      ]) ?? "",
+    amount:
+      preferredHeader(headers, ["amount", "transaction amount", "net amount", "total", "value"]) ??
+      null,
+    debit:
+      preferredHeader(headers, ["debit", "withdrawal", "withdrawals", "outflow", "paid out"]) ??
+      null,
+    credit:
+      preferredHeader(headers, ["credit", "deposit", "deposits", "inflow", "paid in"]) ?? null,
+    currency: preferredHeader(headers, ["currency", "currency code", "curr"]) ?? null,
+    invertAmount: false,
+  };
+}
+
 export function csvRowToLedgerDraft(input: {
   teamId: string;
   accountId: string;
@@ -333,7 +373,12 @@ function csvRowAmountMinor(
   currency: string,
 ) {
   if (mapping.amount) {
-    return parseMoneyAmountMinor(requiredCsvValue(row, mapping.amount, "amount"), currency);
+    const amountMinor = parseMoneyAmountMinor(
+      requiredCsvValue(row, mapping.amount, "amount"),
+      currency,
+    );
+
+    return mapping.invertAmount ? -amountMinor : amountMinor;
   }
 
   const debitAmount = mapping.debit ? optionalCsvValue(row, mapping.debit) : null;
@@ -372,6 +417,28 @@ function requiredCsvValue(row: CsvTransactionImportRow, column: string, label: s
 
 function optionalCsvValue(row: CsvTransactionImportRow, column: string) {
   return row.values[column]?.trim() || null;
+}
+
+function preferredHeader(headers: readonly string[], candidates: readonly string[]) {
+  const exactCandidates = new Set(candidates.map(normalizeHeader));
+  const exact = headers.find((header) => exactCandidates.has(normalizeHeader(header)));
+
+  if (exact) {
+    return exact;
+  }
+
+  return headers.find((header) => {
+    const normalized = normalizeHeader(header);
+    return candidates.some((candidate) => normalized.includes(normalizeHeader(candidate)));
+  });
+}
+
+function normalizeHeader(header: string) {
+  return header
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function negativeCsvAmount(amount: string) {

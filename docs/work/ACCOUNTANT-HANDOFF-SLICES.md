@@ -44,16 +44,16 @@ Live Gmail OAuth and email delivery should not block completion of local product
 
 ## Progress Tracker
 
-| Slice                                                   | Status      | Notes                                                                                                                                                                                                                                                                                                    |
-| ------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Accountant Packet Tracer                             | Completed   | Local tracer exports reviewed transactions to a ZIP with `transactions.csv`, `manifest.json`, optional resolved attachments, idempotency, audit, outbox, API, and transactions-page download wiring. Browser smoke reached `/login`; authenticated click smoke still needs a local test account/session. |
+| Slice                                                   | Status      | Notes                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1. Accountant Packet Tracer                             | Completed   | Local tracer exports reviewed transactions to a ZIP with `transactions.csv`, `manifest.json`, optional resolved attachments, idempotency, audit, outbox, API, and transactions-page download wiring. Browser smoke reached `/login`; authenticated click smoke still needs a local test account/session.     |
 | 2. Midday-Parity Transaction Lifecycle And Review Queue | Completed   | Added accountant lifecycle status, derived receipt/export readiness, DB persistence, audited/idempotent status transitions, sync invalidation, ready-only export semantics, and transactions-page queue filters/actions. Browser smoke still needs a local test account/session for authenticated UI clicks. |
-| 3. CSV Import Wizard Parity Plus                        | Not started | Makes bank CSV import Midday-parity or better.                                                                                                                                                                                                                                                           |
-| 4. Gmail Connector Production Readiness                 | Not started | Live proof depends on Google OAuth credentials.                                                                                                                                                                                                                                                          |
-| 5. Receipt Matching Parity Plus                         | Not started | Bidirectional matching and feedback memory.                                                                                                                                                                                                                                                              |
-| 6. Accountant Export Package Depth                      | Not started | ZIP/XLSX/email/status/history depth.                                                                                                                                                                                                                                                                     |
-| 7. Accountant Access And Handoff Audit                  | Not started | Uses accountant role for better-than-Midday collaboration.                                                                                                                                                                                                                                               |
-| 8. Operational Hardening And Accountant Close Loop      | Not started | Monthly close reliability and observability.                                                                                                                                                                                                                                                             |
+| 3. CSV Import Wizard Parity Plus                        | In progress | Local import wizard sub-slice adds header auto-detection, mapped column selectors, sign inversion, richer preview metadata, duplicate visibility, and synchronous commit. Remaining: real large-file background import job with stored payload/worker execution.                                              |
+| 4. Gmail Connector Production Readiness                 | Not started | Live proof depends on Google OAuth credentials.                                                                                                                                                                                                                                                              |
+| 5. Receipt Matching Parity Plus                         | Not started | Bidirectional matching and feedback memory.                                                                                                                                                                                                                                                                  |
+| 6. Accountant Export Package Depth                      | Not started | ZIP/XLSX/email/status/history depth.                                                                                                                                                                                                                                                                         |
+| 7. Accountant Access And Handoff Audit                  | Not started | Uses accountant role for better-than-Midday collaboration.                                                                                                                                                                                                                                                   |
+| 8. Operational Hardening And Accountant Close Loop      | Not started | Monthly close reliability and observability.                                                                                                                                                                                                                                                                 |
 
 ## Outcome
 
@@ -224,6 +224,8 @@ Status: Completed on 2026-06-15.
 
 Bring Dawn's CSV import UX and reliability up to Midday parity, then improve it with Dawn's existing domain/app boundaries.
 
+Status: In progress. Local wizard sub-slice completed on 2026-06-15; large background import execution remains.
+
 ## Scope
 
 - Replace or deepen the operations CSV import surface into a guided flow: select file, detect columns, map fields, preview rows, confirm import, show results.
@@ -247,20 +249,23 @@ Bring Dawn's CSV import UX and reliability up to Midday parity, then improve it 
 
 ## Acceptance Criteria
 
-- [ ] A user can upload a company bank CSV and map fields without editing code.
-- [ ] Common bank headers are auto-detected before the user confirms.
-- [ ] The preview shows ready, duplicate, and invalid rows with useful reasons.
-- [ ] The user can invert amount sign when the bank export needs it.
+- [x] A user can upload a company bank CSV and map fields without editing code.
+- [x] Common bank headers are auto-detected before the user confirms.
+- [x] The preview shows ready, duplicate, and invalid rows with useful reasons.
+- [x] The user can invert amount sign when the bank export needs it.
 - [ ] Small imports commit immediately; large imports create a trackable job.
-- [ ] Re-importing the same file/rows does not create duplicate transactions.
-- [ ] Import results update transaction review and matching queues.
+- [x] Re-importing the same file/rows does not create duplicate transactions.
+- [x] Import results update transaction review and matching queues.
 
 ## Verification
 
-- `bun test packages/domain/src/csv-import.test.ts packages/app/src/banking.test.ts packages/app/src/ledger.test.ts`
-- Job tests for large import enqueue/status.
-- Browser smoke with representative CSV fixtures: normal, inverted amount, duplicate rows, invalid dates, missing amount.
-- `bun run check-types`
+- `bun test packages/domain/src/csv-import.test.ts packages/app/src/ledger.test.ts` passed: 19 tests.
+- `bun test packages/app` passed: 120 tests.
+- `bun test packages/jobs/src/index.test.ts` passed: 17 tests.
+- `bun run check-types` passed, including the web production build.
+- `bun run check` passed; it runs `oxlint && oxfmt --write`.
+- Browser smoke opened `http://localhost:3001/operations`, which redirected to `http://localhost:3001/login`; authenticated CSV upload/preview/commit smoke remains blocked until a local test account/session is available.
+- Large import job verification is not complete because Dawn does not yet have a transaction import worker payload/storage contract.
 
 ## Dependencies
 

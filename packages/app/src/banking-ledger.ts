@@ -16,6 +16,7 @@ import {
   assertLedgerTransactionDraft,
   createReportTotals,
   csvRowToLedgerDraft,
+  detectCsvTransactionColumnMapping,
   deriveTransactionAccountantStatus,
   ledgerDuplicateKey,
   parseCsvTransactionRows,
@@ -183,6 +184,8 @@ export type CsvTransactionImportPreviewRow = {
 export type CsvTransactionImportPreview = {
   teamId: string;
   accountId: string;
+  headers: string[];
+  detectedMapping: CsvTransactionImportMapping;
   rows: CsvTransactionImportPreviewRow[];
   totalRows: number;
   readyCount: number;
@@ -2395,6 +2398,11 @@ async function buildCsvImportPreview(
   return {
     teamId: command.teamId,
     accountId: command.accountId,
+    headers: Object.keys(rows[0]?.values ?? {}),
+    detectedMapping: {
+      ...detectCsvTransactionColumnMapping(rows),
+      categoryId: null,
+    },
     rows: previewRows,
     totalRows: previewRows.length,
     readyCount: previewRows.filter((row) => row.status === "ready").length,

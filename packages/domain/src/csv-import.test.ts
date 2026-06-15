@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   csvRowToLedgerDraft,
+  detectCsvTransactionColumnMapping,
   ledgerDuplicateKey,
   parseCsvTransactionRows,
   parseMoneyAmountMinor,
@@ -131,6 +132,31 @@ describe("csv transaction import", () => {
     expect(expense.type).toBe("expense");
     expect(income.money).toEqual({ amountMinor: 5000, currency: "USD" });
     expect(income.type).toBe("income");
+  });
+
+  test("detects common bank headers and supports inverted signed amount exports", () => {
+    const rows = parseCsvTransactionRows(
+      "Transaction Date,Merchant Name,Transaction Amount,Currency\n2026-06-14,Figma,12.00,USD\n",
+    );
+    const mapping = detectCsvTransactionColumnMapping(rows);
+
+    expect(mapping).toMatchObject({
+      postedAt: "Transaction Date",
+      description: "Merchant Name",
+      amount: "Transaction Amount",
+      currency: "Currency",
+    });
+
+    const draft = csvRowToLedgerDraft({
+      teamId: "team_1",
+      accountId: "acct_1",
+      accountCurrency: "USD",
+      mapping: { ...mapping, invertAmount: true },
+      row: rows[0]!,
+    });
+
+    expect(draft.money).toEqual({ amountMinor: -1200, currency: "USD" });
+    expect(draft.type).toBe("expense");
   });
 
   test("rejects invalid CSV rows with row-level errors", () => {

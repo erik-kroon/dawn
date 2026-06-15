@@ -655,6 +655,7 @@ const csvTransactionImportMappingInput = z
     debit: z.string().min(1).nullable().optional(),
     credit: z.string().min(1).nullable().optional(),
     currency: z.string().min(1).nullable().optional(),
+    invertAmount: z.boolean().optional(),
     categoryId: z.string().min(1).nullable().optional(),
   })
   .refine((mapping) => mapping.amount || mapping.debit || mapping.credit, {

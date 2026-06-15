@@ -591,6 +591,12 @@ describe("CSV transaction import", () => {
     expect(preview.readyCount).toBe(1);
     expect(preview.duplicateCount).toBe(1);
     expect(preview.invalidCount).toBe(1);
+    expect(preview.headers).toEqual(["Date", "Description", "Amount"]);
+    expect(preview.detectedMapping).toMatchObject({
+      postedAt: "Date",
+      description: "Description",
+      amount: "Amount",
+    });
     expect(preview.rows.map((row) => row.status)).toEqual(["duplicate", "ready", "invalid"]);
   });
 
@@ -650,6 +656,30 @@ describe("CSV transaction import", () => {
       { amountMinor: 5000, currency: "USD" },
     ]);
     expect(result.preview.rows.map((row) => row.status)).toEqual(["ready", "ready"]);
+  });
+
+  test("imports bank exports whose signed amount convention needs inversion", async () => {
+    const repository = seededRepository("owner");
+    const command = {
+      teamId: "team_1",
+      accountId: "acct_1",
+      fileName: "bank-export.csv",
+      csvText:
+        "Transaction Date,Merchant,Amount,Currency\n2026-06-14,Figma subscription,12.34,USD\n",
+      mapping: {
+        postedAt: "Transaction Date",
+        description: "Merchant",
+        amount: "Amount",
+        currency: "Currency",
+        invertAmount: true,
+      },
+      idempotencyKey: "idem_invert",
+    };
+
+    const result = await commitCsvTransactionImport(repository, context, command);
+
+    expect(result.transactions[0]?.money).toEqual({ amountMinor: -1234, currency: "USD" });
+    expect(result.transactions[0]?.type).toBe("expense");
   });
 
   test("blocks viewers from CSV import", async () => {
