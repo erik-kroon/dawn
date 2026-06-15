@@ -19,6 +19,10 @@ describe("public API contract", () => {
       "/documents",
       "/documents/uploads",
       "/documents/{documentId}/download",
+      "/inbox-items",
+      "/inbox-items/{inboxItemId}/extraction-correction",
+      "/inbox-matches/{suggestionId}/accept",
+      "/inbox-matches/{suggestionId}/reject",
       "/customers",
       "/products",
       "/projects",
@@ -42,6 +46,15 @@ describe("public API contract", () => {
     });
     expect(document.paths["/documents/{documentId}/download"]).toMatchObject({
       post: { summary: "Create a signed document download" },
+    });
+    expect(document.paths["/inbox-items/{inboxItemId}/extraction-correction"]).toMatchObject({
+      post: { summary: "Correct extracted document fields" },
+    });
+    expect(document.paths["/inbox-matches/{suggestionId}/accept"]).toMatchObject({
+      post: { summary: "Accept an inbox transaction match" },
+    });
+    expect(document.paths["/inbox-matches/{suggestionId}/reject"]).toMatchObject({
+      post: { summary: "Reject an inbox transaction match" },
     });
     expect(document.paths["/reports/overview"]).toMatchObject({
       get: { summary: "Read business report overview" },

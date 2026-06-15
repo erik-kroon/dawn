@@ -7,6 +7,7 @@ import { createContext } from "@dawn/api/context";
 import { createDocumentUrlSigner, verifyDocumentUrlToken } from "@dawn/api/document-url";
 import { appRouter } from "@dawn/api/routers/index";
 import {
+  acceptInboxMatch,
   AppError,
   completeDocumentUpload,
   createCustomer,
@@ -25,13 +26,17 @@ import {
   listBillingWorkspace,
   listBusinessReport,
   listDocuments,
+  listInboxItems,
   listProjectWorkspace,
   listTransactionReviewWorkspace,
+  correctDocumentExtraction,
+  rejectInboxMatch,
   requestBankConnectionSyncFromWebhook,
   resolveTeamAccess,
   resolvePublicApiKey,
   runAutomationsForOutboxEvent,
   syncBankConnection,
+  type DocumentExtractionFields,
   type WebhookDeliveryProvider,
 } from "@dawn/app";
 import { createMockInsightGenerationProvider } from "@dawn/ai";
@@ -462,6 +467,117 @@ app.post("/api/v1/documents/:documentId/download", async (c) => {
     );
 
     return c.json(result);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.get("/api/v1/inbox-items", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+  const teamId = c.req.query("teamId");
+
+  if (!teamId) {
+    return c.json({ error: "teamId is required" }, 400);
+  }
+
+  try {
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "documents.read");
+    const workspace = await listInboxItems(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      { teamId },
+    );
+
+    return c.json({
+      data: workspace.inboxItems,
+    });
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/inbox-items/:inboxItemId/extraction-correction", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "documents.write");
+    const result = await correctDocumentExtraction(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        inboxItemId: c.req.param("inboxItemId"),
+        fields: requireDocumentExtractionFields(body.fields),
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/inbox-matches/:suggestionId/accept", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "transactions.write");
+    const result = await acceptInboxMatch(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        suggestionId: c.req.param("suggestionId"),
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/inbox-matches/:suggestionId/reject", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "transactions.write");
+    const result = await rejectInboxMatch(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        suggestionId: c.req.param("suggestionId"),
+        reason: optionalString(body.reason),
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
   } catch (error) {
     return publicApiError(c, error);
   }
@@ -978,6 +1094,46 @@ function requirePositiveSafeInteger(value: unknown, name: string) {
   return integer;
 }
 
+function requireDocumentExtractionFields(value: unknown): DocumentExtractionFields {
+  if (!isRecord(value)) {
+    throw new AppError("CONFLICT", "fields are required");
+  }
+
+  return {
+    documentType: optionalDocumentType(value.documentType),
+    merchantName: optionalString(value.merchantName),
+    customerName: optionalString(value.customerName),
+    issuedAt: optionalString(value.issuedAt),
+    dueAt: optionalString(value.dueAt),
+    invoiceNumber: optionalString(value.invoiceNumber),
+    totalAmountMinor: optionalNumber(value.totalAmountMinor),
+    currency: optionalString(value.currency),
+    taxAmountMinor: optionalNumber(value.taxAmountMinor),
+  };
+}
+
+function optionalDocumentType(value: unknown): DocumentExtractionFields["documentType"] {
+  if (value == null || value === "") {
+    return null;
+  }
+
+  const supported = [
+    "receipt",
+    "invoice_received",
+    "invoice_sent",
+    "bank_statement",
+    "contract",
+    "tax_document",
+    "other",
+  ] as const;
+
+  if (supported.includes(value as (typeof supported)[number])) {
+    return value as (typeof supported)[number];
+  }
+
+  throw new AppError("CONFLICT", "fields.documentType is invalid");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1054,6 +1210,39 @@ export function publicApiOpenApiDocument(requestUrl: string) {
         post: {
           summary: "Create a signed document download",
           parameters: [{ name: "documentId", in: "path", required: true }],
+        },
+      },
+      "/inbox-items": {
+        get: {
+          summary: "List team inbox items",
+          parameters: [{ name: "teamId", in: "query", required: true }],
+        },
+      },
+      "/inbox-items/{inboxItemId}/extraction-correction": {
+        post: {
+          summary: "Correct extracted document fields",
+          parameters: [
+            { name: "inboxItemId", in: "path", required: true },
+            { name: "Idempotency-Key", in: "header", required: true },
+          ],
+        },
+      },
+      "/inbox-matches/{suggestionId}/accept": {
+        post: {
+          summary: "Accept an inbox transaction match",
+          parameters: [
+            { name: "suggestionId", in: "path", required: true },
+            { name: "Idempotency-Key", in: "header", required: true },
+          ],
+        },
+      },
+      "/inbox-matches/{suggestionId}/reject": {
+        post: {
+          summary: "Reject an inbox transaction match",
+          parameters: [
+            { name: "suggestionId", in: "path", required: true },
+            { name: "Idempotency-Key", in: "header", required: true },
+          ],
         },
       },
       "/customers": {
