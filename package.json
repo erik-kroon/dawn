@@ -38,6 +38,7 @@
     "check:secrets": "bun run scripts/check-secrets.ts",
     "check:worker": "vp run --filter server build",
     "release:gate": "bun run check:ignored-ts && bun run check:secrets && bun run check:migrations && bun run check-types && bun run test && bun run eval:ai && bun run check && bun run check:worker",
+    "test:db": "bun test packages/db/src/transaction-review.integration.test.ts",
     "lint": "vp lint",
     "format": "vp fmt",
     "staged": "vp staged",
