@@ -725,7 +725,7 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
         thresholds: suggestion.thresholds,
         calibration: suggestion.calibration ?? null,
         matchType: suggestion.matchType,
-        status: existing?.status ?? "suggested",
+        status: existing?.status === "expired" ? "suggested" : (existing?.status ?? "suggested"),
         createdAt: existing?.createdAt ?? "2026-06-15T10:04:00.000Z",
         updatedAt: "2026-06-15T10:04:00.000Z",
         transaction: this.transactions.get(suggestion.transactionId) ?? null,

@@ -1044,11 +1044,14 @@ export async function generateInboxMatchSuggestions(
     )
       .filter((suggestion) => suggestion.score >= policy.suggestedScoreThreshold)
       .slice(0, 5);
-    const persistedSuggestions = await inboxRepository.upsertInboxMatchSuggestions({
-      teamId: command.teamId,
-      inboxItemId: inboxItem.id,
+    const persistedSuggestions = currentSuggestedPersistedSuggestions(
+      await inboxRepository.upsertInboxMatchSuggestions({
+        teamId: command.teamId,
+        inboxItemId: inboxItem.id,
+        suggestions,
+      }),
       suggestions,
-    });
+    );
     const autoAccepted = await maybeAutoAcceptInboxMatch({
       repository: inboxRepository,
       context,
@@ -1162,11 +1165,14 @@ export async function matchPendingInboxForTransaction(
         continue;
       }
 
-      const upserted = await inboxRepository.upsertInboxMatchSuggestions({
-        teamId: command.teamId,
-        inboxItemId: inboxItem.id,
-        suggestions: [suggestion],
-      });
+      const upserted = currentSuggestedPersistedSuggestions(
+        await inboxRepository.upsertInboxMatchSuggestions({
+          teamId: command.teamId,
+          inboxItemId: inboxItem.id,
+          suggestions: [suggestion],
+        }),
+        [suggestion],
+      );
       const autoAccepted = await maybeAutoAcceptInboxMatch({
         repository: inboxRepository,
         context,
@@ -1584,7 +1590,8 @@ async function maybeAutoAcceptInboxMatch(input: {
     ? input.persistedSuggestions.find(
         (suggestion) =>
           suggestion.inboxItemId === candidate.inboxItemId &&
-          suggestion.transactionId === candidate.transactionId,
+          suggestion.transactionId === candidate.transactionId &&
+          suggestion.status === "suggested",
       )
     : null;
   const evaluation = evaluateAutoMatch({
@@ -1689,6 +1696,21 @@ function isTransactionAccountantLifecycleRepository(
   return (
     "countTransactionAttachmentsForTeam" in repository &&
     "updateTransactionAccountantStatusForTeam" in repository
+  );
+}
+
+function currentSuggestedPersistedSuggestions(
+  persistedSuggestions: InboxTransactionMatchSuggestion[],
+  candidateSuggestions: InboxMatchSuggestion[],
+) {
+  return persistedSuggestions.filter(
+    (persisted) =>
+      persisted.status === "suggested" &&
+      candidateSuggestions.some(
+        (candidate) =>
+          candidate.inboxItemId === persisted.inboxItemId &&
+          candidate.transactionId === persisted.transactionId,
+      ),
   );
 }
 

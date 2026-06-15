@@ -347,6 +347,10 @@ remains blocked until Google OAuth credentials and a test mailbox are available.
 
 Make transaction-to-receipt matching at least Midday-parity for accountant handoff, with Dawn-specific safeguards around financial state.
 
+Status: Completed on 2026-06-15 for domain/app/job behavior. Focused browser
+smoke remains deferred while the inbox and transaction UI files are under
+concurrent coss work.
+
 ## Scope
 
 - Ensure matching runs both ways: new transactions search pending inbox items, and new inbox items search existing transactions.
@@ -372,20 +376,25 @@ Make transaction-to-receipt matching at least Midday-parity for accountant hando
 
 ## Acceptance Criteria
 
-- [ ] Importing a transaction can produce receipt/invoice match suggestions from existing inbox items.
-- [ ] Syncing a Gmail receipt can produce transaction match suggestions from existing transactions.
-- [ ] Suggestions show human-readable reasons, not only a numeric score.
-- [ ] Accepting a suggestion links the document and updates transaction readiness.
-- [ ] Rejecting a suggestion prevents the same bad match from resurfacing.
-- [ ] High-confidence auto-match, if enabled, is audited and reversible.
-- [ ] Matching quality is measured against fixture cases before broadening thresholds.
+- [x] Importing a transaction can produce receipt/invoice match suggestions from existing inbox items.
+- [x] Syncing a Gmail receipt can produce transaction match suggestions from existing transactions.
+- [x] Suggestions show human-readable reasons, not only a numeric score.
+- [x] Accepting a suggestion links the document and updates transaction readiness.
+- [x] Rejecting a suggestion prevents the same bad match from resurfacing.
+- [x] High-confidence auto-match, if enabled, is audited and reversible.
+- [x] Matching quality is measured against fixture cases before broadening thresholds.
 
 ## Verification
 
 - `bun test packages/domain/src/matching-evaluation.test.ts packages/domain/src/golden-datasets.test.ts`
+  passed: 7 tests.
 - `bun test packages/app/src/inbox-matching.test.ts packages/app/src/inbox-extraction.test.ts`
-- Focused browser smoke: accept and reject match suggestions from both inbox and transaction screens.
-- `bun run check-types`
+  passed: 15 tests.
+- `bun test packages/jobs/src/index.test.ts` passed: 18 tests.
+- `bun run check-types` passed, including the web production build.
+- Focused browser smoke for accepting and rejecting match suggestions from both
+  inbox and transaction screens was deferred to avoid touching the concurrent
+  coss UI work.
 
 ## Dependencies
 

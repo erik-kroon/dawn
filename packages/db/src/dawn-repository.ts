@@ -1872,9 +1872,10 @@ export class DrizzleDawnRepository implements DrizzleRepository {
           thresholds: sql`excluded.thresholds`,
           calibration: sql`excluded.calibration`,
           matchType: sql`excluded.match_type`,
+          status: "suggested",
           updatedAt: new Date(),
         },
-        setWhere: eq(schema.inboxMatchSuggestion.status, "suggested"),
+        setWhere: inArray(schema.inboxMatchSuggestion.status, ["suggested", "expired"]),
       });
 
     return this.listInboxMatchSuggestions(input.teamId, input.inboxItemId);

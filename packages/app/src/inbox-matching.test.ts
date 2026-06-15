@@ -225,7 +225,7 @@ class MemoryMatchingRepository {
         thresholds: suggestion.thresholds,
         calibration: suggestion.calibration ?? null,
         matchType: suggestion.matchType,
-        status: existing?.status ?? "suggested",
+        status: existing?.status === "expired" ? "suggested" : (existing?.status ?? "suggested"),
         createdAt: existing?.createdAt ?? "2026-06-14T00:00:00.000Z",
         updatedAt: "2026-06-14T00:00:00.000Z",
         transaction:
@@ -526,6 +526,56 @@ describe("inbox matching use cases", () => {
       }),
     ).rejects.toThrow("Only suggested inbox matches can be accepted");
     expect(repository.attachments).toEqual([{ transactionId: "txn_1", documentId: "doc_1" }]);
+  });
+
+  test("revives expired competing suggestions after an accepted match is rejected", async () => {
+    const repository = new MemoryMatchingRepository();
+    repository.transactions = [
+      repository.transactions[0]!,
+      {
+        ...repository.transactions[0]!,
+        id: "txn_2",
+        providerTransactionId: "provider_2",
+      },
+    ];
+    const generated = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      { teamId: "team_1", inboxItemId: "inbox_1", limit: 2 },
+    );
+
+    await acceptInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: generated.suggestions[0]?.id ?? "",
+      idempotencyKey: "accept_match_1",
+    });
+    await rejectInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: generated.suggestions[0]?.id ?? "",
+      reason: "wrong match",
+      idempotencyKey: "reject_match_1",
+    });
+
+    const regenerated = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      { teamId: "team_1", inboxItemId: "inbox_1", limit: 2 },
+    );
+
+    expect(regenerated.suggestions).toHaveLength(1);
+    expect(regenerated.suggestions[0]).toMatchObject({
+      transactionId: "txn_2",
+      status: "suggested",
+    });
+
+    const accepted = await acceptInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: regenerated.suggestions[0]?.id ?? "",
+      idempotencyKey: "accept_match_2",
+    });
+
+    expect(accepted.suggestion.transactionId).toBe("txn_2");
+    expect(repository.attachments).toEqual([{ transactionId: "txn_2", documentId: "doc_1" }]);
   });
 
   test("matches a pending inbox item when a transaction arrives later", async () => {
