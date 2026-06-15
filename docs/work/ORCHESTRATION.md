@@ -65,7 +65,7 @@ pass, and the implementing agent has inspected the diff.
 | 21  | AI Evaluation Harness                                        | Verified deterministic foundation, provider evals blocked   | Slices 19, 20            | Deterministic eval fixtures, runner, release gate, focused tests, typecheck/check.                                       |
 | 22  | Automation Rules                                             | Verified foundation, live/manual automation review blocked  | Slices 8, 20             | Rule/action tests; protected API tests; job contract tests; migration; typecheck/check.                                  |
 | 23  | Public API, OAuth Apps, API Keys, And Webhooks               | Verified foundation, live integration review blocked        | Slices 3, 8              | API contract tests; scope tests; webhook retry/failure tests; migration; typecheck/check.                                |
-| 24  | Accounting, Payments, Messaging, And Email Provider Adapters | Not started                                                 | Slices 16, 23            | Adapter contract tests; sandbox tests where available; manual status review.                                             |
+| 24  | Accounting, Payments, Messaging, And Email Provider Adapters | Verified foundation, live provider review blocked           | Slices 16, 23            | Adapter contract tests; app/API tests; migration; typecheck/check; manual status review blocked.                         |
 | 25  | Desktop Quick Capture And Native Shell Deepening             | Not started                                                 | Slices 12, 13            | Desktop build/smoke; file capture test.                                                                                  |
 | 26  | Observability, Admin Tools, And Operations                   | Not started                                                 | Slices 8, 11, 16, 20     | Controlled failure; redaction review; data workflow tests.                                                               |
 | 27  | Security Hardening And Release Gates                         | Not started                                                 | Broad product foundation | Full check suite; integration tests; ignored-error review.                                                               |
@@ -220,10 +220,15 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 22     | `bun test packages/jobs/src/index.test.ts packages/app/src/outbox-dispatch.test.ts packages/app/src/automations.test.ts packages/api/src/router.test.ts`                                                                                                                                                                     | Pass    | 33 tests passed for automation job contracts, outbox dispatch queueing, app use cases, protected API routes, approval-required actions, and run logs.            |
 | 2026-06-15 slice 22     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
 | 2026-06-15 slice 22     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 255 files.                                                                                                         |
-| 2026-06-15 slice 23     | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0017_demonic_fenris.sql` for API keys, OAuth apps/grants, webhook subscriptions, and webhook delivery logs.               |
-| 2026-06-15 slice 23     | `bun test packages/jobs/src/index.test.ts packages/app/src/outbox-dispatch.test.ts packages/app/src/developers.test.ts packages/api/src/router.test.ts apps/server/src/public-api.test.ts`                                                                                                                                    | Pass    | 35 tests passed for public API job contracts, developer use cases, protected developer routes, OpenAPI paths, one-time secret replay, and webhook failures.      |
+| 2026-06-15 slice 23     | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0017_demonic_fenris.sql` for API keys, OAuth apps/grants, webhook subscriptions, and webhook delivery logs.                |
+| 2026-06-15 slice 23     | `bun test packages/jobs/src/index.test.ts packages/app/src/outbox-dispatch.test.ts packages/app/src/developers.test.ts packages/api/src/router.test.ts apps/server/src/public-api.test.ts`                                                                                                                                   | Pass    | 35 tests passed for public API job contracts, developer use cases, protected developer routes, OpenAPI paths, one-time secret replay, and webhook failures.      |
 | 2026-06-15 slice 23     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
 | 2026-06-15 slice 23     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 258 files.                                                                                                         |
+| 2026-06-15 slice 24     | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0018_worried_ink.sql` for generic integration connections and sync runs.                                                   |
+| 2026-06-15 slice 24     | `bun test packages/integrations/src/providers.test.ts packages/integrations/src/banking.test.ts packages/integrations/src/invoice-delivery.test.ts packages/app/src/integrations.test.ts packages/api/src/router.test.ts`                                                                                                    | Pass    | 29 tests passed for adapter capabilities, token metadata, integration connect/sync/failure/disable use cases, and protected routes.                              |
+| 2026-06-15 slice 24     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
+| 2026-06-15 slice 24     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 261 files.                                                                                                         |
+| 2026-06-15 slice 24     | `bun test packages/integrations/src/providers.test.ts packages/integrations/src/banking.test.ts packages/integrations/src/invoice-delivery.test.ts packages/app/src/integrations.test.ts packages/api/src/router.test.ts`                                                                                                    | Pass    | Final focused rerun after formatting: 29 tests passed.                                                                                                          |
 
 ## Commit Log
 
@@ -254,6 +259,7 @@ pass, and the implementing agent has inspected the diff.
 | `2e1e371` | AI evaluation harness                | Added deterministic AI eval fixtures, runner, CLI release gate, tests, and short release-gate guidance.                          |
 | `04811d5` | Automation rules foundation          | Added event-triggered automation rules, run logs, queue job contracts, protected routes, dashboard panel, tests, and migration.  |
 | `18f24d7` | Public developer platform            | Added scoped API keys, OAuth app/grant records, public REST routes, webhook subscriptions/delivery logs, tests, and migration.   |
+| `b08cfdd` | Integration adapter foundation       | Added generic provider contracts, integration connection/sync persistence, protected routes, dashboard status UI, and migration. |
 
 ## Implementation Notes
 
@@ -467,6 +473,18 @@ handler records delivery success/failure and retries failed webhook jobs through
 the queue, and Postgres stores API key/OAuth/webhook state via migration
 `0017_demonic_fenris`.
 
+Slice 24 foundation added a generic integration provider boundary for
+accounting, payments, messaging, and email. `packages/integrations` now exposes
+mock adapters with declared capabilities, encrypted-token metadata, deterministic
+connection IDs, and sync payloads. The app layer lists provider catalogs,
+connects integrations idempotently, logs sync runs with raw provider payloads,
+surfaces provider failures on the connection, and disables integrations without
+deleting historical records. Postgres stores `integration_connection` and
+`integration_sync_run` via migration `0018_worried_ink`, the protected API
+exposes list/connect/sync/disable routes, and the dashboard shows provider
+capabilities, token metadata, latest sync status, failure messages, and disable
+controls.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -553,3 +571,10 @@ the queue, and Postgres stores API key/OAuth/webhook state via migration
   API keys, one-time credential replay behavior, protected developer routes,
   public OpenAPI shape, queue retry signaling, delivery audit records,
   migration generation, typecheck/check, and focused tests.
+- Slice 24 still needs real provider selection/credentials, sandbox contract
+  runs where provider SDKs are chosen, and authenticated dashboard review against
+  a migrated local or preview database. Current verification covers adapter
+  capability declarations, encrypted-token metadata shape, raw payload
+  preservation, idempotent sync logging, provider failure surfacing,
+  non-destructive disable behavior, protected API routes, migration generation,
+  typecheck/check, and focused tests.
