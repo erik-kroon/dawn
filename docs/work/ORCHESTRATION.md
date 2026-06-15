@@ -282,7 +282,7 @@ pass, and the implementing agent has inspected the diff.
 | `3a040c7` | Observability workspace              | Added operations permission, request tracing, redacted logs, operations read model/API/UI, and controlled failure tests.         |
 | `9f1f29c` | Security release gates               | Added release gate scripts/CI, rate limits, signed file URL policy, webhook signature verification, and tenant isolation tests.  |
 | `b5ab62e` | Data workflow queueing               | Adds audited/idempotent export and deletion requests, queue contracts, protected routes, dashboard controls, and CORS fallback.  |
-| Pending   | Sandbox banking provider             | Adds sandbox connection sessions, encrypted token metadata, verified webhook sync requests, queued sync, and disconnect.         |
+| `d76a917` | Sandbox banking provider             | Adds sandbox connection sessions, encrypted token metadata, verified webhook sync requests, queued sync, and disconnect.         |
 
 ## Implementation Notes
 
