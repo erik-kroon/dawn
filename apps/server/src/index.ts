@@ -13,6 +13,7 @@ import {
   generateRecurringInvoice,
   generateWeeklyInsights,
   resolveTeamAccess,
+  runAutomationsForOutboxEvent,
 } from "@dawn/app";
 import { createMockInsightGenerationProvider } from "@dawn/ai";
 import { auth } from "@dawn/auth";
@@ -320,6 +321,22 @@ async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnC
         periodStart: message.body.periodStart,
         periodEnd: message.body.periodEnd,
         idempotencyKey: message.body.idempotencyKey,
+      },
+    );
+  }
+
+  if (message.body.type === "automation.run") {
+    await runAutomationsForOutboxEvent(
+      new DrizzleTransactionReviewRepository(),
+      {
+        actor: { id: "system:automation", type: "user" },
+        requestId: message.body.idempotencyKey,
+        teamId: message.body.teamId,
+      },
+      {
+        teamId: message.body.teamId,
+        outboxEventId: message.body.sourceOutboxEventId,
+        enforceCallerPermission: false,
       },
     );
   }

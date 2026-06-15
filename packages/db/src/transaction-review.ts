@@ -27,6 +27,8 @@ import type {
 } from "@dawn/app";
 import type {
   Actor,
+  AutomationRule,
+  AutomationRun,
   AssistantActionApproval,
   AssistantMessage,
   AssistantThread,
@@ -2395,6 +2397,126 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return mapAssistantActionApproval(approval);
   }
 
+  async listAutomationRules(teamId: string): Promise<AutomationRule[]> {
+    const rules = await this.client
+      .select()
+      .from(schema.automationRule)
+      .where(eq(schema.automationRule.teamId, teamId))
+      .orderBy(desc(schema.automationRule.createdAt));
+
+    return rules.map(mapAutomationRule);
+  }
+
+  async listAutomationRuns(teamId: string, limit: number): Promise<AutomationRun[]> {
+    const runs = await this.client
+      .select()
+      .from(schema.automationRun)
+      .where(eq(schema.automationRun.teamId, teamId))
+      .orderBy(desc(schema.automationRun.startedAt))
+      .limit(limit);
+
+    return runs.map(mapAutomationRun);
+  }
+
+  async listEnabledAutomationRulesForEvent(input: {
+    teamId: string;
+    eventType: string;
+  }): Promise<AutomationRule[]> {
+    const rules = await this.client
+      .select()
+      .from(schema.automationRule)
+      .where(
+        and(
+          eq(schema.automationRule.teamId, input.teamId),
+          eq(schema.automationRule.enabled, true),
+          eq(schema.automationRule.triggerEventType, input.eventType),
+        ),
+      )
+      .orderBy(asc(schema.automationRule.createdAt));
+
+    return rules.map(mapAutomationRule);
+  }
+
+  async getOutboxEventForTeam(teamId: string, outboxEventId: string): Promise<OutboxEvent | null> {
+    const [event] = await this.client
+      .select()
+      .from(schema.outboxEvent)
+      .where(and(eq(schema.outboxEvent.teamId, teamId), eq(schema.outboxEvent.id, outboxEventId)))
+      .limit(1);
+
+    return event ? mapOutboxEvent(event) : null;
+  }
+
+  async createAutomationRule(input: {
+    ruleId: string;
+    teamId: string;
+    name: string;
+    trigger: AutomationRule["trigger"];
+    actionType: AutomationRule["actionType"];
+    actionConfig: Record<string, unknown>;
+    approvalPolicy: AutomationRule["approvalPolicy"];
+    createdByActorId: string;
+  }): Promise<AutomationRule> {
+    const [rule] = await this.client
+      .insert(schema.automationRule)
+      .values({
+        id: input.ruleId,
+        teamId: input.teamId,
+        name: input.name,
+        enabled: true,
+        triggerType: input.trigger.type,
+        triggerEventType: input.trigger.eventType,
+        actionType: input.actionType,
+        actionConfig: input.actionConfig,
+        approvalPolicy: input.approvalPolicy,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!rule) {
+      throw new Error("Failed to create automation rule");
+    }
+
+    return mapAutomationRule(rule);
+  }
+
+  async createAutomationRun(input: {
+    runId: string;
+    teamId: string;
+    ruleId: string;
+    sourceOutboxEventId: string;
+    status: AutomationRun["status"];
+    actionType: AutomationRule["actionType"];
+    input: Record<string, unknown>;
+    output: Record<string, unknown>;
+    error?: string | null;
+    startedAt: string;
+    finishedAt?: string | null;
+  }): Promise<AutomationRun> {
+    const [run] = await this.client
+      .insert(schema.automationRun)
+      .values({
+        id: input.runId,
+        teamId: input.teamId,
+        ruleId: input.ruleId,
+        sourceOutboxEventId: input.sourceOutboxEventId,
+        status: input.status,
+        actionType: input.actionType,
+        input: input.input,
+        output: input.output,
+        error: input.error ?? null,
+        startedAt: new Date(input.startedAt),
+        finishedAt: input.finishedAt ? new Date(input.finishedAt) : null,
+      })
+      .returning();
+
+    if (!run) {
+      throw new Error("Failed to create automation run");
+    }
+
+    return mapAutomationRun(run);
+  }
+
   private async insertInvoiceLines(input: {
     teamId: string;
     invoiceId: string;
@@ -3395,6 +3517,41 @@ function mapAssistantActionApproval(
     createdAt: approval.createdAt.toISOString(),
     decidedAt: approval.decidedAt?.toISOString() ?? null,
     executedAt: approval.executedAt?.toISOString() ?? null,
+  };
+}
+
+function mapAutomationRule(rule: typeof schema.automationRule.$inferSelect): AutomationRule {
+  return {
+    id: rule.id,
+    teamId: rule.teamId,
+    name: rule.name,
+    enabled: rule.enabled,
+    trigger: {
+      type: rule.triggerType as AutomationRule["trigger"]["type"],
+      eventType: rule.triggerEventType,
+    },
+    actionType: rule.actionType as AutomationRule["actionType"],
+    actionConfig: rule.actionConfig,
+    approvalPolicy: rule.approvalPolicy as AutomationRule["approvalPolicy"],
+    createdByActorId: rule.createdByActorId,
+    createdAt: rule.createdAt.toISOString(),
+    updatedAt: rule.updatedAt.toISOString(),
+  };
+}
+
+function mapAutomationRun(run: typeof schema.automationRun.$inferSelect): AutomationRun {
+  return {
+    id: run.id,
+    teamId: run.teamId,
+    ruleId: run.ruleId,
+    sourceOutboxEventId: run.sourceOutboxEventId,
+    status: run.status as AutomationRun["status"],
+    actionType: run.actionType as AutomationRun["actionType"],
+    input: run.input,
+    output: run.output,
+    error: run.error,
+    startedAt: run.startedAt.toISOString(),
+    finishedAt: run.finishedAt?.toISOString() ?? null,
   };
 }
 

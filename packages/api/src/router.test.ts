@@ -3,6 +3,8 @@ import { call } from "@orpc/server";
 import { createDeterministicInvoicePdfRenderer } from "@dawn/app";
 import type {
   Actor,
+  AutomationRule,
+  AutomationRun,
   AssistantActionApproval,
   AssistantMessage,
   AssistantThread,
@@ -46,6 +48,7 @@ import type {
   InboxTransactionMatchSuggestion,
   InboxSource,
   InboxSourceType,
+  OutboxEvent,
   ProviderSyncRun,
   ReviewWorkspaceData,
   TeamAlias,
@@ -87,6 +90,9 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   assistantMessages = new Map<string, AssistantMessage>();
   assistantToolCalls = new Map<string, AssistantToolCall>();
   assistantApprovals = new Map<string, AssistantActionApproval>();
+  automationRules = new Map<string, AutomationRule>();
+  automationRuns = new Map<string, AutomationRun>();
+  outboxEventRecords = new Map<string, OutboxEvent>();
   aliases: TeamAlias[] = [];
   hardNegatives: HardNegativeTransactionMatch[] = [];
   attachments: { transactionId: string; documentId: string }[] = [];
@@ -1524,6 +1530,84 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return executed;
   }
 
+  async listAutomationRules(teamId: string) {
+    return [...this.automationRules.values()].filter((rule) => rule.teamId === teamId);
+  }
+
+  async listAutomationRuns(teamId: string, limit: number) {
+    return [...this.automationRuns.values()].filter((run) => run.teamId === teamId).slice(0, limit);
+  }
+
+  async listEnabledAutomationRulesForEvent(input: { teamId: string; eventType: string }) {
+    return [...this.automationRules.values()].filter(
+      (rule) =>
+        rule.teamId === input.teamId && rule.enabled && rule.trigger.eventType === input.eventType,
+    );
+  }
+
+  async getOutboxEventForTeam(teamId: string, outboxEventId: string) {
+    const event = this.outboxEventRecords.get(outboxEventId);
+    return event?.teamId === teamId ? event : null;
+  }
+
+  async createAutomationRule(input: {
+    ruleId: string;
+    teamId: string;
+    name: string;
+    trigger: AutomationRule["trigger"];
+    actionType: AutomationRule["actionType"];
+    actionConfig: Record<string, unknown>;
+    approvalPolicy: AutomationRule["approvalPolicy"];
+    createdByActorId: string;
+  }) {
+    const now = new Date().toISOString();
+    const rule = {
+      id: input.ruleId,
+      teamId: input.teamId,
+      name: input.name,
+      enabled: true,
+      trigger: input.trigger,
+      actionType: input.actionType,
+      actionConfig: input.actionConfig,
+      approvalPolicy: input.approvalPolicy,
+      createdByActorId: input.createdByActorId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.automationRules.set(rule.id, rule);
+    return rule;
+  }
+
+  async createAutomationRun(input: {
+    runId: string;
+    teamId: string;
+    ruleId: string;
+    sourceOutboxEventId: string;
+    status: AutomationRun["status"];
+    actionType: AutomationRun["actionType"];
+    input: Record<string, unknown>;
+    output: Record<string, unknown>;
+    error?: string | null;
+    startedAt: string;
+    finishedAt?: string | null;
+  }) {
+    const run = {
+      id: input.runId,
+      teamId: input.teamId,
+      ruleId: input.ruleId,
+      sourceOutboxEventId: input.sourceOutboxEventId,
+      status: input.status,
+      actionType: input.actionType,
+      input: input.input,
+      output: input.output,
+      error: input.error ?? null,
+      startedAt: input.startedAt,
+      finishedAt: input.finishedAt ?? null,
+    };
+    this.automationRuns.set(run.id, run);
+    return run;
+  }
+
   private invoiceFromInput(
     invoiceId: string,
     input: {
@@ -2452,6 +2536,68 @@ describe("appRouter", () => {
       risk: "draft",
     });
     expect(billing.draftInvoices).toHaveLength(1);
+  });
+
+  test("creates automation rules and runs them for protected outbox events", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    repository.categories.set("cat_software", {
+      id: "cat_software",
+      teamId: "team_1",
+      name: "Software",
+    });
+    repository.transactions.set("txn_1", {
+      id: "txn_1",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Figma subscription",
+      postedAt: "2026-06-15T00:00:00.000Z",
+      money: { amountMinor: -1200, currency: "USD" },
+      categoryId: null,
+      reviewState: "needs_review",
+    });
+    repository.outboxEventRecords.set("outbox_1", {
+      id: "outbox_1",
+      teamId: "team_1",
+      type: "transaction.created",
+      version: 1,
+      payload: { transactionId: "txn_1" },
+      dispatchAttempts: 0,
+      status: "pending",
+      occurredAt: "2026-06-15T00:00:00.000Z",
+    });
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+
+    const created = await call(
+      router.automations.createRule,
+      {
+        teamId: "team_1",
+        name: "Categorize new software transactions",
+        trigger: { type: "outbox_event", eventType: "transaction.created" },
+        actionType: "categorize_transaction",
+        actionConfig: { categoryId: "cat_software" },
+        approvalPolicy: "auto_approve",
+        idempotencyKey: "automation_rule_1",
+      },
+      context,
+    );
+    const run = await call(
+      router.automations.runForOutboxEvent,
+      { teamId: "team_1", outboxEventId: "outbox_1" },
+      context,
+    );
+    const workspace = await call(router.automations.list, { teamId: "team_1" }, context);
+
+    expect(created.rule).toMatchObject({ actionType: "categorize_transaction" });
+    expect(run.runs[0]).toMatchObject({ status: "succeeded" });
+    expect(workspace.rules).toHaveLength(1);
+    expect(workspace.recentRuns).toHaveLength(1);
+    expect(repository.transactions.get("txn_1")).toMatchObject({
+      categoryId: "cat_software",
+      reviewState: "reviewed",
+    });
   });
 
   test("creates and signs document uploads and downloads through protected routes", async () => {

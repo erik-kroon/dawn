@@ -1,5 +1,14 @@
 import { relations } from "drizzle-orm";
-import { integer, jsonb, pgTable, text, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  index,
+} from "drizzle-orm/pg-core";
 
 import { user } from "./auth";
 
@@ -1086,6 +1095,61 @@ export const assistantActionApproval = pgTable(
   (table) => [
     index("assistant_action_approval_team_status_idx").on(table.teamId, table.status),
     index("assistant_action_approval_thread_created_idx").on(table.threadId, table.createdAt),
+  ],
+);
+
+export const automationRule = pgTable(
+  "automation_rule",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    enabled: boolean("enabled").default(true).notNull(),
+    triggerType: text("trigger_type").notNull(),
+    triggerEventType: text("trigger_event_type").notNull(),
+    actionType: text("action_type").notNull(),
+    actionConfig: jsonb("action_config").$type<Record<string, unknown>>().notNull(),
+    approvalPolicy: text("approval_policy").default("require_approval").notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("automation_rule_team_enabled_idx").on(table.teamId, table.enabled),
+    index("automation_rule_trigger_idx").on(table.teamId, table.triggerEventType),
+  ],
+);
+
+export const automationRun = pgTable(
+  "automation_run",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    ruleId: text("rule_id")
+      .notNull()
+      .references(() => automationRule.id, { onDelete: "cascade" }),
+    sourceOutboxEventId: text("source_outbox_event_id")
+      .notNull()
+      .references(() => outboxEvent.id, { onDelete: "cascade" }),
+    status: text("status").notNull(),
+    actionType: text("action_type").notNull(),
+    input: jsonb("input").$type<Record<string, unknown>>().notNull(),
+    output: jsonb("output").$type<Record<string, unknown>>().notNull(),
+    error: text("error"),
+    startedAt: timestamp("started_at").defaultNow().notNull(),
+    finishedAt: timestamp("finished_at"),
+  },
+  (table) => [
+    index("automation_run_team_started_idx").on(table.teamId, table.startedAt),
+    index("automation_run_rule_started_idx").on(table.ruleId, table.startedAt),
+    index("automation_run_source_idx").on(table.sourceOutboxEventId),
   ],
 );
 

@@ -95,6 +95,21 @@ function RouteComponent() {
   });
   const [assistantPrompt, setAssistantPrompt] = useState("");
   const [assistantThreadId, setAssistantThreadId] = useState<string | null>(null);
+  const [automationDraft, setAutomationDraft] = useState({
+    name: "",
+    triggerEventType: "transaction.created",
+    actionType: "create_notification" as
+      | "categorize_transaction"
+      | "create_notification"
+      | "create_invoice_draft"
+      | "request_accounting_export",
+    approvalPolicy: "require_approval" as "require_approval" | "auto_approve",
+    categoryId: "",
+    customerId: "",
+    productId: "",
+    message: "",
+    exportType: "transactions",
+  });
   const [syncReviewError, setSyncReviewError] = useState<string | null>(null);
   const [syncReviewingId, setSyncReviewingId] = useState<string | null>(null);
 
@@ -151,6 +166,10 @@ function RouteComponent() {
   });
   const assistant = useQuery({
     ...orpc.assistant.list.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
+  const automations = useQuery({
+    ...orpc.automations.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
   const teamDirectory = useQuery({
@@ -436,6 +455,18 @@ function RouteComponent() {
     orpc.assistant.rejectAction.mutationOptions({
       onSuccess: async () => {
         await queryClient.invalidateQueries({ queryKey: orpc.assistant.list.queryKey() });
+      },
+    }),
+  );
+  const createAutomationRuleMutation = useMutation(
+    orpc.automations.createRule.mutationOptions({
+      onSuccess: async () => {
+        setAutomationDraft((draft) => ({
+          ...draft,
+          name: "",
+          message: "",
+        }));
+        await queryClient.invalidateQueries({ queryKey: orpc.automations.list.queryKey() });
       },
     }),
   );
@@ -902,6 +933,228 @@ function RouteComponent() {
                     )}
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Automations</CardTitle>
+          <CardDescription>
+            Event-triggered rules run through the same app use cases, permissions, audit, and outbox
+            path.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4">
+            <div className="grid gap-3 md:grid-cols-3">
+              <Input
+                aria-label="Automation rule name"
+                onChange={(event) =>
+                  setAutomationDraft((draft) => ({ ...draft, name: event.target.value }))
+                }
+                placeholder="Rule name"
+                value={automationDraft.name}
+              />
+              <select
+                aria-label="Automation trigger event"
+                className="h-9 border bg-background px-3 text-sm"
+                onChange={(event) =>
+                  setAutomationDraft((draft) => ({
+                    ...draft,
+                    triggerEventType: event.target.value,
+                  }))
+                }
+                value={automationDraft.triggerEventType}
+              >
+                <option value="transaction.created">Transaction created</option>
+                <option value="document.extracted">Document extracted</option>
+                <option value="invoice.sent">Invoice sent</option>
+              </select>
+              <select
+                aria-label="Automation action"
+                className="h-9 border bg-background px-3 text-sm"
+                onChange={(event) =>
+                  setAutomationDraft((draft) => ({
+                    ...draft,
+                    actionType: event.target.value as typeof automationDraft.actionType,
+                  }))
+                }
+                value={automationDraft.actionType}
+              >
+                <option value="create_notification">Notify</option>
+                <option value="categorize_transaction">Categorize transaction</option>
+                <option value="create_invoice_draft">Create draft invoice</option>
+                <option value="request_accounting_export">Request accounting export</option>
+              </select>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-4">
+              {automationDraft.actionType === "categorize_transaction" ? (
+                <select
+                  aria-label="Automation category"
+                  className="h-9 border bg-background px-3 text-sm"
+                  onChange={(event) =>
+                    setAutomationDraft((draft) => ({ ...draft, categoryId: event.target.value }))
+                  }
+                  value={automationDraft.categoryId}
+                >
+                  <option value="">Select category</option>
+                  {transactionReview.data?.categories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              {automationDraft.actionType === "create_invoice_draft" ? (
+                <>
+                  <select
+                    aria-label="Automation invoice customer"
+                    className="h-9 border bg-background px-3 text-sm"
+                    onChange={(event) =>
+                      setAutomationDraft((draft) => ({
+                        ...draft,
+                        customerId: event.target.value,
+                      }))
+                    }
+                    value={automationDraft.customerId}
+                  >
+                    <option value="">Select customer</option>
+                    {billing.data?.customers.map((customer) => (
+                      <option key={customer.id} value={customer.id}>
+                        {customer.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label="Automation invoice product"
+                    className="h-9 border bg-background px-3 text-sm"
+                    onChange={(event) =>
+                      setAutomationDraft((draft) => ({ ...draft, productId: event.target.value }))
+                    }
+                    value={automationDraft.productId}
+                  >
+                    <option value="">Select product/service</option>
+                    {billing.data?.products.map((product) => (
+                      <option key={product.id} value={product.id}>
+                        {product.name}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              ) : null}
+              {automationDraft.actionType === "create_notification" ? (
+                <Input
+                  aria-label="Automation notification message"
+                  onChange={(event) =>
+                    setAutomationDraft((draft) => ({ ...draft, message: event.target.value }))
+                  }
+                  placeholder="Notification message"
+                  value={automationDraft.message}
+                />
+              ) : null}
+              {automationDraft.actionType === "request_accounting_export" ? (
+                <Input
+                  aria-label="Automation export type"
+                  onChange={(event) =>
+                    setAutomationDraft((draft) => ({ ...draft, exportType: event.target.value }))
+                  }
+                  placeholder="Export type"
+                  value={automationDraft.exportType}
+                />
+              ) : null}
+              <select
+                aria-label="Automation approval policy"
+                className="h-9 border bg-background px-3 text-sm"
+                onChange={(event) =>
+                  setAutomationDraft((draft) => ({
+                    ...draft,
+                    approvalPolicy: event.target.value as typeof automationDraft.approvalPolicy,
+                  }))
+                }
+                value={automationDraft.approvalPolicy}
+              >
+                <option value="require_approval">Require approval</option>
+                <option value="auto_approve">Auto approve</option>
+              </select>
+              <Button
+                disabled={
+                  !currentTeamId ||
+                  !automationDraft.name.trim() ||
+                  createAutomationRuleMutation.isPending
+                }
+                onClick={() => {
+                  if (!currentTeamId) {
+                    return;
+                  }
+
+                  createAutomationRuleMutation.mutate({
+                    teamId: currentTeamId,
+                    name: automationDraft.name,
+                    trigger: {
+                      type: "outbox_event",
+                      eventType: automationDraft.triggerEventType,
+                    },
+                    actionType: automationDraft.actionType,
+                    actionConfig: buildAutomationActionConfig(automationDraft),
+                    approvalPolicy: automationDraft.approvalPolicy,
+                    idempotencyKey: crypto.randomUUID(),
+                  });
+                }}
+              >
+                Save rule
+              </Button>
+            </div>
+
+            {createAutomationRuleMutation.error ? (
+              <p className="text-sm text-destructive">
+                {errorMessage(createAutomationRuleMutation.error)}
+              </p>
+            ) : null}
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="grid gap-2">
+                <p className="text-sm font-medium">Rules</p>
+                {automations.data?.rules.length ? (
+                  automations.data.rules.slice(0, 4).map((rule) => (
+                    <div className="grid gap-1 border p-3 text-sm" key={rule.id}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">{rule.name}</span>
+                        <span className="text-xs text-muted-foreground">{rule.approvalPolicy}</span>
+                      </div>
+                      <p className="text-muted-foreground">
+                        {rule.trigger.eventType} {"->"} {rule.actionType}
+                      </p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground">No automation rules yet.</p>
+                )}
+              </div>
+              <div className="grid gap-2">
+                <p className="text-sm font-medium">Recent runs</p>
+                {automations.data?.recentRuns.length ? (
+                  automations.data.recentRuns.slice(0, 4).map((run) => (
+                    <div className="grid gap-1 border p-3 text-sm" key={run.id}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span>{run.actionType}</span>
+                        <span className="text-xs text-muted-foreground">{run.status}</span>
+                      </div>
+                      {run.error ? (
+                        <p className="text-xs text-destructive">{run.error}</p>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(run.startedAt).toLocaleString()}
+                        </p>
+                      )}
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground">No automation runs yet.</p>
+                )}
               </div>
             </div>
           </div>
@@ -2687,6 +2940,36 @@ function formatApprovalPreview(preview: Record<string, unknown>) {
     .slice(0, 3);
 
   return values.length ? values.join(" · ") : "Review action details before approving.";
+}
+
+function buildAutomationActionConfig(input: {
+  actionType:
+    | "categorize_transaction"
+    | "create_notification"
+    | "create_invoice_draft"
+    | "request_accounting_export";
+  categoryId: string;
+  customerId: string;
+  productId: string;
+  message: string;
+  exportType: string;
+}) {
+  if (input.actionType === "categorize_transaction") {
+    return { categoryId: input.categoryId };
+  }
+
+  if (input.actionType === "create_invoice_draft") {
+    return {
+      customerId: input.customerId,
+      productId: input.productId,
+    };
+  }
+
+  if (input.actionType === "request_accounting_export") {
+    return { exportType: input.exportType || "transactions" };
+  }
+
+  return { message: input.message };
 }
 
 function errorMessage(error: unknown) {

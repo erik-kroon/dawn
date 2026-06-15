@@ -44,6 +44,13 @@ describe("job contracts", () => {
         sourceOutboxEventId: "outbox_1",
         idempotencyKey: "sync:transactions:outbox_1",
       },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "transaction.created",
+        idempotencyKey: "automation:run:outbox_1",
+      },
     ]);
   });
 
@@ -72,6 +79,13 @@ describe("job contracts", () => {
         changedIds: ["txn_1", "txn_2"],
         sourceOutboxEventId: "outbox_1",
         idempotencyKey: "sync:transactions:outbox_1",
+      },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "bank_connection.synced",
+        idempotencyKey: "automation:run:outbox_1",
       },
     ]);
   });
@@ -108,6 +122,13 @@ describe("job contracts", () => {
         sourceOutboxEventId: "outbox_1",
         idempotencyKey: "document:extract:outbox_1",
       },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "document.uploaded",
+        idempotencyKey: "automation:run:outbox_1",
+      },
     ]);
   });
 
@@ -141,6 +162,13 @@ describe("job contracts", () => {
         sourceOutboxEventId: "outbox_1",
         idempotencyKey: "invoice:recurring:outbox_1",
       },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "recurring_invoice.due",
+        idempotencyKey: "automation:run:outbox_1",
+      },
     ]);
   });
 
@@ -171,6 +199,13 @@ describe("job contracts", () => {
         periodEnd: "2026-06-15T00:00:00.000Z",
         sourceOutboxEventId: "outbox_1",
         idempotencyKey: "insights:weekly:outbox_1",
+      },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "insights.weekly.due",
+        idempotencyKey: "automation:run:outbox_1",
       },
     ]);
   });

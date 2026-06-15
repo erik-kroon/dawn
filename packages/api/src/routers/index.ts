@@ -11,6 +11,7 @@ import {
   createCustomer,
   createDocumentDownload,
   createDocumentUpload,
+  createAutomationRule,
   createDraftInvoice,
   createLedgerTransaction,
   createProduct,
@@ -24,6 +25,7 @@ import {
   inviteTeamMember,
   correctDocumentExtraction,
   listAssistantWorkspace,
+  listAutomationWorkspace,
   listBankConnections,
   listBillingWorkspace,
   listDocuments,
@@ -41,6 +43,7 @@ import {
   rejectAssistantAction,
   recordInvoicePayment,
   reviewTransaction,
+  runAutomationsForOutboxEvent,
   sendInvoice,
   sendAssistantMessage,
   syncBankConnection,
@@ -129,6 +132,37 @@ const assistantApproveActionInput = assistantActionInput.extend({
 
 const assistantRejectActionInput = assistantActionInput.extend({
   reason: z.string().max(500).nullable().optional(),
+});
+
+const automationWorkspaceInput = z
+  .object({
+    teamId: z.string().min(1).optional(),
+  })
+  .optional();
+
+const automationActionTypeInput = z.enum([
+  "categorize_transaction",
+  "create_notification",
+  "create_invoice_draft",
+  "request_accounting_export",
+]);
+
+const createAutomationRuleInput = z.object({
+  teamId: z.string().min(1),
+  name: z.string().trim().min(1).max(120),
+  trigger: z.object({
+    type: z.literal("outbox_event"),
+    eventType: z.string().trim().min(1).max(120),
+  }),
+  actionType: automationActionTypeInput,
+  actionConfig: z.record(z.string(), z.unknown()),
+  approvalPolicy: z.enum(["require_approval", "auto_approve"]),
+  idempotencyKey: z.string().min(1),
+});
+
+const runAutomationForOutboxEventInput = z.object({
+  teamId: z.string().min(1),
+  outboxEventId: z.string().min(1),
 });
 
 const bankConnectionInput = z.object({
@@ -734,6 +768,55 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 ...input,
                 reason: input.reason ?? null,
               },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    automations: {
+      list: protectedProcedure
+        .input(automationWorkspaceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listAutomationWorkspace(transactionReviewRepository, {
+              actor: { id: context.session.user.id, type: "user" },
+              requestId: context.requestId,
+              teamId: input?.teamId,
+            });
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createRule: protectedProcedure
+        .input(createAutomationRuleInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createAutomationRule(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      runForOutboxEvent: protectedProcedure
+        .input(runAutomationForOutboxEventInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await runAutomationsForOutboxEvent(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
             );
           } catch (error) {
             mapAppError(error);

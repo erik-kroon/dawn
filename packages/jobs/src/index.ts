@@ -72,12 +72,21 @@ export const weeklyInsightGenerationJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const automationRunJobSchema = z.object({
+  type: z.literal("automation.run"),
+  teamId: z.string().min(1),
+  sourceOutboxEventId: z.string().min(1),
+  eventType: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   outboxDispatchJobSchema,
   syncInvalidationJobSchema,
   documentExtractionJobSchema,
   recurringInvoiceGenerationJobSchema,
   weeklyInsightGenerationJobSchema,
+  automationRunJobSchema,
 ]);
 
 export type OutboxDispatchJob = z.infer<typeof outboxDispatchJobSchema>;
@@ -85,6 +94,7 @@ export type SyncInvalidationJob = z.infer<typeof syncInvalidationJobSchema>;
 export type DocumentExtractionJob = z.infer<typeof documentExtractionJobSchema>;
 export type RecurringInvoiceGenerationJob = z.infer<typeof recurringInvoiceGenerationJobSchema>;
 export type WeeklyInsightGenerationJob = z.infer<typeof weeklyInsightGenerationJobSchema>;
+export type AutomationRunJob = z.infer<typeof automationRunJobSchema>;
 export type DawnQueueMessage = z.infer<typeof dawnQueueMessageSchema>;
 
 export function createOutboxDispatchJob(event: OutboxEventForJob): OutboxDispatchJob {
@@ -108,10 +118,16 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const extractionJob = createDocumentExtractionJob(event);
   const recurringInvoiceJob = createRecurringInvoiceGenerationJob(event);
   const weeklyInsightJob = createWeeklyInsightGenerationJob(event);
+  const automationJob = createAutomationRunJob(event);
 
-  return [dispatchJob, syncJob, extractionJob, recurringInvoiceJob, weeklyInsightJob].filter(
-    (message): message is DawnQueueMessage => Boolean(message),
-  );
+  return [
+    dispatchJob,
+    syncJob,
+    extractionJob,
+    recurringInvoiceJob,
+    weeklyInsightJob,
+    automationJob,
+  ].filter((message): message is DawnQueueMessage => Boolean(message));
 }
 
 export function nextOutboxRetryAt(input: { attempt: number; now: Date }) {
@@ -229,6 +245,16 @@ function createWeeklyInsightGenerationJob(
     periodEnd: event.payload.periodEnd,
     sourceOutboxEventId: event.id,
     idempotencyKey: `insights:weekly:${event.id}`,
+  };
+}
+
+function createAutomationRunJob(event: OutboxEventForJob): AutomationRunJob {
+  return {
+    type: "automation.run",
+    teamId: event.teamId,
+    sourceOutboxEventId: event.id,
+    eventType: event.type,
+    idempotencyKey: `automation:run:${event.id}`,
   };
 }
 

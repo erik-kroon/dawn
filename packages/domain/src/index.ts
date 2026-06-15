@@ -22,7 +22,10 @@ export type Permission =
   | "settings.billing"
   | "api_keys.manage"
   | "assistant.use"
-  | "assistant.mutate";
+  | "assistant.mutate"
+  | "automations.read"
+  | "automations.write"
+  | "automations.run";
 
 export type Team = {
   id: string;
@@ -553,6 +556,79 @@ export type AssistantActionApproval = {
   executedAt?: string | null;
 };
 
+export type AutomationTriggerType = "outbox_event";
+
+export type AutomationTrigger = {
+  type: AutomationTriggerType;
+  eventType: string;
+};
+
+export type AutomationActionType =
+  | "categorize_transaction"
+  | "create_notification"
+  | "create_invoice_draft"
+  | "request_accounting_export";
+
+export type AutomationApprovalPolicy = "require_approval" | "auto_approve";
+
+export type AutomationRule = {
+  id: string;
+  teamId: string;
+  name: string;
+  enabled: boolean;
+  trigger: AutomationTrigger;
+  actionType: AutomationActionType;
+  actionConfig: Record<string, unknown>;
+  approvalPolicy: AutomationApprovalPolicy;
+  createdByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AutomationRunStatus = "succeeded" | "failed" | "approval_required" | "skipped";
+
+export type AutomationRun = {
+  id: string;
+  teamId: string;
+  ruleId: string;
+  sourceOutboxEventId: string;
+  status: AutomationRunStatus;
+  actionType: AutomationActionType;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  error?: string | null;
+  startedAt: string;
+  finishedAt?: string | null;
+};
+
+export function automationActionPermission(actionType: AutomationActionType): Permission {
+  if (actionType === "categorize_transaction") {
+    return "transactions.categorize";
+  }
+
+  if (actionType === "create_invoice_draft") {
+    return "invoices.write";
+  }
+
+  return "automations.run";
+}
+
+export function automationActionRisk(actionType: AutomationActionType): AssistantToolRisk {
+  if (actionType === "create_notification") {
+    return "draft";
+  }
+
+  if (actionType === "request_accounting_export") {
+    return "external_side_effect";
+  }
+
+  return "mutate";
+}
+
+export function automationActionRequiresApproval(actionType: AutomationActionType) {
+  return automationActionRisk(actionType) === "external_side_effect";
+}
+
 export type InboxMatchInput = {
   inboxItemId: string;
   documentId: string;
@@ -626,6 +702,9 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "api_keys.manage",
     "assistant.use",
     "assistant.mutate",
+    "automations.read",
+    "automations.write",
+    "automations.run",
   ],
   admin: [
     "transactions.read",
@@ -643,6 +722,9 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "api_keys.manage",
     "assistant.use",
     "assistant.mutate",
+    "automations.read",
+    "automations.write",
+    "automations.run",
   ],
   member: [
     "transactions.read",
@@ -655,6 +737,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "invoices.read",
     "invoices.write",
     "assistant.use",
+    "automations.read",
   ],
   accountant: [
     "transactions.read",
@@ -666,6 +749,9 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "invoices.read",
     "invoices.write",
     "assistant.use",
+    "automations.read",
+    "automations.write",
+    "automations.run",
   ],
   viewer: [
     "transactions.read",
@@ -673,6 +759,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "projects.read",
     "invoices.read",
     "assistant.use",
+    "automations.read",
   ],
 };
 
