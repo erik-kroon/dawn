@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { suggestInboxTransactionMatches, type InboxMatchInput, type Transaction } from "./index";
+import {
+  scoreDocumentTransactionMatch,
+  suggestInboxTransactionMatches,
+  type DocumentMatchSubject,
+  type InboxMatchInput,
+  type Transaction,
+} from "./index";
 
 const baseInput: InboxMatchInput = {
   inboxItemId: "inbox_1",
@@ -49,6 +55,15 @@ describe("inbox transaction matching", () => {
     });
     expect(suggestions[0]?.score).toBeGreaterThanOrEqual(0.75);
     expect(suggestions[0]?.explanation).toContain("Amount matches exactly");
+    expect(suggestions[0]?.signalDetails.amount).toMatchObject({
+      score: 0.35,
+      matched: true,
+    });
+    expect(suggestions[0]?.signalDetails.name).toMatchObject({
+      score: 0.2,
+      matched: true,
+    });
+    expect(suggestions[0]?.signals.counterparty).toBe(0.2);
     expect(suggestions.find((suggestion) => suggestion.transactionId === "txn_weak")).toBeDefined();
   });
 
@@ -98,5 +113,32 @@ describe("inbox transaction matching", () => {
     );
 
     expect(suggestions).toEqual([]);
+  });
+
+  test("emits structured hard-negative decisions from the pure scorer", () => {
+    const document: DocumentMatchSubject = {
+      id: baseInput.documentId,
+      inboxItemId: baseInput.inboxItemId,
+      documentText: baseInput.documentText,
+      fields: baseInput.fields,
+    };
+    const decision = scoreDocumentTransactionMatch({
+      document,
+      transaction: {
+        transaction: transaction({ id: "txn_rejected" }),
+        counterpartyName: "Figma Inc",
+      },
+      memory: {
+        hardNegatives: [{ inboxItemId: "inbox_1", transactionId: "txn_rejected" }],
+      },
+    });
+
+    expect(decision.matchType).toBe("hard_negative");
+    expect(decision.score).toBe(0);
+    expect(decision.signals.hardNegative).toMatchObject({
+      score: -1,
+      matched: true,
+      reason: "Pair was previously rejected",
+    });
   });
 });

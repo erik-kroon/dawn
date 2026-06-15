@@ -293,6 +293,12 @@ describe("inbox matching use cases", () => {
 
   test("matches a pending inbox item when a transaction arrives later", async () => {
     const repository = new MemoryMatchingRepository();
+    const forwardRepository = new MemoryMatchingRepository();
+    const forward = await generateInboxMatchSuggestions(
+      forwardRepository as unknown as DawnRepository,
+      context,
+      { teamId: "team_1", inboxItemId: "inbox_1" },
+    );
 
     const result = await matchPendingInboxForTransaction(
       repository as unknown as DawnRepository,
@@ -310,6 +316,8 @@ describe("inbox matching use cases", () => {
     expect(result.suggestions[0]?.inboxItemId).toBe("inbox_1");
     expect(result.suggestions[0]?.transactionId).toBe("txn_1");
     expect(result.suggestions[0]?.score).toBeGreaterThanOrEqual(0.75);
+    expect(result.suggestions[0]?.score).toBe(forward.suggestions[0]?.score);
+    expect(result.suggestions[0]?.explanation).toEqual(forward.suggestions[0]?.explanation);
 
     const listed = await repository.listInboxItems("team_1");
     expect(listed[0]?.matchSuggestions?.[0]?.transactionId).toBe("txn_1");

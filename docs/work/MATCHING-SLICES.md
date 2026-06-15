@@ -2,7 +2,7 @@
 
 Triage: ready-for-agent
 Publication: Local repo artifact. No project issue tracker or remote is assumed.
-Status: Slice 1 implemented; Slice 2 next
+Status: Slice 2 implemented; Slice 3 next
 Date: 2026-06-15
 Source material: `docs/PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, Dawn matching code, and Midday reference matching docs/code under `ref/midday`.
 
@@ -149,16 +149,24 @@ Make forward and reverse matching use one pure domain engine instead of one-way 
 
 ## Acceptance Criteria
 
-- [ ] Forward inbox-to-transaction and reverse transaction-to-inbox paths use the same scoring function.
-- [ ] The scorer emits structured amount, currency, date, name, reference, sender/domain, alias, and hard-negative signals.
-- [ ] Score, confidence, match type, and explanation are reproducible for the same inputs.
-- [ ] Existing forward matching tests pass with updated names.
-- [ ] Domain code remains pure and has no database, app, worker, or route imports.
+- [x] Forward inbox-to-transaction and reverse transaction-to-inbox paths use the same scoring function.
+- [x] The scorer emits structured amount, currency, date, name, reference, sender/domain, alias, and hard-negative signals.
+- [x] Score, confidence, match type, and explanation are reproducible for the same inputs.
+- [x] Existing forward matching tests pass with updated names.
+- [x] Domain code remains pure and has no database, app, worker, or route imports.
+
+## Implementation Notes
+
+- Added `DocumentMatchSubject`, `TransactionMatchSubject`, `MatchCandidate`, `MatchSignals`, `MatchDecision`, and `MatchPolicy`.
+- Moved matching policy into `scoreDocumentTransactionMatch` and `scoreDocumentTransactionMatches`; `suggestInboxTransactionMatches` remains as a compatibility wrapper.
+- Added structured `signalDetails` while preserving legacy numeric suggestion signals for existing callers.
+- Added hard-negative decisions at the pure scorer level, while suggestion generation still suppresses them.
+- Verified forward and reverse app paths produce the same score and explanation for the same pair.
 
 ## Verification
 
-- `bun test packages/domain/src/matching.test.ts packages/app/src/inbox-matching.test.ts`
-- `bun run check-types`
+- [x] `bun test packages/domain/src/matching.test.ts packages/domain/src/golden-datasets.test.ts packages/app/src/inbox-matching.test.ts`
+- [x] `bun run check-types`
 
 ## Dependencies
 
