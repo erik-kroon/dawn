@@ -38,6 +38,8 @@ export type PublicApiScope =
   | "transactions.write"
   | "invoices.read"
   | "invoices.write"
+  | "projects.read"
+  | "projects.write"
   | "webhooks.manage";
 
 export type Team = {
@@ -759,6 +761,14 @@ export function permissionForPublicApiScope(scope: PublicApiScope): Permission {
 
   if (scope === "invoices.write") {
     return "invoices.write";
+  }
+
+  if (scope === "projects.read") {
+    return "projects.read";
+  }
+
+  if (scope === "projects.write") {
+    return "projects.write";
   }
 
   if (scope === "webhooks.manage") {

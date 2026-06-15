@@ -16,6 +16,8 @@ describe("public API contract", () => {
     expect(Object.keys(document.paths)).toEqual([
       "/transactions",
       "/invoices",
+      "/projects",
+      "/time-entries",
       "/webhook-subscriptions",
     ]);
     expect(document.components.securitySchemes.bearerApiKey).toMatchObject({

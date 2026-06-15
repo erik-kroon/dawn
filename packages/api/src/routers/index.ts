@@ -195,6 +195,8 @@ const publicApiScopeInput = z.enum([
   "transactions.write",
   "invoices.read",
   "invoices.write",
+  "projects.read",
+  "projects.write",
   "webhooks.manage",
 ]);
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { permissionsForRole, roleHasPermission } from "./index";
+import { permissionsForPublicApiScopes, permissionsForRole, roleHasPermission } from "./index";
 
 describe("team role permissions", () => {
   test("owners can manage team and billing settings", () => {
@@ -30,5 +30,12 @@ describe("team role permissions", () => {
       "automations.read",
     ]);
     expect(roleHasPermission("viewer", "operations.read")).toBe(false);
+  });
+
+  test("public API project scopes resolve to project permissions", () => {
+    expect(permissionsForPublicApiScopes(["projects.read", "projects.write"])).toEqual([
+      "projects.read",
+      "projects.write",
+    ]);
   });
 });

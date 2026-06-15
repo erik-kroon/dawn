@@ -3321,7 +3321,7 @@ describe("appRouter", () => {
       {
         teamId: "team_1",
         name: "Reporting client",
-        scopes: ["transactions.read"],
+        scopes: ["transactions.read", "projects.read"],
         idempotencyKey: "api_key_1",
       },
       context,
@@ -3342,7 +3342,7 @@ describe("appRouter", () => {
         teamId: "team_1",
         name: "Partner reporting",
         redirectUris: ["https://partner.example.com/oauth/callback"],
-        scopes: ["transactions.read", "invoices.read"],
+        scopes: ["transactions.read", "invoices.read", "projects.write"],
         idempotencyKey: "oauth_app_1",
       },
       context,
@@ -3375,7 +3375,7 @@ describe("appRouter", () => {
     expect(webhook.signingSecret.startsWith("whsec_")).toBe(true);
     expect(oauthApp.app).toMatchObject({
       name: "Partner reporting",
-      scopes: ["transactions.read", "invoices.read"],
+      scopes: ["transactions.read", "invoices.read", "projects.write"],
     });
     expect(consent).toMatchObject({
       app: { id: oauthApp.app.id },

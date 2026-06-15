@@ -10,12 +10,15 @@ import {
   AppError,
   completeDocumentUpload,
   createLedgerTransaction,
+  createProject,
+  createTimeEntry,
   createWebhookSubscription,
   deliverWebhooksForOutboxEvent,
   dispatchOutboxEvents,
   generateRecurringInvoice,
   generateWeeklyInsights,
   listBillingWorkspace,
+  listProjectWorkspace,
   listTransactionReviewWorkspace,
   requestBankConnectionSyncFromWebhook,
   resolveTeamAccess,
@@ -371,6 +374,101 @@ app.get("/api/v1/invoices", async (c) => {
   }
 });
 
+app.get("/api/v1/projects", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+  const teamId = c.req.query("teamId");
+
+  if (!teamId) {
+    return c.json({ error: "teamId is required" }, 400);
+  }
+
+  try {
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "projects.read");
+    const workspace = await listProjectWorkspace(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      { teamId },
+    );
+
+    return c.json({
+      data: workspace.projects,
+      customers: workspace.customers,
+      projectMembers: workspace.projectMembers,
+      timeEntries: workspace.timeEntries,
+      report: workspace.report,
+    });
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/projects", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "projects.write");
+    const result = await createProject(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        customerId: requireString(body.customerId, "customerId"),
+        name: requireString(body.name, "name"),
+        description: typeof body.description === "string" ? body.description : null,
+        billableRate: body.billableRate as { amountMinor: number; currency: string },
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/v1/time-entries", async (c) => {
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const body = await c.req.json<Record<string, unknown>>();
+    const teamId = requireString(body.teamId, "teamId");
+    const actor = await requirePublicApiActor(c.req.raw.headers, repository, "projects.write");
+    const result = await createTimeEntry(
+      repository,
+      {
+        actor,
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId,
+      },
+      {
+        teamId,
+        projectId: requireString(body.projectId, "projectId"),
+        actorId: typeof body.actorId === "string" ? body.actorId : null,
+        description: requireString(body.description, "description"),
+        occurredOn: requireString(body.occurredOn, "occurredOn"),
+        durationMinutes: Number(body.durationMinutes),
+        billableStatus: body.billableStatus === "non_billable" ? "non_billable" : "billable",
+        billableRate: body.billableRate as { amountMinor: number; currency: string } | null,
+        idempotencyKey: idempotencyKeyFromRequest(c.req.raw.headers, body),
+      },
+    );
+
+    return c.json(result, 201);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
 app.post("/api/v1/webhook-subscriptions", async (c) => {
   const repository = new DrizzleTransactionReviewRepository();
 
@@ -571,6 +669,22 @@ export function publicApiOpenApiDocument(requestUrl: string) {
         get: {
           summary: "List team invoices",
           parameters: [{ name: "teamId", in: "query", required: true }],
+        },
+      },
+      "/projects": {
+        get: {
+          summary: "List team projects and time entries",
+          parameters: [{ name: "teamId", in: "query", required: true }],
+        },
+        post: {
+          summary: "Create a project",
+          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
+        },
+      },
+      "/time-entries": {
+        post: {
+          summary: "Create a time entry",
+          parameters: [{ name: "Idempotency-Key", in: "header", required: true }],
         },
       },
       "/webhook-subscriptions": {
