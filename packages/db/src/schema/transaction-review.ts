@@ -884,6 +884,87 @@ export const recurringInvoice = pgTable(
   ],
 );
 
+export const project = pgTable(
+  "project",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    customerId: text("customer_id")
+      .notNull()
+      .references(() => customer.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    status: text("status").default("active").notNull(),
+    billableRateMinor: integer("billable_rate_minor").notNull(),
+    currency: text("currency").notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("project_team_status_idx").on(table.teamId, table.status),
+    index("project_customer_idx").on(table.customerId, table.updatedAt),
+  ],
+);
+
+export const projectMember = pgTable(
+  "project_member",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    actorId: text("actor_id").notNull(),
+    role: text("role").notNull(),
+    billableRateMinor: integer("billable_rate_minor"),
+    currency: text("currency"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("project_member_actor_idx").on(table.projectId, table.actorId),
+    index("project_member_team_idx").on(table.teamId, table.actorId),
+  ],
+);
+
+export const timeEntry = pgTable(
+  "time_entry",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    actorId: text("actor_id").notNull(),
+    description: text("description").notNull(),
+    occurredOn: timestamp("occurred_on").notNull(),
+    durationMinutes: integer("duration_minutes").notNull(),
+    billableStatus: text("billable_status").notNull(),
+    billableRateMinor: integer("billable_rate_minor"),
+    currency: text("currency"),
+    invoiceId: text("invoice_id").references(() => invoice.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("time_entry_team_occurred_idx").on(table.teamId, table.occurredOn),
+    index("time_entry_project_idx").on(table.projectId, table.occurredOn),
+    index("time_entry_invoice_idx").on(table.invoiceId),
+  ],
+);
+
 export const idempotencyKey = pgTable(
   "idempotency_key",
   {

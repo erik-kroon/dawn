@@ -37,11 +37,14 @@ import type {
   LedgerAccount,
   LedgerTransactionDraft,
   Product,
+  Project,
+  ProjectMember,
   RecurringInvoiceSchedule,
   TeamInvite,
   TeamMember,
   TeamMembership,
   TeamRole,
+  TimeEntry,
   Transaction,
 } from "@dawn/domain";
 import { calculateInvoiceTotals, ledgerDuplicateKey } from "@dawn/domain";
@@ -1864,6 +1867,170 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return { invoice, schedule: mapRecurringInvoiceSchedule(schedule) };
   }
 
+  async listProjects(teamId: string): Promise<Project[]> {
+    const projects = await this.client
+      .select()
+      .from(schema.project)
+      .where(eq(schema.project.teamId, teamId))
+      .orderBy(desc(schema.project.updatedAt));
+
+    return projects.map(mapProject);
+  }
+
+  async listProjectMembers(teamId: string): Promise<ProjectMember[]> {
+    const members = await this.client
+      .select()
+      .from(schema.projectMember)
+      .where(eq(schema.projectMember.teamId, teamId))
+      .orderBy(asc(schema.projectMember.createdAt));
+
+    return members.map(mapProjectMember);
+  }
+
+  async listTimeEntries(teamId: string): Promise<TimeEntry[]> {
+    const entries = await this.client
+      .select()
+      .from(schema.timeEntry)
+      .where(eq(schema.timeEntry.teamId, teamId))
+      .orderBy(desc(schema.timeEntry.occurredOn), desc(schema.timeEntry.createdAt));
+
+    return entries.map(mapTimeEntry);
+  }
+
+  async getProjectForTeam(teamId: string, projectId: string): Promise<Project | null> {
+    const [project] = await this.client
+      .select()
+      .from(schema.project)
+      .where(and(eq(schema.project.teamId, teamId), eq(schema.project.id, projectId)))
+      .limit(1);
+
+    return project ? mapProject(project) : null;
+  }
+
+  async getTimeEntriesForTeam(teamId: string, timeEntryIds: string[]): Promise<TimeEntry[]> {
+    if (timeEntryIds.length === 0) {
+      return [];
+    }
+
+    const entries = await this.client
+      .select()
+      .from(schema.timeEntry)
+      .where(and(eq(schema.timeEntry.teamId, teamId), inArray(schema.timeEntry.id, timeEntryIds)));
+
+    return entries.map(mapTimeEntry);
+  }
+
+  async createProject(input: {
+    projectId: string;
+    memberId: string;
+    teamId: string;
+    customerId: string;
+    name: string;
+    description?: string | null;
+    billableRate: Project["billableRate"];
+    createdByActorId: string;
+  }): Promise<{ project: Project; member: ProjectMember }> {
+    const [project] = await this.client
+      .insert(schema.project)
+      .values({
+        id: input.projectId,
+        teamId: input.teamId,
+        customerId: input.customerId,
+        name: input.name,
+        description: input.description ?? null,
+        status: "active",
+        billableRateMinor: input.billableRate.amountMinor,
+        currency: input.billableRate.currency,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!project) {
+      throw new Error("Project was not created");
+    }
+
+    const [member] = await this.client
+      .insert(schema.projectMember)
+      .values({
+        id: input.memberId,
+        teamId: input.teamId,
+        projectId: input.projectId,
+        actorId: input.createdByActorId,
+        role: "manager",
+        billableRateMinor: input.billableRate.amountMinor,
+        currency: input.billableRate.currency,
+      })
+      .returning();
+
+    if (!member) {
+      throw new Error("Project member was not created");
+    }
+
+    return { project: mapProject(project), member: mapProjectMember(member) };
+  }
+
+  async createTimeEntry(input: {
+    timeEntryId: string;
+    teamId: string;
+    projectId: string;
+    actorId: string;
+    description: string;
+    occurredOn: string;
+    durationMinutes: number;
+    billableStatus: TimeEntry["billableStatus"];
+    billableRate?: TimeEntry["billableRate"];
+  }): Promise<TimeEntry> {
+    const [entry] = await this.client
+      .insert(schema.timeEntry)
+      .values({
+        id: input.timeEntryId,
+        teamId: input.teamId,
+        projectId: input.projectId,
+        actorId: input.actorId,
+        description: input.description,
+        occurredOn: new Date(input.occurredOn),
+        durationMinutes: input.durationMinutes,
+        billableStatus: input.billableStatus,
+        billableRateMinor: input.billableRate?.amountMinor ?? null,
+        currency: input.billableRate?.currency ?? null,
+        invoiceId: null,
+      })
+      .returning();
+
+    if (!entry) {
+      throw new Error("Time entry was not created");
+    }
+
+    return mapTimeEntry(entry);
+  }
+
+  async markTimeEntriesInvoiced(input: {
+    teamId: string;
+    timeEntryIds: string[];
+    invoiceId: string;
+  }): Promise<TimeEntry[]> {
+    if (input.timeEntryIds.length === 0) {
+      return [];
+    }
+
+    const entries = await this.client
+      .update(schema.timeEntry)
+      .set({
+        billableStatus: "invoiced",
+        invoiceId: input.invoiceId,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.timeEntry.teamId, input.teamId),
+          inArray(schema.timeEntry.id, input.timeEntryIds),
+        ),
+      )
+      .returning();
+
+    return entries.map(mapTimeEntry);
+  }
+
   private async insertInvoiceLines(input: {
     teamId: string;
     invoiceId: string;
@@ -2724,6 +2891,65 @@ function mapRecurringInvoiceSchedule(
     createdByActorId: schedule.createdByActorId,
     createdAt: schedule.createdAt.toISOString(),
     updatedAt: schedule.updatedAt.toISOString(),
+  };
+}
+
+function mapProject(project: typeof schema.project.$inferSelect): Project {
+  return {
+    id: project.id,
+    teamId: project.teamId,
+    customerId: project.customerId,
+    name: project.name,
+    description: project.description,
+    status: project.status as Project["status"],
+    billableRate: {
+      amountMinor: project.billableRateMinor,
+      currency: project.currency,
+    },
+    createdByActorId: project.createdByActorId,
+    createdAt: project.createdAt.toISOString(),
+    updatedAt: project.updatedAt.toISOString(),
+  };
+}
+
+function mapProjectMember(member: typeof schema.projectMember.$inferSelect): ProjectMember {
+  return {
+    id: member.id,
+    teamId: member.teamId,
+    projectId: member.projectId,
+    actorId: member.actorId,
+    role: member.role as ProjectMember["role"],
+    billableRate:
+      member.billableRateMinor !== null && member.currency
+        ? {
+            amountMinor: member.billableRateMinor,
+            currency: member.currency,
+          }
+        : null,
+    createdAt: member.createdAt.toISOString(),
+  };
+}
+
+function mapTimeEntry(entry: typeof schema.timeEntry.$inferSelect): TimeEntry {
+  return {
+    id: entry.id,
+    teamId: entry.teamId,
+    projectId: entry.projectId,
+    actorId: entry.actorId,
+    description: entry.description,
+    occurredOn: entry.occurredOn.toISOString(),
+    durationMinutes: entry.durationMinutes,
+    billableStatus: entry.billableStatus as TimeEntry["billableStatus"],
+    billableRate:
+      entry.billableRateMinor !== null && entry.currency
+        ? {
+            amountMinor: entry.billableRateMinor,
+            currency: entry.currency,
+          }
+        : null,
+    invoiceId: entry.invoiceId,
+    createdAt: entry.createdAt.toISOString(),
+    updatedAt: entry.updatedAt.toISOString(),
   };
 }
 

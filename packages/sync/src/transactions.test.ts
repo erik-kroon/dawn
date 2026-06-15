@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildTransactionSyncInvalidation,
   buildTransactionSyncResponse,
+  createOperationalSyncInvalidation,
   createTransactionSyncSubscriptionAck,
   createOptimisticTransactionReview,
   isTransactionSyncInvalidationEvent,
@@ -65,6 +66,36 @@ describe("transaction sync collection", () => {
       changedIds: ["txn_1", "txn_2"],
     });
     expect(isTransactionSyncInvalidationEvent(event)).toBe(true);
+  });
+
+  test("creates operational invalidation events for projects and time entries", () => {
+    expect(
+      createOperationalSyncInvalidation({
+        teamId: "team_1",
+        collection: "projects",
+        cursor: "2026-06-15T10:00:00.000Z",
+        changedIds: ["project_1"],
+      }),
+    ).toEqual({
+      type: "sync.projects.invalidated",
+      teamId: "team_1",
+      collection: "projects",
+      cursor: "2026-06-15T10:00:00.000Z",
+      changedIds: ["project_1"],
+    });
+    expect(
+      createOperationalSyncInvalidation({
+        teamId: "team_1",
+        collection: "time_entries",
+        changedIds: ["time_1"],
+      }),
+    ).toEqual({
+      type: "sync.time_entries.invalidated",
+      teamId: "team_1",
+      collection: "time_entries",
+      cursor: null,
+      changedIds: ["time_1"],
+    });
   });
 
   test("models realtime subscription handshake messages", () => {

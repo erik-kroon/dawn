@@ -1,4 +1,4 @@
-import type { Transaction } from "@dawn/domain";
+import type { Project, TimeEntry, Transaction } from "@dawn/domain";
 
 export const transactionSyncCollection = {
   id: "transactions",
@@ -8,7 +8,26 @@ export const transactionSyncCollection = {
   invalidationEventType: "sync.transactions.invalidated",
 } as const;
 
+export const projectSyncCollection = {
+  id: "projects",
+  key: "id",
+  cursorField: "updatedAt",
+  conflictPolicy: "server_wins_for_operational_state",
+  invalidationEventType: "sync.projects.invalidated",
+} as const;
+
+export const timeEntrySyncCollection = {
+  id: "time_entries",
+  key: "id",
+  cursorField: "updatedAt",
+  conflictPolicy: "server_wins_for_operational_state",
+  invalidationEventType: "sync.time_entries.invalidated",
+} as const;
+
 export type TransactionSyncCollectionId = typeof transactionSyncCollection.id;
+export type ProjectSyncCollectionId = typeof projectSyncCollection.id;
+export type TimeEntrySyncCollectionId = typeof timeEntrySyncCollection.id;
+export type OperationalSyncCollectionId = ProjectSyncCollectionId | TimeEntrySyncCollectionId;
 
 export type TransactionSyncRecord = Transaction & {
   updatedAt: string;
@@ -31,6 +50,24 @@ export type TransactionSyncResponse = {
   cursor: string | null;
   conflictPolicy: typeof transactionSyncCollection.conflictPolicy;
   changes: TransactionSyncChange[];
+};
+
+export type ProjectSyncRecord = Project & {
+  updatedAt: string;
+};
+
+export type TimeEntrySyncRecord = TimeEntry & {
+  updatedAt: string;
+};
+
+export type OperationalSyncInvalidationEvent = {
+  type:
+    | typeof projectSyncCollection.invalidationEventType
+    | typeof timeEntrySyncCollection.invalidationEventType;
+  teamId: string;
+  collection: OperationalSyncCollectionId;
+  cursor: string | null;
+  changedIds: string[];
 };
 
 export type TransactionSyncInvalidationEvent = {
@@ -116,6 +153,24 @@ export function createTransactionSyncInvalidation(input: {
     type: transactionSyncCollection.invalidationEventType,
     teamId: input.teamId,
     collection: transactionSyncCollection.id,
+    cursor: input.cursor ?? null,
+    changedIds: [...input.changedIds],
+  };
+}
+
+export function createOperationalSyncInvalidation(input: {
+  teamId: string;
+  collection: OperationalSyncCollectionId;
+  cursor?: string | null;
+  changedIds: readonly string[];
+}): OperationalSyncInvalidationEvent {
+  return {
+    type:
+      input.collection === projectSyncCollection.id
+        ? projectSyncCollection.invalidationEventType
+        : timeEntrySyncCollection.invalidationEventType,
+    teamId: input.teamId,
+    collection: input.collection,
     cursor: input.cursor ?? null,
     changedIds: [...input.changedIds],
   };

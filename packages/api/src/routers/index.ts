@@ -13,6 +13,9 @@ import {
   createDraftInvoice,
   createLedgerTransaction,
   createProduct,
+  createProject,
+  createTimeEntry,
+  createInvoiceFromTimeEntries,
   createRecurringInvoiceSchedule,
   createTeam,
   generateInboxMatchSuggestions,
@@ -23,6 +26,7 @@ import {
   listDocuments,
   listInboxItems,
   listLedgerSummary,
+  listProjectWorkspace,
   listTeamDirectory,
   listTeams,
   listTransactionSyncCollection,
@@ -229,6 +233,37 @@ const createRecurringInvoiceScheduleInput = z.object({
   sourceInvoiceId: z.string().min(1),
   frequency: z.enum(["weekly", "monthly", "quarterly", "yearly"]),
   nextRunAt: z.iso.datetime(),
+  idempotencyKey: z.string().min(1),
+});
+
+const createProjectInput = z.object({
+  teamId: z.string().min(1),
+  customerId: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().nullable().optional(),
+  billableRate: moneyInput,
+  idempotencyKey: z.string().min(1),
+});
+
+const createTimeEntryInput = z.object({
+  teamId: z.string().min(1),
+  projectId: z.string().min(1),
+  actorId: z.string().min(1).nullable().optional(),
+  description: z.string().min(1),
+  occurredOn: z.iso.datetime(),
+  durationMinutes: z.number().int().positive(),
+  billableStatus: z.enum(["billable", "non_billable"]),
+  billableRate: moneyInput.nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const createInvoiceFromTimeEntriesInput = z.object({
+  teamId: z.string().min(1),
+  customerId: z.string().min(1),
+  invoiceNumber: z.string().min(1),
+  issueDate: z.iso.datetime(),
+  dueDate: z.iso.datetime().nullable().optional(),
+  timeEntryIds: z.array(z.string().min(1)).min(1),
   idempotencyKey: z.string().min(1),
 });
 
@@ -782,6 +817,80 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 teamId: input.teamId,
               },
               input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    projects: {
+      list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
+        try {
+          return await listProjectWorkspace(transactionReviewRepository, {
+            actor: { id: context.session.user.id, type: "user" },
+            requestId: context.requestId,
+            teamId: input?.teamId,
+          });
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+      createProject: protectedProcedure
+        .input(createProjectInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createProject(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                description: input.description ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createTimeEntry: protectedProcedure
+        .input(createTimeEntryInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createTimeEntry(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                actorId: input.actorId ?? null,
+                billableRate: input.billableRate ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createInvoiceFromTimeEntries: protectedProcedure
+        .input(createInvoiceFromTimeEntriesInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createInvoiceFromTimeEntries(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                dueDate: input.dueDate ?? null,
+              },
             );
           } catch (error) {
             mapAppError(error);

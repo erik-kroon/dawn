@@ -13,11 +13,14 @@ import type {
   LedgerAccount,
   LedgerTransactionDraft,
   Product,
+  Project,
+  ProjectMember,
   RecurringInvoiceSchedule,
   TeamInvite,
   TeamMember,
   TeamMembership,
   TeamRole,
+  TimeEntry,
   Transaction,
 } from "@dawn/domain";
 import type {
@@ -70,6 +73,9 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   invoicePayments = new Map<string, InvoicePayment>();
   invoiceEvents = new Map<string, InvoiceEvent>();
   recurringInvoices = new Map<string, RecurringInvoiceSchedule>();
+  projects = new Map<string, Project>();
+  projectMembers = new Map<string, ProjectMember>();
+  timeEntries = new Map<string, TimeEntry>();
   aliases: TeamAlias[] = [];
   hardNegatives: HardNegativeTransactionMatch[] = [];
   attachments: { transactionId: string; documentId: string }[] = [];
@@ -1142,6 +1148,117 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return { invoice, schedule: nextSchedule };
   }
 
+  async listProjects(teamId: string) {
+    return [...this.projects.values()].filter((project) => project.teamId === teamId);
+  }
+
+  async listProjectMembers(teamId: string) {
+    return [...this.projectMembers.values()].filter((member) => member.teamId === teamId);
+  }
+
+  async listTimeEntries(teamId: string) {
+    return [...this.timeEntries.values()].filter((entry) => entry.teamId === teamId);
+  }
+
+  async getProjectForTeam(teamId: string, projectId: string) {
+    const project = this.projects.get(projectId);
+    return project?.teamId === teamId ? project : null;
+  }
+
+  async getTimeEntriesForTeam(teamId: string, timeEntryIds: string[]) {
+    return timeEntryIds
+      .map((timeEntryId) => this.timeEntries.get(timeEntryId))
+      .filter((entry): entry is TimeEntry => Boolean(entry) && entry.teamId === teamId);
+  }
+
+  async createProject(input: {
+    projectId: string;
+    memberId: string;
+    teamId: string;
+    customerId: string;
+    name: string;
+    description?: string | null;
+    billableRate: Project["billableRate"];
+    createdByActorId: string;
+  }) {
+    const now = "2026-06-15T10:00:00.000Z";
+    const project: Project = {
+      id: input.projectId,
+      teamId: input.teamId,
+      customerId: input.customerId,
+      name: input.name,
+      description: input.description ?? null,
+      status: "active",
+      billableRate: input.billableRate,
+      createdByActorId: input.createdByActorId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const member: ProjectMember = {
+      id: input.memberId,
+      teamId: input.teamId,
+      projectId: input.projectId,
+      actorId: input.createdByActorId,
+      role: "manager",
+      billableRate: input.billableRate,
+      createdAt: now,
+    };
+    this.projects.set(project.id, project);
+    this.projectMembers.set(member.id, member);
+    return { project, member };
+  }
+
+  async createTimeEntry(input: {
+    timeEntryId: string;
+    teamId: string;
+    projectId: string;
+    actorId: string;
+    description: string;
+    occurredOn: string;
+    durationMinutes: number;
+    billableStatus: TimeEntry["billableStatus"];
+    billableRate?: TimeEntry["billableRate"];
+  }) {
+    const timeEntry: TimeEntry = {
+      id: input.timeEntryId,
+      teamId: input.teamId,
+      projectId: input.projectId,
+      actorId: input.actorId,
+      description: input.description,
+      occurredOn: input.occurredOn,
+      durationMinutes: input.durationMinutes,
+      billableStatus: input.billableStatus,
+      billableRate: input.billableRate ?? null,
+      invoiceId: null,
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.timeEntries.set(timeEntry.id, timeEntry);
+    return timeEntry;
+  }
+
+  async markTimeEntriesInvoiced(input: {
+    teamId: string;
+    timeEntryIds: string[];
+    invoiceId: string;
+  }) {
+    return input.timeEntryIds.map((timeEntryId) => {
+      const entry = this.timeEntries.get(timeEntryId);
+
+      if (!entry || entry.teamId !== input.teamId) {
+        throw new Error("Time entry not found");
+      }
+
+      const invoiced: TimeEntry = {
+        ...entry,
+        billableStatus: "invoiced",
+        invoiceId: input.invoiceId,
+      };
+      this.timeEntries.set(invoiced.id, invoiced);
+      return invoiced;
+    });
+  }
+
   private invoiceFromInput(
     invoiceId: string,
     input: {
@@ -1788,6 +1905,70 @@ describe("appRouter", () => {
     expect(list.recurringSchedules).toHaveLength(1);
     expect(repository.auditEvents).toHaveLength(7);
     expect(repository.outboxEvents).toHaveLength(7);
+  });
+
+  test("creates projects, tracks time, and invoices billable entries through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+    const customer = await call(
+      router.billing.createCustomer,
+      {
+        teamId: "team_1",
+        name: "Acme Co",
+        idempotencyKey: "customer_1",
+      },
+      context,
+    );
+    const project = await call(
+      router.projects.createProject,
+      {
+        teamId: "team_1",
+        customerId: customer.customer.id,
+        name: "Website rebuild",
+        billableRate: { amountMinor: 150_00, currency: "USD" },
+        idempotencyKey: "project_1",
+      },
+      context,
+    );
+    const timeEntry = await call(
+      router.projects.createTimeEntry,
+      {
+        teamId: "team_1",
+        projectId: project.project.id,
+        description: "Design review",
+        occurredOn: "2026-06-15T00:00:00.000Z",
+        durationMinutes: 90,
+        billableStatus: "billable",
+        idempotencyKey: "time_1",
+      },
+      context,
+    );
+    const list = await call(router.projects.list, { teamId: "team_1" }, context);
+    const invoice = await call(
+      router.projects.createInvoiceFromTimeEntries,
+      {
+        teamId: "team_1",
+        customerId: customer.customer.id,
+        invoiceNumber: "INV-TIME-001",
+        issueDate: "2026-06-16T00:00:00.000Z",
+        timeEntryIds: [timeEntry.timeEntry.id],
+        idempotencyKey: "invoice_time_1",
+      },
+      context,
+    );
+
+    expect(project.member.role).toBe("manager");
+    expect(list.report.billableValue).toEqual({ amountMinor: 225_00, currency: "USD" });
+    expect(invoice.invoice.lines[0]).toMatchObject({
+      quantityMilli: 1_500,
+      unitPrice: { amountMinor: 150_00, currency: "USD" },
+    });
+    expect(invoice.timeEntries[0]?.billableStatus).toBe("invoiced");
+    expect(repository.auditEvents).toHaveLength(4);
+    expect(repository.outboxEvents).toHaveLength(4);
   });
 
   test("creates and signs document uploads and downloads through protected routes", async () => {

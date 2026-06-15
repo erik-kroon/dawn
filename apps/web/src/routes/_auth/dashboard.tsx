@@ -77,6 +77,22 @@ function RouteComponent() {
     fileName: string;
     bodyBase64: string;
   } | null>(null);
+  const [projectDraft, setProjectDraft] = useState({
+    customerId: "",
+    name: "",
+    billableRate: "",
+    currency: "USD",
+  });
+  const [timeDraft, setTimeDraft] = useState({
+    projectId: "",
+    description: "",
+    durationMinutes: "",
+    billableStatus: "billable" as "billable" | "non_billable",
+  });
+  const [timeInvoiceDraft, setTimeInvoiceDraft] = useState({
+    timeEntryId: "",
+    invoiceNumber: "",
+  });
   const [syncReviewError, setSyncReviewError] = useState<string | null>(null);
   const [syncReviewingId, setSyncReviewingId] = useState<string | null>(null);
 
@@ -121,6 +137,10 @@ function RouteComponent() {
   });
   const billing = useQuery({
     ...orpc.billing.list.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
+  const projects = useQuery({
+    ...orpc.projects.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
   const teamDirectory = useQuery({
@@ -338,6 +358,36 @@ function RouteComponent() {
     orpc.billing.createRecurringSchedule.mutationOptions({
       onSuccess: async () => {
         setInvoiceActionDraft((draft) => ({ ...draft, recurringNextRunAt: "" }));
+        await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
+      },
+    }),
+  );
+  const createProjectMutation = useMutation(
+    orpc.projects.createProject.mutationOptions({
+      onSuccess: async () => {
+        setProjectDraft({ customerId: "", name: "", billableRate: "", currency: "USD" });
+        await queryClient.invalidateQueries({ queryKey: orpc.projects.list.queryKey() });
+      },
+    }),
+  );
+  const createTimeEntryMutation = useMutation(
+    orpc.projects.createTimeEntry.mutationOptions({
+      onSuccess: async () => {
+        setTimeDraft({
+          projectId: "",
+          description: "",
+          durationMinutes: "",
+          billableStatus: "billable",
+        });
+        await queryClient.invalidateQueries({ queryKey: orpc.projects.list.queryKey() });
+      },
+    }),
+  );
+  const createTimeInvoiceMutation = useMutation(
+    orpc.projects.createInvoiceFromTimeEntries.mutationOptions({
+      onSuccess: async () => {
+        setTimeInvoiceDraft({ timeEntryId: "", invoiceNumber: "" });
+        await queryClient.invalidateQueries({ queryKey: orpc.projects.list.queryKey() });
         await queryClient.invalidateQueries({ queryKey: orpc.billing.list.queryKey() });
       },
     }),
@@ -1451,6 +1501,297 @@ function RouteComponent() {
               {createRecurringScheduleMutation.error ? (
                 <p className="text-sm text-destructive">
                   {createRecurringScheduleMutation.error.message}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Projects and time</CardTitle>
+          <CardDescription>
+            Billable work stays customer-linked and can become invoice draft lines.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {transactionReview.data ? (
+            <div className="grid gap-3">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-2 border p-3">
+                  <p className="text-sm font-medium">Project</p>
+                  <select
+                    className="h-9 rounded-none border bg-background px-2 text-sm"
+                    onChange={(event) =>
+                      setProjectDraft((draft) => ({ ...draft, customerId: event.target.value }))
+                    }
+                    value={projectDraft.customerId}
+                  >
+                    <option value="">Select customer</option>
+                    {billing.data?.customers.map((customer) => (
+                      <option key={customer.id} value={customer.id}>
+                        {customer.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Input
+                    onChange={(event) =>
+                      setProjectDraft((draft) => ({ ...draft, name: event.target.value }))
+                    }
+                    placeholder="Project name"
+                    value={projectDraft.name}
+                  />
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Input
+                      onChange={(event) =>
+                        setProjectDraft((draft) => ({
+                          ...draft,
+                          billableRate: event.target.value,
+                        }))
+                      }
+                      placeholder="Hourly rate"
+                      value={projectDraft.billableRate}
+                    />
+                    <Input
+                      onChange={(event) =>
+                        setProjectDraft((draft) => ({
+                          ...draft,
+                          currency: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="USD"
+                      value={projectDraft.currency}
+                    />
+                  </div>
+                  <Button
+                    disabled={
+                      createProjectMutation.isPending ||
+                      !transactionReview.data.teamId ||
+                      !projectDraft.customerId ||
+                      !projectDraft.name.trim() ||
+                      !projectDraft.billableRate.trim()
+                    }
+                    onClick={() =>
+                      createProjectMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        customerId: projectDraft.customerId,
+                        name: projectDraft.name,
+                        billableRate: {
+                          amountMinor: parseMoneyInputToMinor(projectDraft.billableRate),
+                          currency: projectDraft.currency.trim().toUpperCase(),
+                        },
+                        idempotencyKey: crypto.randomUUID(),
+                      })
+                    }
+                    size="sm"
+                  >
+                    Create project
+                  </Button>
+                </div>
+
+                <div className="grid gap-2 border p-3">
+                  <p className="text-sm font-medium">Time entry</p>
+                  <select
+                    className="h-9 rounded-none border bg-background px-2 text-sm"
+                    onChange={(event) =>
+                      setTimeDraft((draft) => ({ ...draft, projectId: event.target.value }))
+                    }
+                    value={timeDraft.projectId}
+                  >
+                    <option value="">Select project</option>
+                    {projects.data?.projects.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Input
+                    onChange={(event) =>
+                      setTimeDraft((draft) => ({ ...draft, description: event.target.value }))
+                    }
+                    placeholder="Work description"
+                    value={timeDraft.description}
+                  />
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Input
+                      onChange={(event) =>
+                        setTimeDraft((draft) => ({
+                          ...draft,
+                          durationMinutes: event.target.value,
+                        }))
+                      }
+                      placeholder="Minutes"
+                      value={timeDraft.durationMinutes}
+                    />
+                    <select
+                      className="h-9 rounded-none border bg-background px-2 text-sm"
+                      onChange={(event) =>
+                        setTimeDraft((draft) => ({
+                          ...draft,
+                          billableStatus: event.target.value as typeof draft.billableStatus,
+                        }))
+                      }
+                      value={timeDraft.billableStatus}
+                    >
+                      <option value="billable">Billable</option>
+                      <option value="non_billable">Non-billable</option>
+                    </select>
+                  </div>
+                  <Button
+                    disabled={
+                      createTimeEntryMutation.isPending ||
+                      !transactionReview.data.teamId ||
+                      !timeDraft.projectId ||
+                      !timeDraft.description.trim() ||
+                      !timeDraft.durationMinutes.trim()
+                    }
+                    onClick={() =>
+                      createTimeEntryMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        projectId: timeDraft.projectId,
+                        description: timeDraft.description,
+                        occurredOn: new Date().toISOString(),
+                        durationMinutes: Number.parseInt(timeDraft.durationMinutes, 10),
+                        billableStatus: timeDraft.billableStatus,
+                        idempotencyKey: crypto.randomUUID(),
+                      })
+                    }
+                    size="sm"
+                  >
+                    Track time
+                  </Button>
+                </div>
+
+                <div className="grid gap-2 border p-3">
+                  <p className="text-sm font-medium">Invoice time</p>
+                  <select
+                    className="h-9 rounded-none border bg-background px-2 text-sm"
+                    onChange={(event) =>
+                      setTimeInvoiceDraft((draft) => ({
+                        ...draft,
+                        timeEntryId: event.target.value,
+                      }))
+                    }
+                    value={timeInvoiceDraft.timeEntryId}
+                  >
+                    <option value="">Select billable time</option>
+                    {projects.data?.timeEntries
+                      .filter((entry) => entry.billableStatus === "billable")
+                      .map((entry) => {
+                        const project = projects.data?.projects.find(
+                          (item) => item.id === entry.projectId,
+                        );
+
+                        return (
+                          <option key={entry.id} value={entry.id}>
+                            {project?.name ?? "Project"} · {entry.durationMinutes}m
+                          </option>
+                        );
+                      })}
+                  </select>
+                  <Input
+                    onChange={(event) =>
+                      setTimeInvoiceDraft((draft) => ({
+                        ...draft,
+                        invoiceNumber: event.target.value,
+                      }))
+                    }
+                    placeholder="Invoice number"
+                    value={timeInvoiceDraft.invoiceNumber}
+                  />
+                  <Button
+                    disabled={
+                      createTimeInvoiceMutation.isPending ||
+                      !transactionReview.data.teamId ||
+                      !timeInvoiceDraft.timeEntryId ||
+                      !timeInvoiceDraft.invoiceNumber.trim()
+                    }
+                    onClick={() => {
+                      const entry = projects.data?.timeEntries.find(
+                        (item) => item.id === timeInvoiceDraft.timeEntryId,
+                      );
+                      const project = projects.data?.projects.find(
+                        (item) => item.id === entry?.projectId,
+                      );
+
+                      if (!entry || !project) {
+                        return;
+                      }
+
+                      createTimeInvoiceMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        customerId: project.customerId,
+                        invoiceNumber: timeInvoiceDraft.invoiceNumber,
+                        issueDate: new Date().toISOString(),
+                        timeEntryIds: [entry.id],
+                        idempotencyKey: crypto.randomUUID(),
+                      });
+                    }}
+                    size="sm"
+                    variant="outline"
+                  >
+                    Create invoice draft
+                  </Button>
+                </div>
+              </div>
+
+              <div className="grid gap-3 text-sm md:grid-cols-4">
+                <p>
+                  <span className="font-medium">{projects.data?.projects.length ?? 0}</span>{" "}
+                  projects
+                </p>
+                <p>
+                  <span className="font-medium">{projects.data?.report.totalMinutes ?? 0}</span>{" "}
+                  tracked minutes
+                </p>
+                <p>
+                  <span className="font-medium">{projects.data?.report.billableMinutes ?? 0}</span>{" "}
+                  billable minutes
+                </p>
+                <p>
+                  <span className="font-medium">
+                    {formatMoney(
+                      projects.data?.report.billableValue ?? { amountMinor: 0, currency: "USD" },
+                    )}
+                  </span>{" "}
+                  billable value
+                </p>
+              </div>
+
+              {projects.data?.timeEntries.length ? (
+                <div className="grid gap-2 text-sm">
+                  {projects.data.timeEntries.slice(0, 5).map((entry) => {
+                    const project = projects.data.projects.find(
+                      (item) => item.id === entry.projectId,
+                    );
+
+                    return (
+                      <div
+                        className="flex items-center justify-between gap-3 border p-2"
+                        key={entry.id}
+                      >
+                        <span>
+                          {project?.name ?? "Project"} · {entry.description}
+                        </span>
+                        <span className="text-muted-foreground">
+                          {entry.durationMinutes}m · {entry.billableStatus}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              {createProjectMutation.error ? (
+                <p className="text-sm text-destructive">{createProjectMutation.error.message}</p>
+              ) : null}
+              {createTimeEntryMutation.error ? (
+                <p className="text-sm text-destructive">{createTimeEntryMutation.error.message}</p>
+              ) : null}
+              {createTimeInvoiceMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {createTimeInvoiceMutation.error.message}
                 </p>
               ) : null}
             </div>

@@ -25,6 +25,12 @@ import type {
   Transaction,
   Product,
   ProductType,
+  Project,
+  ProjectInput,
+  ProjectMember,
+  TimeEntry,
+  TimeEntryInput,
+  TimeEntryReport,
   InboxMatchConfidence,
   InboxMatchSuggestion,
 } from "@dawn/domain";
@@ -44,6 +50,8 @@ import {
   assertCanSendInvoice,
   assertInvoiceDraftInput,
   assertLedgerTransactionDraft,
+  assertProjectInput,
+  assertTimeEntryInput,
   createReportTotals,
   csvRowToLedgerDraft,
   invoiceStatusAfterPayment,
@@ -53,7 +61,9 @@ import {
   parseCsvTransactionRows,
   permissionsForRole,
   roleHasPermission,
+  summarizeTimeEntries,
   suggestInboxTransactionMatches,
+  timeEntryToInvoiceLine,
 } from "@dawn/domain";
 import { providerTransactionToLedgerDraft } from "@dawn/integrations";
 import { dawnQueueNames, nextOutboxRetryAt, outboxEventToQueueMessages } from "@dawn/jobs";
@@ -637,6 +647,51 @@ export type GenerateRecurringInvoiceResult = {
   replayed: boolean;
 };
 
+export type ProjectWorkspace = {
+  teamId: string;
+  customers: Customer[];
+  projects: Project[];
+  projectMembers: ProjectMember[];
+  timeEntries: TimeEntry[];
+  report: TimeEntryReport;
+};
+
+export type CreateProjectCommand = ProjectInput & {
+  idempotencyKey: string;
+};
+
+export type CreateProjectResult = {
+  project: Project;
+  member: ProjectMember;
+  replayed: boolean;
+};
+
+export type CreateTimeEntryCommand = Omit<TimeEntryInput, "actorId"> & {
+  actorId?: string | null;
+  idempotencyKey: string;
+};
+
+export type CreateTimeEntryResult = {
+  timeEntry: TimeEntry;
+  replayed: boolean;
+};
+
+export type CreateInvoiceFromTimeEntriesCommand = {
+  teamId: string;
+  customerId: string;
+  invoiceNumber: string;
+  issueDate: string;
+  dueDate?: string | null;
+  timeEntryIds: string[];
+  idempotencyKey: string;
+};
+
+export type CreateInvoiceFromTimeEntriesResult = {
+  invoice: InvoiceDraft;
+  timeEntries: TimeEntry[];
+  replayed: boolean;
+};
+
 type NormalizedInvoiceDraftInput = Omit<InvoiceDraftInput, "discountBasisPoints" | "lines"> & {
   discountBasisPoints: number;
   lines: InvoiceLineDraft[];
@@ -1019,7 +1074,42 @@ export type BillingRepository = {
 export type DawnRepository = BankingUseCaseRepository &
   DocumentRepository &
   InboxRepository &
-  BillingRepository;
+  BillingRepository &
+  ProjectRepository;
+
+export type ProjectRepository = {
+  listProjects(teamId: string): Promise<Project[]>;
+  listProjectMembers(teamId: string): Promise<ProjectMember[]>;
+  listTimeEntries(teamId: string): Promise<TimeEntry[]>;
+  getProjectForTeam(teamId: string, projectId: string): Promise<Project | null>;
+  getTimeEntriesForTeam(teamId: string, timeEntryIds: string[]): Promise<TimeEntry[]>;
+  createProject(input: {
+    projectId: string;
+    memberId: string;
+    teamId: string;
+    customerId: string;
+    name: string;
+    description?: string | null;
+    billableRate: Money;
+    createdByActorId: string;
+  }): Promise<{ project: Project; member: ProjectMember }>;
+  createTimeEntry(input: {
+    timeEntryId: string;
+    teamId: string;
+    projectId: string;
+    actorId: string;
+    description: string;
+    occurredOn: string;
+    durationMinutes: number;
+    billableStatus: TimeEntry["billableStatus"];
+    billableRate?: Money | null;
+  }): Promise<TimeEntry>;
+  markTimeEntriesInvoiced(input: {
+    teamId: string;
+    timeEntryIds: string[];
+    invoiceId: string;
+  }): Promise<TimeEntry[]>;
+};
 
 export type OutboxDispatchRepository = {
   withTransaction<T>(callback: (repository: OutboxDispatchRepository) => Promise<T>): Promise<T>;
@@ -1179,6 +1269,9 @@ const sendInvoiceOperation = "invoice.send";
 const recordInvoicePaymentOperation = "invoice.payment.record";
 const createRecurringInvoiceScheduleOperation = "invoice.recurring.create";
 const generateRecurringInvoiceOperation = "invoice.recurring.generate";
+const createProjectOperation = "project.create";
+const createTimeEntryOperation = "time_entry.create";
+const createInvoiceFromTimeEntriesOperation = "time_entry.invoice.create";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
@@ -3542,6 +3635,391 @@ export function createDeterministicInvoicePdfRenderer(): InvoicePdfRenderer {
 
 function escapePdfText(value: string) {
   return value.replace(/[\\()]/g, (character) => `\\${character}`).replace(/\r?\n/g, " ");
+}
+
+export async function listProjectWorkspace(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  input: { teamId?: string } = {},
+): Promise<ProjectWorkspace> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: input.teamId ?? context.teamId },
+    "projects.read",
+    "You cannot read projects for this team",
+  );
+  const [customers, projects, projectMembers, timeEntries] = await Promise.all([
+    repository.listCustomers(access.teamId),
+    repository.listProjects(access.teamId),
+    repository.listProjectMembers(access.teamId),
+    repository.listTimeEntries(access.teamId),
+  ]);
+  const currency = projects[0]?.billableRate.currency ?? "USD";
+
+  return {
+    teamId: access.teamId,
+    customers,
+    projects,
+    projectMembers,
+    timeEntries,
+    report: summarizeTimeEntries(timeEntries, currency),
+  };
+}
+
+export async function createProject(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: CreateProjectCommand,
+): Promise<CreateProjectResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const projectRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Project not found");
+
+    await resolveTeamAccess(
+      projectRepository,
+      { ...context, teamId: command.teamId },
+      "projects.write",
+      "You cannot create projects for this team",
+    );
+
+    const normalized = {
+      teamId: command.teamId,
+      customerId: command.customerId,
+      name: command.name.trim(),
+      description: command.description?.trim() || null,
+      billableRate: {
+        amountMinor: command.billableRate.amountMinor,
+        currency: command.billableRate.currency.toUpperCase(),
+      },
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await projectRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createProjectOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError("CONFLICT", "Idempotency key was already used for a different project");
+      }
+
+      return { ...(replayed.result as CreateProjectResult), replayed: true };
+    }
+
+    const customer = await projectRepository.getCustomerForTeam(command.teamId, command.customerId);
+
+    if (!customer) {
+      throw new AppError("NOT_FOUND", "Customer not found");
+    }
+
+    try {
+      assertProjectInput(normalized);
+    } catch (error) {
+      throw new AppError("CONFLICT", errorMessage(error));
+    }
+
+    const created = await projectRepository.createProject({
+      projectId: crypto.randomUUID(),
+      memberId: crypto.randomUUID(),
+      ...normalized,
+      createdByActorId: context.actor.id,
+    });
+
+    await projectRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "project.created",
+      entityType: "project",
+      entityId: created.project.id,
+      metadata: {
+        customerId: created.project.customerId,
+        billableRate: created.project.billableRate,
+      },
+    });
+
+    await projectRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "project.created",
+      version: 1,
+      payload: {
+        projectId: created.project.id,
+        customerId: created.project.customerId,
+      },
+    });
+
+    const result = { ...created, replayed: false };
+
+    await projectRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createProjectOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function createTimeEntry(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: CreateTimeEntryCommand,
+): Promise<CreateTimeEntryResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const projectRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Project not found");
+
+    await resolveTeamAccess(
+      projectRepository,
+      { ...context, teamId: command.teamId },
+      "projects.write",
+      "You cannot track time for this team",
+    );
+
+    const project = await projectRepository.getProjectForTeam(command.teamId, command.projectId);
+
+    if (!project) {
+      throw new AppError("NOT_FOUND", "Project not found");
+    }
+
+    const normalized = {
+      teamId: command.teamId,
+      projectId: command.projectId,
+      actorId: command.actorId?.trim() || context.actor.id,
+      description: command.description.trim(),
+      occurredOn: new Date(command.occurredOn).toISOString(),
+      durationMinutes: command.durationMinutes,
+      billableStatus: command.billableStatus,
+      billableRate:
+        command.billableStatus === "billable"
+          ? {
+              amountMinor: command.billableRate?.amountMinor ?? project.billableRate.amountMinor,
+              currency: (
+                command.billableRate?.currency ?? project.billableRate.currency
+              ).toUpperCase(),
+            }
+          : null,
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await projectRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createTimeEntryOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different time entry",
+        );
+      }
+
+      return { ...(replayed.result as CreateTimeEntryResult), replayed: true };
+    }
+
+    try {
+      assertTimeEntryInput(normalized);
+    } catch (error) {
+      throw new AppError("CONFLICT", errorMessage(error));
+    }
+
+    const timeEntry = await projectRepository.createTimeEntry({
+      timeEntryId: crypto.randomUUID(),
+      ...normalized,
+    });
+
+    await projectRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "time_entry.created",
+      entityType: "time_entry",
+      entityId: timeEntry.id,
+      metadata: {
+        projectId: timeEntry.projectId,
+        durationMinutes: timeEntry.durationMinutes,
+        billableStatus: timeEntry.billableStatus,
+      },
+    });
+
+    await projectRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "time_entry.created",
+      version: 1,
+      payload: {
+        timeEntryId: timeEntry.id,
+        projectId: timeEntry.projectId,
+      },
+    });
+
+    const result = { timeEntry, replayed: false };
+
+    await projectRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createTimeEntryOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function createInvoiceFromTimeEntries(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: CreateInvoiceFromTimeEntriesCommand,
+): Promise<CreateInvoiceFromTimeEntriesResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const projectRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Project not found");
+
+    await resolveTeamAccess(
+      projectRepository,
+      { ...context, teamId: command.teamId },
+      "projects.write",
+      "You cannot invoice time for this team",
+    );
+
+    const normalized = {
+      teamId: command.teamId,
+      customerId: command.customerId,
+      invoiceNumber: command.invoiceNumber.trim(),
+      issueDate: new Date(command.issueDate).toISOString(),
+      dueDate: command.dueDate ? new Date(command.dueDate).toISOString() : null,
+      timeEntryIds: [...new Set(command.timeEntryIds)].sort(),
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await projectRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createInvoiceFromTimeEntriesOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different time invoice",
+        );
+      }
+
+      return { ...(replayed.result as CreateInvoiceFromTimeEntriesResult), replayed: true };
+    }
+
+    if (normalized.timeEntryIds.length === 0) {
+      throw new AppError("CONFLICT", "At least one time entry is required");
+    }
+
+    const customer = await projectRepository.getCustomerForTeam(command.teamId, command.customerId);
+
+    if (!customer) {
+      throw new AppError("NOT_FOUND", "Customer not found");
+    }
+
+    const [timeEntries, projects] = await Promise.all([
+      projectRepository.getTimeEntriesForTeam(command.teamId, normalized.timeEntryIds),
+      projectRepository.listProjects(command.teamId),
+    ]);
+
+    if (timeEntries.length !== normalized.timeEntryIds.length) {
+      throw new AppError("NOT_FOUND", "Time entry not found");
+    }
+
+    const projectById = new Map(projects.map((project) => [project.id, project]));
+    const lines = timeEntries.map((timeEntry) => {
+      const project = projectById.get(timeEntry.projectId);
+
+      if (!project || project.customerId !== normalized.customerId) {
+        throw new AppError("CONFLICT", "Time entries must belong to the invoice customer");
+      }
+
+      try {
+        return timeEntryToInvoiceLine({ project, entry: timeEntry });
+      } catch (error) {
+        throw new AppError("CONFLICT", errorMessage(error));
+      }
+    });
+    const currency = lines[0]?.unitPrice.currency ?? "USD";
+    const invoiceInput = {
+      teamId: command.teamId,
+      customerId: normalized.customerId,
+      invoiceNumber: normalized.invoiceNumber,
+      issueDate: normalized.issueDate,
+      dueDate: normalized.dueDate,
+      currency,
+      discountBasisPoints: 0,
+      lines,
+    };
+
+    assertInvoiceDraftInput(invoiceInput);
+
+    const invoice = await projectRepository.createDraftInvoice({
+      invoiceId: crypto.randomUUID(),
+      ...invoiceInput,
+      createdByActorId: context.actor.id,
+    });
+    const invoicedEntries = await projectRepository.markTimeEntriesInvoiced({
+      teamId: command.teamId,
+      timeEntryIds: normalized.timeEntryIds,
+      invoiceId: invoice.id,
+    });
+
+    await projectRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "time_entries.invoiced",
+      entityType: "invoice",
+      entityId: invoice.id,
+      metadata: {
+        timeEntryIds: normalized.timeEntryIds,
+        total: invoice.totals.total,
+      },
+    });
+
+    await projectRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "time_entries.invoiced",
+      version: 1,
+      payload: {
+        invoiceId: invoice.id,
+        timeEntryIds: normalized.timeEntryIds,
+      },
+    });
+
+    const result = { invoice, timeEntries: invoicedEntries, replayed: false };
+
+    await projectRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createInvoiceFromTimeEntriesOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
 }
 
 function normalizeCreateCustomerCommand(command: CreateCustomerCommand) {
