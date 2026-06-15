@@ -965,6 +965,27 @@ export const timeEntry = pgTable(
   ],
 );
 
+export const businessInsight = pgTable(
+  "business_insight",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    summary: text("summary").notNull(),
+    severity: text("severity").notNull(),
+    periodStart: timestamp("period_start").notNull(),
+    periodEnd: timestamp("period_end").notNull(),
+    sourceRefs: jsonb("source_refs").$type<Record<string, unknown>[]>().notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("business_insight_team_period_idx").on(table.teamId, table.periodStart, table.periodEnd),
+    index("business_insight_team_created_idx").on(table.teamId, table.createdAt),
+  ],
+);
+
 export const idempotencyKey = pgTable(
   "idempotency_key",
   {

@@ -144,6 +144,37 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps weekly insight due events to generation jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "insights.weekly.due",
+        payload: {
+          periodStart: "2026-06-08T00:00:00.000Z",
+          periodEnd: "2026-06-15T00:00:00.000Z",
+        },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "insights.weekly.due",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "insights.weekly.generate",
+        teamId: "team_1",
+        periodStart: "2026-06-08T00:00:00.000Z",
+        periodEnd: "2026-06-15T00:00:00.000Z",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "insights:weekly:outbox_1",
+      },
+    ]);
+  });
+
   test("calculates capped exponential retry delays", () => {
     const now = new Date("2026-06-15T10:00:00.000Z");
 

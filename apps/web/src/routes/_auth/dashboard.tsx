@@ -143,6 +143,10 @@ function RouteComponent() {
     ...orpc.projects.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
+  const reports = useQuery({
+    ...orpc.reports.overview.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
   const teamDirectory = useQuery({
     ...orpc.teams.directory.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: canManageTeam && Boolean(currentTeamId),
@@ -612,6 +616,114 @@ function RouteComponent() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Overview</CardTitle>
+          <CardDescription>
+            Business health is computed from source records, invoices, inbox, and time entries.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {reports.data ? (
+            <div className="grid gap-4">
+              <div className="grid gap-3 md:grid-cols-4">
+                <div className="border p-3">
+                  <p className="text-xs text-muted-foreground">Cashflow</p>
+                  <p className="text-lg font-semibold">
+                    {formatMoney(reports.data.report.cashflow)}
+                  </p>
+                </div>
+                <div className="border p-3">
+                  <p className="text-xs text-muted-foreground">Profit</p>
+                  <p className="text-lg font-semibold">
+                    {formatMoney(reports.data.report.totals.profit)}
+                  </p>
+                </div>
+                <div className="border p-3">
+                  <p className="text-xs text-muted-foreground">Unpaid invoices</p>
+                  <p className="text-lg font-semibold">
+                    {reports.data.report.unpaidInvoices.length}
+                  </p>
+                </div>
+                <div className="border p-3">
+                  <p className="text-xs text-muted-foreground">Utilization</p>
+                  <p className="text-lg font-semibold">
+                    {formatBasisPoints(reports.data.report.timeUtilization.utilizationBasisPoints)}%
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-2 border p-3">
+                  <p className="text-sm font-medium">Revenue by customer</p>
+                  {reports.data.report.revenueByCustomer.slice(0, 3).map((bucket) => (
+                    <div className="flex justify-between gap-3 text-sm" key={bucket.id}>
+                      <span>{bucket.label}</span>
+                      <span className="font-medium">{formatMoney(bucket.amount)}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="grid gap-2 border p-3">
+                  <p className="text-sm font-medium">Expenses by category</p>
+                  {reports.data.report.expensesByCategory.slice(0, 3).map((bucket) => (
+                    <div className="flex justify-between gap-3 text-sm" key={bucket.id}>
+                      <span>{bucket.label}</span>
+                      <span className="font-medium">{formatMoney(bucket.amount)}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="grid gap-2 border p-3">
+                  <p className="text-sm font-medium">Inbox backlog</p>
+                  <p className="text-sm">
+                    {reports.data.report.inboxBacklog.pendingExtraction} pending extraction
+                  </p>
+                  <p className="text-sm">
+                    {reports.data.report.inboxBacklog.needsReview} need review
+                  </p>
+                  <p className="text-sm">
+                    {reports.data.report.inboxBacklog.suggestedMatches} suggested matches
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-2">
+                <p className="text-sm font-medium">Insights</p>
+                {reports.data.insights.length ? (
+                  reports.data.insights.slice(0, 3).map((insight) => (
+                    <div className="grid gap-2 border p-3 text-sm" key={insight.id}>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="font-medium">{insight.title}</p>
+                        <span className="text-xs text-muted-foreground">{insight.severity}</span>
+                      </div>
+                      <p className="text-muted-foreground">{insight.summary}</p>
+                      {insight.sourceRefs.length ? (
+                        <div className="flex flex-wrap gap-2">
+                          {insight.sourceRefs.slice(0, 5).map((source) => (
+                            <a
+                              className="text-xs underline"
+                              href={sourceHref(source.type)}
+                              key={`${source.type}:${source.id}`}
+                            >
+                              {source.label}
+                            </a>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    Weekly insights appear after the scheduled job generates them.
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">Loading overview...</p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Bank connections</CardTitle>
           <CardDescription>
             Mock provider sync normalizes accounts and transactions through the same ledger,
@@ -793,7 +905,7 @@ function RouteComponent() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card id="inbox">
         <CardHeader>
           <CardTitle>Inbox review</CardTitle>
           <CardDescription>
@@ -1005,7 +1117,7 @@ function RouteComponent() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card id="billing">
         <CardHeader>
           <CardTitle>Billing drafts</CardTitle>
           <CardDescription>
@@ -1508,7 +1620,7 @@ function RouteComponent() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card id="projects">
         <CardHeader>
           <CardTitle>Projects and time</CardTitle>
           <CardDescription>
@@ -1966,7 +2078,7 @@ function RouteComponent() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card id="transactions">
         <CardHeader>
           <CardTitle>Transaction review tracer</CardTitle>
           <CardDescription>
@@ -2357,6 +2469,26 @@ function formatBasisPoints(basisPoints: number) {
   const fraction = `${basisPoints % 100}`.padStart(2, "0").replace(/0+$/, "");
 
   return fraction ? `${whole}.${fraction}` : `${whole}`;
+}
+
+function sourceHref(type: string) {
+  if (type === "transaction") {
+    return "#transactions";
+  }
+
+  if (type === "invoice" || type === "customer") {
+    return "#billing";
+  }
+
+  if (type === "project" || type === "time_entry") {
+    return "#projects";
+  }
+
+  if (type === "inbox_item") {
+    return "#inbox";
+  }
+
+  return "#";
 }
 
 function errorMessage(error: unknown) {

@@ -27,6 +27,7 @@ import type {
 } from "@dawn/app";
 import type {
   Actor,
+  BusinessInsight,
   Category,
   Customer,
   CustomerContact,
@@ -40,6 +41,7 @@ import type {
   Project,
   ProjectMember,
   RecurringInvoiceSchedule,
+  ReportSourceRef,
   TeamInvite,
   TeamMember,
   TeamMembership,
@@ -2031,6 +2033,67 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return entries.map(mapTimeEntry);
   }
 
+  async listBusinessInsights(input: {
+    teamId: string;
+    from?: string | null;
+    to?: string | null;
+  }): Promise<BusinessInsight[]> {
+    const filters = [eq(schema.businessInsight.teamId, input.teamId)];
+
+    if (input.from) {
+      filters.push(gte(schema.businessInsight.periodEnd, new Date(input.from)));
+    }
+
+    if (input.to) {
+      filters.push(lte(schema.businessInsight.periodStart, new Date(input.to)));
+    }
+
+    const insights = await this.client
+      .select()
+      .from(schema.businessInsight)
+      .where(and(...filters))
+      .orderBy(desc(schema.businessInsight.createdAt));
+
+    return insights.map(mapBusinessInsight);
+  }
+
+  async createBusinessInsights(input: {
+    teamId: string;
+    periodStart: string;
+    periodEnd: string;
+    insights: Array<{
+      insightId: string;
+      title: string;
+      summary: string;
+      severity: BusinessInsight["severity"];
+      sourceRefs: ReportSourceRef[];
+      createdAt: string;
+    }>;
+  }): Promise<BusinessInsight[]> {
+    if (input.insights.length === 0) {
+      return [];
+    }
+
+    const insights = await this.client
+      .insert(schema.businessInsight)
+      .values(
+        input.insights.map((insight) => ({
+          id: insight.insightId,
+          teamId: input.teamId,
+          title: insight.title,
+          summary: insight.summary,
+          severity: insight.severity,
+          periodStart: new Date(input.periodStart),
+          periodEnd: new Date(input.periodEnd),
+          sourceRefs: insight.sourceRefs,
+          createdAt: new Date(insight.createdAt),
+        })),
+      )
+      .returning();
+
+    return insights.map(mapBusinessInsight);
+  }
+
   private async insertInvoiceLines(input: {
     teamId: string;
     invoiceId: string;
@@ -2950,6 +3013,20 @@ function mapTimeEntry(entry: typeof schema.timeEntry.$inferSelect): TimeEntry {
     invoiceId: entry.invoiceId,
     createdAt: entry.createdAt.toISOString(),
     updatedAt: entry.updatedAt.toISOString(),
+  };
+}
+
+function mapBusinessInsight(insight: typeof schema.businessInsight.$inferSelect): BusinessInsight {
+  return {
+    id: insight.id,
+    teamId: insight.teamId,
+    title: insight.title,
+    summary: insight.summary,
+    severity: insight.severity as BusinessInsight["severity"],
+    periodStart: insight.periodStart.toISOString(),
+    periodEnd: insight.periodEnd.toISOString(),
+    sourceRefs: insight.sourceRefs as ReportSourceRef[],
+    createdAt: insight.createdAt.toISOString(),
   };
 }
 

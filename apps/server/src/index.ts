@@ -11,8 +11,10 @@ import {
   completeDocumentUpload,
   dispatchOutboxEvents,
   generateRecurringInvoice,
+  generateWeeklyInsights,
   resolveTeamAccess,
 } from "@dawn/app";
+import { createMockInsightGenerationProvider } from "@dawn/ai";
 import { auth } from "@dawn/auth";
 import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review";
 import { env } from "@dawn/env/server";
@@ -307,6 +309,19 @@ async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnC
       runAt: message.body.runAt,
       idempotencyKey: message.body.idempotencyKey,
     });
+  }
+
+  if (message.body.type === "insights.weekly.generate") {
+    await generateWeeklyInsights(
+      new DrizzleTransactionReviewRepository(),
+      createMockInsightGenerationProvider(),
+      {
+        teamId: message.body.teamId,
+        periodStart: message.body.periodStart,
+        periodEnd: message.body.periodEnd,
+        idempotencyKey: message.body.idempotencyKey,
+      },
+    );
   }
 }
 

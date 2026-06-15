@@ -3,6 +3,7 @@ import { call } from "@orpc/server";
 import { createDeterministicInvoicePdfRenderer } from "@dawn/app";
 import type {
   Actor,
+  BusinessInsight,
   Category,
   Customer,
   CustomerContact,
@@ -15,6 +16,7 @@ import type {
   Product,
   Project,
   ProjectMember,
+  ReportSourceRef,
   RecurringInvoiceSchedule,
   TeamInvite,
   TeamMember,
@@ -76,6 +78,7 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   projects = new Map<string, Project>();
   projectMembers = new Map<string, ProjectMember>();
   timeEntries = new Map<string, TimeEntry>();
+  businessInsights = new Map<string, BusinessInsight>();
   aliases: TeamAlias[] = [];
   hardNegatives: HardNegativeTransactionMatch[] = [];
   attachments: { transactionId: string; documentId: string }[] = [];
@@ -1259,6 +1262,47 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     });
   }
 
+  async listBusinessInsights(input: { teamId: string; from?: string | null; to?: string | null }) {
+    return [...this.businessInsights.values()].filter(
+      (insight) =>
+        insight.teamId === input.teamId &&
+        (!input.from || new Date(insight.periodEnd).getTime() >= new Date(input.from).getTime()) &&
+        (!input.to || new Date(insight.periodStart).getTime() <= new Date(input.to).getTime()),
+    );
+  }
+
+  async createBusinessInsights(input: {
+    teamId: string;
+    periodStart: string;
+    periodEnd: string;
+    insights: Array<{
+      insightId: string;
+      title: string;
+      summary: string;
+      severity: BusinessInsight["severity"];
+      sourceRefs: ReportSourceRef[];
+      createdAt: string;
+    }>;
+  }) {
+    const insights = input.insights.map((insight) => ({
+      id: insight.insightId,
+      teamId: input.teamId,
+      title: insight.title,
+      summary: insight.summary,
+      severity: insight.severity,
+      periodStart: input.periodStart,
+      periodEnd: input.periodEnd,
+      sourceRefs: insight.sourceRefs,
+      createdAt: insight.createdAt,
+    }));
+
+    for (const insight of insights) {
+      this.businessInsights.set(insight.id, insight);
+    }
+
+    return insights;
+  }
+
   private invoiceFromInput(
     invoiceId: string,
     input: {
@@ -1969,6 +2013,83 @@ describe("appRouter", () => {
     expect(invoice.timeEntries[0]?.billableStatus).toBe("invoiced");
     expect(repository.auditEvents).toHaveLength(4);
     expect(repository.outboxEvents).toHaveLength(4);
+  });
+
+  test("returns report overview metrics with drilldown sources through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    repository.accounts.set("acct_1", {
+      id: "acct_1",
+      teamId: "team_1",
+      name: "Operating",
+      currency: "USD",
+      type: "bank",
+    });
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+    const customer = await call(
+      router.billing.createCustomer,
+      {
+        teamId: "team_1",
+        name: "Acme Co",
+        idempotencyKey: "customer_1",
+      },
+      context,
+    );
+    await call(
+      router.ledger.createTransaction,
+      {
+        teamId: "team_1",
+        accountId: "acct_1",
+        description: "Client payment",
+        postedAt: "2026-06-10T00:00:00.000Z",
+        money: { amountMinor: 500_00, currency: "USD" },
+        type: "income",
+        source: "manual",
+        idempotencyKey: "txn_1",
+      },
+      context,
+    );
+    const invoice = await call(
+      router.billing.createDraftInvoice,
+      {
+        teamId: "team_1",
+        customerId: customer.customer.id,
+        invoiceNumber: "INV-001",
+        issueDate: "2026-06-12T00:00:00.000Z",
+        currency: "USD",
+        lines: [
+          {
+            description: "Consulting",
+            quantityMilli: 1_000,
+            unitPrice: { amountMinor: 100_00, currency: "USD" },
+            taxRateBasisPoints: 2_500,
+          },
+        ],
+        idempotencyKey: "invoice_1",
+      },
+      context,
+    );
+    const report = await call(
+      router.reports.overview,
+      {
+        teamId: "team_1",
+        from: "2026-06-08T00:00:00.000Z",
+        to: "2026-06-15T23:59:59.000Z",
+      },
+      context,
+    );
+
+    expect(report.report.cashflow).toEqual({ amountMinor: 500_00, currency: "USD" });
+    expect(report.report.revenueByCustomer[0]).toMatchObject({
+      label: "Acme Co",
+      sources: [{ type: "invoice", id: invoice.invoice.id, label: "INV-001" }],
+    });
+    expect(report.report.unpaidInvoices[0]).toMatchObject({
+      invoiceNumber: "INV-001",
+      amountDue: { amountMinor: 125_00, currency: "USD" },
+    });
   });
 
   test("creates and signs document uploads and downloads through protected routes", async () => {

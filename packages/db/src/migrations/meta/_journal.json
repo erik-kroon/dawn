@@ -92,6 +92,13 @@
       "when": 1781486460292,
       "tag": "0012_careless_stick",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1781487540105,
+      "tag": "0013_far_stick",
+      "breakpoints": true
     }
   ]
 }

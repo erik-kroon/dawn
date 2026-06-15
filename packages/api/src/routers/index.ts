@@ -26,6 +26,7 @@ import {
   listDocuments,
   listInboxItems,
   listLedgerSummary,
+  listBusinessReport,
   listProjectWorkspace,
   listTeamDirectory,
   listTeams,
@@ -84,6 +85,14 @@ const ledgerSummaryInput = z
     accountId: z.string().min(1).optional(),
     from: z.iso.datetime().optional(),
     to: z.iso.datetime().optional(),
+  })
+  .optional();
+
+const reportOverviewInput = z
+  .object({
+    teamId: z.string().min(1).optional(),
+    from: z.iso.datetime().nullable().optional(),
+    to: z.iso.datetime().nullable().optional(),
   })
   .optional();
 
@@ -573,6 +582,29 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                   money: split.money,
                   note: split.note ?? null,
                 })),
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    reports: {
+      overview: protectedProcedure
+        .input(reportOverviewInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listBusinessReport(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input?.teamId,
+              },
+              {
+                teamId: input?.teamId,
+                from: input?.from ?? null,
+                to: input?.to ?? null,
               },
             );
           } catch (error) {

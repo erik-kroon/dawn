@@ -1,5 +1,8 @@
+import type { InsightGenerationProvider, InsightDraft } from "@dawn/ai";
 import type {
   Actor,
+  BusinessInsight,
+  BusinessReport,
   Category,
   CsvTransactionColumnMapping,
   Customer,
@@ -31,6 +34,7 @@ import type {
   TimeEntry,
   TimeEntryInput,
   TimeEntryReport,
+  ReportSourceRef,
   InboxMatchConfidence,
   InboxMatchSuggestion,
 } from "@dawn/domain";
@@ -692,6 +696,30 @@ export type CreateInvoiceFromTimeEntriesResult = {
   replayed: boolean;
 };
 
+export type BusinessReportWorkspace = {
+  teamId: string;
+  report: BusinessReport;
+  insights: BusinessInsight[];
+};
+
+export type ListBusinessReportCommand = {
+  teamId?: string;
+  from?: string | null;
+  to?: string | null;
+};
+
+export type GenerateWeeklyInsightsCommand = {
+  teamId: string;
+  periodStart: string;
+  periodEnd: string;
+  idempotencyKey: string;
+};
+
+export type GenerateWeeklyInsightsResult = {
+  insights: BusinessInsight[];
+  replayed: boolean;
+};
+
 type NormalizedInvoiceDraftInput = Omit<InvoiceDraftInput, "discountBasisPoints" | "lines"> & {
   discountBasisPoints: number;
   lines: InvoiceLineDraft[];
@@ -1075,7 +1103,8 @@ export type DawnRepository = BankingUseCaseRepository &
   DocumentRepository &
   InboxRepository &
   BillingRepository &
-  ProjectRepository;
+  ProjectRepository &
+  ReportingRepository;
 
 export type ProjectRepository = {
   listProjects(teamId: string): Promise<Project[]>;
@@ -1109,6 +1138,25 @@ export type ProjectRepository = {
     timeEntryIds: string[];
     invoiceId: string;
   }): Promise<TimeEntry[]>;
+};
+
+export type ReportingRepository = {
+  listBusinessInsights(input: {
+    teamId: string;
+    from?: string | null;
+    to?: string | null;
+  }): Promise<BusinessInsight[]>;
+  createBusinessInsights(input: {
+    teamId: string;
+    periodStart: string;
+    periodEnd: string;
+    insights: Array<
+      InsightDraft & {
+        insightId: string;
+        createdAt: string;
+      }
+    >;
+  }): Promise<BusinessInsight[]>;
 };
 
 export type OutboxDispatchRepository = {
@@ -1272,6 +1320,7 @@ const generateRecurringInvoiceOperation = "invoice.recurring.generate";
 const createProjectOperation = "project.create";
 const createTimeEntryOperation = "time_entry.create";
 const createInvoiceFromTimeEntriesOperation = "time_entry.invoice.create";
+const generateWeeklyInsightsOperation = "insights.weekly.generate";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
@@ -4020,6 +4069,361 @@ export async function createInvoiceFromTimeEntries(
 
     return result;
   });
+}
+
+export async function listBusinessReport(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: ListBusinessReportCommand = {},
+): Promise<BusinessReportWorkspace> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId ?? context.teamId },
+    "transactions.read",
+    "You cannot read reports for this team",
+  );
+  const range = normalizeReportRange(command);
+
+  return {
+    teamId: access.teamId,
+    report: await loadBusinessReport(repository, access.teamId, range),
+    insights: await repository.listBusinessInsights({
+      teamId: access.teamId,
+      from: range.from,
+      to: range.to,
+    }),
+  };
+}
+
+export async function generateWeeklyInsights(
+  repository: DawnRepository,
+  provider: InsightGenerationProvider,
+  command: GenerateWeeklyInsightsCommand,
+): Promise<GenerateWeeklyInsightsResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const reportingRepository = transactionRepository as DawnRepository;
+    const actorId = "system:weekly-insights";
+    const normalized = {
+      teamId: command.teamId,
+      periodStart: new Date(command.periodStart).toISOString(),
+      periodEnd: new Date(command.periodEnd).toISOString(),
+      provider: provider.provider,
+    };
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await reportingRepository.getIdempotencyResult(
+      command.teamId,
+      actorId,
+      generateWeeklyInsightsOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different weekly insight run",
+        );
+      }
+
+      return { ...(replayed.result as GenerateWeeklyInsightsResult), replayed: true };
+    }
+
+    const report = await loadBusinessReport(reportingRepository, command.teamId, {
+      from: normalized.periodStart,
+      to: normalized.periodEnd,
+    });
+    const drafts = await provider.generateWeeklyInsights({
+      teamId: command.teamId,
+      periodStart: normalized.periodStart,
+      periodEnd: normalized.periodEnd,
+      report,
+    });
+    const createdAt = new Date().toISOString();
+    const insights = await reportingRepository.createBusinessInsights({
+      teamId: command.teamId,
+      periodStart: normalized.periodStart,
+      periodEnd: normalized.periodEnd,
+      insights: drafts.map((draft) => ({
+        ...draft,
+        insightId: crypto.randomUUID(),
+        createdAt,
+      })),
+    });
+
+    await reportingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId,
+      requestId: command.idempotencyKey,
+      action: "insights.weekly.generated",
+      entityType: "insight_run",
+      entityId: normalized.periodEnd,
+      metadata: {
+        insightIds: insights.map((insight) => insight.id),
+        periodStart: normalized.periodStart,
+        periodEnd: normalized.periodEnd,
+      },
+    });
+
+    await reportingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId,
+      requestId: command.idempotencyKey,
+      type: "insights.weekly.generated",
+      version: 1,
+      payload: {
+        insightIds: insights.map((insight) => insight.id),
+        periodStart: normalized.periodStart,
+        periodEnd: normalized.periodEnd,
+      },
+    });
+
+    const result = { insights, replayed: false };
+
+    await reportingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId,
+      operation: generateWeeklyInsightsOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+async function loadBusinessReport(
+  repository: DawnRepository,
+  teamId: string,
+  range: BusinessReport["range"],
+) {
+  const [transactions, customers, invoices, timeEntries, inboxItems, projects] = await Promise.all([
+    repository.listTransactionsForReport({
+      teamId,
+      from: range.from ?? undefined,
+      to: range.to ?? undefined,
+    }),
+    repository.listCustomers(teamId),
+    repository.listInvoices(teamId),
+    repository.listTimeEntries(teamId),
+    repository.listInboxItems(teamId),
+    repository.listProjects(teamId),
+  ]);
+  const currency =
+    transactions[0]?.money.currency ??
+    invoices[0]?.currency ??
+    projects[0]?.billableRate.currency ??
+    "USD";
+
+  return buildBusinessReport({
+    teamId,
+    currency,
+    range,
+    transactions,
+    customers,
+    invoices: filterInvoicesByIssueDate(invoices, range),
+    timeEntries: filterTimeEntriesByDate(timeEntries, range),
+    inboxItems,
+  });
+}
+
+function buildBusinessReport(input: {
+  teamId: string;
+  currency: string;
+  range: BusinessReport["range"];
+  transactions: Transaction[];
+  customers: Customer[];
+  invoices: InvoiceDraft[];
+  timeEntries: TimeEntry[];
+  inboxItems: InboxItem[];
+}): BusinessReport {
+  const customerById = new Map(input.customers.map((customer) => [customer.id, customer]));
+  const totals = createReportTotals(input.transactions, input.currency);
+
+  return {
+    teamId: input.teamId,
+    currency: input.currency,
+    range: input.range,
+    totals,
+    cashflow: totals.balance,
+    revenueByCustomer: revenueByCustomer(input.invoices, customerById, input.currency),
+    expensesByCategory: expensesByCategory(input.transactions, input.currency),
+    unpaidInvoices: unpaidInvoices(input.invoices, customerById, input.currency),
+    taxSummary: taxSummary(input.invoices, input.currency),
+    timeUtilization: summarizeTimeEntries(input.timeEntries, input.currency),
+    inboxBacklog: inboxBacklog(input.inboxItems),
+  };
+}
+
+function normalizeReportRange(input: ListBusinessReportCommand): BusinessReport["range"] {
+  return {
+    from: input.from ? new Date(input.from).toISOString() : null,
+    to: input.to ? new Date(input.to).toISOString() : null,
+  };
+}
+
+function filterInvoicesByIssueDate(
+  invoices: readonly InvoiceDraft[],
+  range: BusinessReport["range"],
+) {
+  return invoices.filter((invoice) => isWithinRange(invoice.issueDate, range));
+}
+
+function filterTimeEntriesByDate(entries: readonly TimeEntry[], range: BusinessReport["range"]) {
+  return entries.filter((entry) => isWithinRange(entry.occurredOn, range));
+}
+
+function isWithinRange(value: string, range: BusinessReport["range"]) {
+  const time = new Date(value).getTime();
+
+  if (range.from && time < new Date(range.from).getTime()) {
+    return false;
+  }
+
+  if (range.to && time > new Date(range.to).getTime()) {
+    return false;
+  }
+
+  return true;
+}
+
+function revenueByCustomer(
+  invoices: readonly InvoiceDraft[],
+  customerById: Map<string, Customer>,
+  currency: string,
+) {
+  const buckets = new Map<string, { amountMinor: number; sources: ReportSourceRef[] }>();
+
+  for (const invoice of invoices) {
+    if (invoice.status === "void" || invoice.currency !== currency) {
+      continue;
+    }
+
+    const bucket = buckets.get(invoice.customerId) ?? { amountMinor: 0, sources: [] };
+    bucket.amountMinor += invoice.totals.total.amountMinor;
+    bucket.sources.push(invoiceSource(invoice));
+    buckets.set(invoice.customerId, bucket);
+  }
+
+  return [...buckets.entries()]
+    .map(([customerId, bucket]) => ({
+      id: customerId,
+      label: customerById.get(customerId)?.name ?? customerId,
+      amount: { amountMinor: bucket.amountMinor, currency },
+      sources: bucket.sources,
+    }))
+    .sort((left, right) => right.amount.amountMinor - left.amount.amountMinor);
+}
+
+function expensesByCategory(transactions: readonly Transaction[], currency: string) {
+  const buckets = new Map<string, { amountMinor: number; sources: ReportSourceRef[] }>();
+
+  for (const transaction of transactions) {
+    if (transaction.money.currency !== currency || transaction.money.amountMinor >= 0) {
+      continue;
+    }
+
+    const categoryId = transaction.categoryId ?? "uncategorized";
+    const bucket = buckets.get(categoryId) ?? { amountMinor: 0, sources: [] };
+    bucket.amountMinor += transaction.money.amountMinor;
+    bucket.sources.push(transactionSource(transaction));
+    buckets.set(categoryId, bucket);
+  }
+
+  return [...buckets.entries()]
+    .map(([categoryId, bucket]) => ({
+      id: categoryId,
+      label: categoryId,
+      amount: { amountMinor: bucket.amountMinor, currency },
+      sources: bucket.sources,
+    }))
+    .sort((left, right) => left.amount.amountMinor - right.amount.amountMinor);
+}
+
+function unpaidInvoices(
+  invoices: readonly InvoiceDraft[],
+  customerById: Map<string, Customer>,
+  currency: string,
+) {
+  return invoices
+    .filter(
+      (invoice) =>
+        invoice.currency === currency &&
+        invoice.status !== "paid" &&
+        invoice.status !== "void" &&
+        invoice.totals.total.amountMinor > invoice.amountPaid.amountMinor,
+    )
+    .map((invoice) => ({
+      invoiceId: invoice.id,
+      invoiceNumber: invoice.invoiceNumber,
+      customerId: invoice.customerId,
+      customerName: customerById.get(invoice.customerId)?.name ?? invoice.customerId,
+      amountDue: {
+        amountMinor: invoice.totals.total.amountMinor - invoice.amountPaid.amountMinor,
+        currency,
+      },
+      dueDate: invoice.dueDate,
+      sources: [invoiceSource(invoice)],
+    }))
+    .sort((left, right) => right.amountDue.amountMinor - left.amountDue.amountMinor);
+}
+
+function taxSummary(invoices: readonly InvoiceDraft[], currency: string) {
+  const taxInvoices = invoices.filter(
+    (invoice) => invoice.currency === currency && invoice.status !== "void",
+  );
+
+  return {
+    invoiceTax: {
+      amountMinor: taxInvoices.reduce(
+        (total, invoice) => total + invoice.totals.tax.amountMinor,
+        0,
+      ),
+      currency,
+    },
+    sources: taxInvoices.map(invoiceSource),
+  };
+}
+
+function inboxBacklog(inboxItems: readonly InboxItem[]) {
+  const pendingExtraction = inboxItems.filter((item) => item.extractionStatus === "pending").length;
+  const needsReview = inboxItems.filter((item) => item.status === "needs_review").length;
+  const suggestedMatches = inboxItems.reduce(
+    (total, item) =>
+      total +
+      (item.matchSuggestions?.filter((suggestion) => suggestion.status === "suggested").length ??
+        0),
+    0,
+  );
+
+  return {
+    pendingExtraction,
+    needsReview,
+    suggestedMatches,
+    sources: inboxItems
+      .filter((item) => item.status !== "resolved")
+      .map((item) => ({
+        type: "inbox_item" as const,
+        id: item.id,
+        label: item.document?.title ?? item.source?.name ?? item.id,
+      })),
+  };
+}
+
+function invoiceSource(invoice: InvoiceDraft): ReportSourceRef {
+  return {
+    type: "invoice",
+    id: invoice.id,
+    label: invoice.invoiceNumber,
+  };
+}
+
+function transactionSource(transaction: Transaction): ReportSourceRef {
+  return {
+    type: "transaction",
+    id: transaction.id,
+    label: transaction.description,
+  };
 }
 
 function normalizeCreateCustomerCommand(command: CreateCustomerCommand) {

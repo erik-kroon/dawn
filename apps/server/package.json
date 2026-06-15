@@ -10,6 +10,7 @@
     "start": "bun run dist/index.mjs"
   },
   "dependencies": {
+    "@dawn/ai": "workspace:*",
     "@dawn/api": "workspace:*",
     "@dawn/app": "workspace:*",
     "@dawn/auth": "workspace:*",
