@@ -10,7 +10,8 @@
     }
   },
   "scripts": {
-    "check-types": "tsgo --noEmit"
+    "check-types": "tsgo --noEmit",
+    "eval:matching": "bun ./src/matching-evaluation.cli.ts"
   },
   "devDependencies": {
     "@dawn/config": "workspace:*",

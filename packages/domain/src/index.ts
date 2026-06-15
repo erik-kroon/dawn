@@ -11,3 +11,4 @@ export * from "./automations";
 export * from "./developer";
 export * from "./integrations";
 export * from "./inbox-matching";
+export * from "./matching-evaluation";

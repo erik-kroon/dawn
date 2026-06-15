@@ -2,7 +2,7 @@
 
 Triage: ready-for-agent
 Publication: Local repo artifact. No project issue tracker or remote is assumed.
-Status: Slice 8 implemented; Slice 9 next
+Status: All slices implemented
 Date: 2026-06-15
 Source material: `docs/PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, Dawn matching code, and Midday reference matching docs/code under `ref/midday`.
 
@@ -493,17 +493,28 @@ Make matcher quality measurable before tuning thresholds or enabling auto-match.
 
 ## Acceptance Criteria
 
-- [ ] Evaluation can run without mutating production data.
-- [ ] Output shows confirmed, rejected, unmatched, suggested, and auto-match performance buckets.
-- [ ] Output highlights likely false positives and false negatives with inspectable IDs.
-- [ ] Team/date filters are supported.
-- [ ] The command is documented enough for an agent or engineer to run locally.
+- [x] Evaluation can run without mutating production data.
+- [x] Output shows confirmed, rejected, unmatched, suggested, and auto-match performance buckets.
+- [x] Output highlights likely false positives and false negatives with inspectable IDs.
+- [x] Team/date filters are supported.
+- [x] The command is documented enough for an agent or engineer to run locally.
+
+## Implementation Notes
+
+- Added a pure `evaluateMatchingCases` domain harness that replays case fixtures through the deterministic matcher without mutating any state.
+- Reports now include lifecycle buckets, threshold quality, score distribution, likely false positives, likely false negatives, and review candidates with inspectable case and transaction IDs.
+- Added fixture cases covering confirmed, rejected, unmatched, suggested, and auto-matched outcomes.
+- Added `@dawn/domain` script `eval:matching` for fixture replay:
+  `bun run eval:matching --team=team_eval_a --from=2026-06-15T00:00:00.000Z --to=2026-06-18T23:59:59.999Z --threshold=0.9`
+- DB-backed historical replay can now be added as a read-only adapter that maps rows into `MatchingEvaluationCase`.
 
 ## Verification
 
-- Unit tests against fixtures.
-- Manual local command run against seed or development data.
-- `bun run check-types`
+- [x] Unit tests against fixtures.
+- [x] Manual local fixture command run with team/date/threshold filters.
+- [x] `bun test packages/domain/src/matching.test.ts packages/domain/src/matching-evaluation.test.ts`
+- [x] `bun test ./src/matching-evaluation.test.ts && bun run eval:matching --threshold=0.9` from `packages/domain`
+- [x] `bun run check-types`
 
 ## Dependencies
 
