@@ -66,6 +66,7 @@ import type {
 } from "@dawn/app";
 import {
   createMockBankingProvider,
+  createSandboxBankingProvider,
   createMockIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
 } from "@dawn/integrations";
@@ -405,6 +406,21 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return connection?.teamId === teamId ? connection : null;
   }
 
+  async getBankConnectionByProviderConnectionId(
+    teamId: string,
+    provider: BankConnection["provider"],
+    providerConnectionId: string,
+  ) {
+    return (
+      [...this.bankConnections.values()].find(
+        (connection) =>
+          connection.teamId === teamId &&
+          connection.provider === provider &&
+          connection.providerConnectionId === providerConnectionId,
+      ) ?? null
+    );
+  }
+
   async upsertBankConnection(input: Parameters<DawnRepository["upsertBankConnection"]>[0]) {
     const existing = [...this.bankConnections.values()].find(
       (connection) =>
@@ -419,9 +435,27 @@ class MemoryTransactionReviewRepository implements DawnRepository {
       providerConnectionId: input.providerConnection.providerConnectionId,
       institutionName: input.providerConnection.institutionName,
       status: "connected" as const,
+      tokenKeyId: input.providerConnection.token?.keyId ?? null,
+      tokenLastFour: input.providerConnection.token?.lastFour ?? null,
       lastSyncAt: existing?.lastSyncAt ?? null,
       createdAt: existing?.createdAt ?? "2026-06-15T10:00:00.000Z",
       updatedAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.bankConnections.set(connection.id, connection);
+    return connection;
+  }
+
+  async disconnectBankConnection(input: { connectionId: string; disconnectedAt: Date }) {
+    const existing = this.bankConnections.get(input.connectionId);
+
+    if (!existing) {
+      throw new Error("Connection not found");
+    }
+
+    const connection = {
+      ...existing,
+      status: "disconnected" as const,
+      updatedAt: input.disconnectedAt.toISOString(),
     };
     this.bankConnections.set(connection.id, connection);
     return connection;
@@ -2173,7 +2207,13 @@ async function createTestRouter(repository: DawnRepository) {
   const { createAppRouter } = await import("./routers/index");
   return createAppRouter({
     transactionReviewRepository: repository,
-    bankingProvider: createMockBankingProvider(),
+    bankingProviders: [
+      createMockBankingProvider(),
+      createSandboxBankingProvider({
+        appUrl: "http://localhost:3001",
+        webhookSecret: "bank_webhook_secret",
+      }),
+    ],
     integrationProviders: createMockIntegrationProviders(),
     documentUrlSigner: testDocumentUrlSigner,
     invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
@@ -3399,6 +3439,67 @@ describe("appRouter", () => {
     expect(repository.providerObjects.get("mock-bank:connection:mock_conn_team_1")).toMatchObject({
       mock: true,
     });
+  });
+
+  test("completes sandbox bank connection, syncs, and disconnects through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "owner");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "owner@example.com" }) };
+
+    const catalog = await call(router.banking.list, { teamId: "team_1" }, context);
+    const session = await call(
+      router.banking.createSession,
+      {
+        teamId: "team_1",
+        provider: "sandbox-bank",
+        redirectUrl: "http://localhost:3001/dashboard#banking",
+        idempotencyKey: "session_1",
+      },
+      context,
+    );
+    const connected = await call(
+      router.banking.complete,
+      {
+        teamId: "team_1",
+        provider: "sandbox-bank",
+        providerSessionId: session.session.providerSessionId,
+        publicToken: "public-sandbox-token",
+        idempotencyKey: "complete_1",
+      },
+      context,
+    );
+    const synced = await call(
+      router.banking.sync,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "sync_1",
+      },
+      context,
+    );
+    const disconnected = await call(
+      router.banking.disconnect,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "disconnect_1",
+      },
+      context,
+    );
+
+    expect(catalog.providers.map((provider) => provider.provider)).toContain("sandbox-bank");
+    expect(session.session.provider).toBe("sandbox-bank");
+    expect(connected.connection).toMatchObject({
+      provider: "sandbox-bank",
+      tokenKeyId: "mock-kms-local",
+      tokenLastFour: "oken",
+    });
+    expect(synced.transactions).toHaveLength(3);
+    expect(disconnected.connection.status).toBe("disconnected");
+    expect(repository.transactions.size).toBe(3);
+    expect(repository.bankAccounts.size).toBe(2);
   });
 
   test("manages integration adapters through protected routes", async () => {

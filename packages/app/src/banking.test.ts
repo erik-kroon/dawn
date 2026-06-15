@@ -10,11 +10,15 @@ import type {
   TeamRole,
   Transaction,
 } from "@dawn/domain";
-import { createMockBankingProvider } from "@dawn/integrations";
+import { createMockBankingProvider, createSandboxBankingProvider } from "@dawn/integrations";
 
 import {
   AppError,
+  completeBankConnection,
   connectMockBankConnection,
+  createBankConnectionSession,
+  disconnectBankConnection,
+  requestBankConnectionSyncFromWebhook,
   syncBankConnection,
   type BankAccount,
   type BankConnection,
@@ -198,6 +202,21 @@ class MemoryBankingRepository implements BankingUseCaseRepository {
     return connection?.teamId === teamId ? connection : null;
   }
 
+  async getBankConnectionByProviderConnectionId(
+    teamId: string,
+    provider: BankConnection["provider"],
+    providerConnectionId: string,
+  ) {
+    return (
+      [...this.bankConnections.values()].find(
+        (connection) =>
+          connection.teamId === teamId &&
+          connection.provider === provider &&
+          connection.providerConnectionId === providerConnectionId,
+      ) ?? null
+    );
+  }
+
   async upsertBankConnection(
     input: Parameters<BankingUseCaseRepository["upsertBankConnection"]>[0],
   ) {
@@ -214,9 +233,27 @@ class MemoryBankingRepository implements BankingUseCaseRepository {
       providerConnectionId: input.providerConnection.providerConnectionId,
       institutionName: input.providerConnection.institutionName,
       status: "connected" as const,
+      tokenKeyId: input.providerConnection.token?.keyId ?? null,
+      tokenLastFour: input.providerConnection.token?.lastFour ?? null,
       lastSyncAt: existing?.lastSyncAt ?? null,
       createdAt: existing?.createdAt ?? "2026-06-15T10:00:00.000Z",
       updatedAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.bankConnections.set(connection.id, connection);
+    return connection;
+  }
+
+  async disconnectBankConnection(input: { connectionId: string; disconnectedAt: Date }) {
+    const existing = this.bankConnections.get(input.connectionId);
+
+    if (!existing) {
+      throw new Error("Connection not found");
+    }
+
+    const connection = {
+      ...existing,
+      status: "disconnected" as const,
+      updatedAt: input.disconnectedAt.toISOString(),
     };
     this.bankConnections.set(connection.id, connection);
     return connection;
@@ -357,6 +394,10 @@ class MemoryBankingRepository implements BankingUseCaseRepository {
 }
 
 const provider = createMockBankingProvider();
+const sandboxProvider = createSandboxBankingProvider({
+  appUrl: "http://localhost:3001",
+  webhookSecret: "bank_webhook_secret",
+});
 const context = {
   actor: { id: "user_1", type: "user" as const },
   requestId: "request_1",
@@ -440,6 +481,178 @@ describe("banking use cases", () => {
       source: "mock-bank",
     });
     expect(repository.outboxEvents).toHaveLength(3);
+  });
+
+  test("records provider sync failures as actionable connection state", async () => {
+    const repository = seededRepository("owner");
+    const connected = await connectMockBankConnection(repository, provider, context, {
+      teamId: "team_1",
+      idempotencyKey: "connect_1",
+    });
+    const failingProvider = {
+      ...provider,
+      async listAccounts() {
+        throw new Error("provider token expired");
+      },
+    };
+
+    await expect(
+      syncBankConnection(repository, failingProvider, context, {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "sync_1",
+      }),
+    ).rejects.toEqual(new AppError("CONFLICT", "provider token expired"));
+
+    expect(repository.syncRuns.at(-1)).toMatchObject({
+      status: "failed",
+      error: "provider token expired",
+    });
+    expect(repository.bankConnections.get(connected.connection.id)).toMatchObject({
+      status: "error",
+    });
+    expect(repository.auditEvents.at(-1)).toMatchObject({
+      action: "bank_connection.sync_failed",
+    });
+  });
+
+  test("completes sandbox bank connection and schedules sync with encrypted token metadata", async () => {
+    const repository = seededRepository("owner");
+    const session = await createBankConnectionSession(
+      repository,
+      [provider, sandboxProvider],
+      context,
+      {
+        teamId: "team_1",
+        provider: "sandbox-bank",
+        redirectUrl: "http://localhost:3001/dashboard#banking",
+        idempotencyKey: "session_1",
+      },
+    );
+    const completed = await completeBankConnection(
+      repository,
+      [provider, sandboxProvider],
+      context,
+      {
+        teamId: "team_1",
+        provider: "sandbox-bank",
+        providerSessionId: session.session.providerSessionId,
+        publicToken: "public-sandbox-token",
+        idempotencyKey: "complete_1",
+      },
+    );
+
+    expect(session.session.connectUrl).toContain("sandbox/connect");
+    expect(completed.connection).toMatchObject({
+      provider: "sandbox-bank",
+      providerConnectionId: "sandbox_item_team_1",
+      tokenKeyId: "mock-kms-local",
+      tokenLastFour: "oken",
+    });
+    expect(
+      repository.providerObjects.get("sandbox-bank:connection:sandbox_item_team_1"),
+    ).toMatchObject({
+      sandbox: true,
+    });
+    expect(repository.outboxEvents).toMatchObject([
+      { type: "bank_connection.connected" },
+      { type: "bank_connection.sync_requested" },
+    ]);
+  });
+
+  test("verified sandbox provider webhooks only queue sync requests", async () => {
+    const repository = seededRepository("owner");
+    const completed = await completeBankConnection(repository, [sandboxProvider], context, {
+      teamId: "team_1",
+      provider: "sandbox-bank",
+      providerSessionId: "session_1",
+      publicToken: "public-sandbox-token",
+      idempotencyKey: "complete_1",
+    });
+
+    const queued = await requestBankConnectionSyncFromWebhook(
+      repository,
+      {
+        actor: { id: "provider:sandbox-bank", type: "provider_webhook" },
+        requestId: "webhook_1",
+        teamId: "team_1",
+      },
+      {
+        teamId: "team_1",
+        verification: {
+          provider: "sandbox-bank",
+          verified: true,
+          eventType: "transactions_available",
+          teamId: "team_1",
+          providerConnectionId: completed.connection.providerConnectionId,
+          rawPayload: { eventId: "evt_1" },
+        },
+        idempotencyKey: "evt_1",
+      },
+    );
+
+    expect(queued.connection.id).toBe(completed.connection.id);
+    expect(repository.transactions.size).toBe(0);
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "bank_connection.sync_requested",
+      payload: {
+        connectionId: completed.connection.id,
+        provider: "sandbox-bank",
+        eventType: "transactions_available",
+      },
+    });
+
+    await expect(
+      requestBankConnectionSyncFromWebhook(
+        repository,
+        {
+          actor: { id: "provider:sandbox-bank", type: "provider_webhook" },
+          requestId: "webhook_2",
+          teamId: "team_1",
+        },
+        {
+          teamId: "team_1",
+          verification: {
+            provider: "sandbox-bank",
+            verified: false,
+            eventType: "transactions_available",
+            teamId: "team_1",
+            providerConnectionId: completed.connection.providerConnectionId,
+            rawPayload: {},
+          },
+          idempotencyKey: "evt_2",
+        },
+      ),
+    ).rejects.toEqual(new AppError("FORBIDDEN", "Bank provider webhook signature is invalid"));
+  });
+
+  test("disconnects sandbox bank without deleting historical accounts or transactions", async () => {
+    const repository = seededRepository("owner");
+    const connected = await completeBankConnection(repository, [sandboxProvider], context, {
+      teamId: "team_1",
+      provider: "sandbox-bank",
+      providerSessionId: "session_1",
+      publicToken: "public-sandbox-token",
+      idempotencyKey: "complete_1",
+    });
+    const synced = await syncBankConnection(repository, sandboxProvider, context, {
+      teamId: "team_1",
+      connectionId: connected.connection.id,
+      idempotencyKey: "sync_1",
+    });
+    const disconnected = await disconnectBankConnection(repository, sandboxProvider, context, {
+      teamId: "team_1",
+      connectionId: connected.connection.id,
+      idempotencyKey: "disconnect_1",
+    });
+
+    expect(synced.transactions).toHaveLength(3);
+    expect(disconnected.connection.status).toBe("disconnected");
+    expect(repository.bankAccounts.size).toBe(2);
+    expect(repository.transactions.size).toBe(3);
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "bank_connection.disconnected",
+    });
   });
 
   test("denies mock bank connection management to viewers", async () => {

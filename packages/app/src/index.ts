@@ -69,8 +69,10 @@ import type {
   BankingProvider,
   BankingProviderAccount,
   BankingProviderConnection,
+  BankingProviderConnectionSession,
   BankingProviderName,
   BankingProviderTransaction,
+  BankingProviderWebhookVerification,
   InvoiceEmailDeliveryProvider,
   IntegrationProvider,
   IntegrationProviderCapability,
@@ -275,6 +277,8 @@ export type BankConnection = {
   providerConnectionId: string;
   institutionName: string;
   status: BankConnectionStatus;
+  tokenKeyId?: string | null;
+  tokenLastFour?: string | null;
   lastSyncAt?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -312,6 +316,13 @@ export type BankConnectionSummary = {
   connection: BankConnection;
   accounts: BankAccount[];
   latestSyncRun?: ProviderSyncRun | null;
+};
+
+export type BankingProviderDescriptor = {
+  provider: BankingProviderName;
+  displayName: string;
+  environment: BankingProvider["environment"];
+  capabilities: readonly string[];
 };
 
 export type IntegrationProviderDescriptor = {
@@ -583,10 +594,36 @@ export type ConnectMockBankConnectionResult = {
   replayed: boolean;
 };
 
+export type CreateBankConnectionSessionCommand = {
+  teamId: string;
+  provider: BankingProviderName;
+  redirectUrl: string;
+  idempotencyKey: string;
+};
+
+export type CreateBankConnectionSessionResult = {
+  session: BankingProviderConnectionSession;
+  replayed: boolean;
+};
+
+export type CompleteBankConnectionCommand = {
+  teamId: string;
+  provider: BankingProviderName;
+  providerSessionId: string;
+  publicToken: string;
+  idempotencyKey: string;
+};
+
+export type CompleteBankConnectionResult = {
+  connection: BankConnection;
+  replayed: boolean;
+};
+
 export type SyncBankConnectionCommand = {
   teamId: string;
   connectionId: string;
   idempotencyKey: string;
+  enforceCallerPermission?: boolean;
 };
 
 export type SyncBankConnectionResult = {
@@ -595,6 +632,29 @@ export type SyncBankConnectionResult = {
   syncRun: ProviderSyncRun;
   transactions: Transaction[];
   duplicateCount: number;
+  replayed: boolean;
+};
+
+export type RequestBankConnectionSyncFromWebhookCommand = {
+  teamId: string;
+  verification: BankingProviderWebhookVerification;
+  idempotencyKey: string;
+};
+
+export type RequestBankConnectionSyncFromWebhookResult = {
+  connection: BankConnection;
+  eventType: string;
+  replayed: boolean;
+};
+
+export type DisconnectBankConnectionCommand = {
+  teamId: string;
+  connectionId: string;
+  idempotencyKey: string;
+};
+
+export type DisconnectBankConnectionResult = {
+  connection: BankConnection;
   replayed: boolean;
 };
 
@@ -1148,9 +1208,18 @@ export type CommitCsvTransactionImportResult = {
 export type BankingRepository = {
   listBankConnectionSummaries(teamId: string): Promise<BankConnectionSummary[]>;
   getBankConnectionForTeam(teamId: string, connectionId: string): Promise<BankConnection | null>;
+  getBankConnectionByProviderConnectionId(
+    teamId: string,
+    provider: BankingProviderName,
+    providerConnectionId: string,
+  ): Promise<BankConnection | null>;
   upsertBankConnection(input: {
     teamId: string;
     providerConnection: BankingProviderConnection;
+  }): Promise<BankConnection>;
+  disconnectBankConnection(input: {
+    connectionId: string;
+    disconnectedAt: Date;
   }): Promise<BankConnection>;
   upsertBankAccount(input: {
     teamId: string;
@@ -1825,7 +1894,11 @@ const reviewTransactionOperation = "transaction.review";
 const createLedgerTransactionOperation = "ledger.transaction.create";
 const commitCsvTransactionImportOperation = "csv_transaction_import.commit";
 const connectMockBankConnectionOperation = "banking.connection.mock.connect";
+const createBankConnectionSessionOperation = "banking.connection.session.create";
+const completeBankConnectionOperation = "banking.connection.complete";
 const syncBankConnectionOperation = "banking.connection.sync";
+const requestBankConnectionSyncFromWebhookOperation = "banking.connection.webhook.sync.request";
+const disconnectBankConnectionOperation = "banking.connection.disconnect";
 const createDocumentUploadOperation = "document.upload.create";
 const runDocumentExtractionOperation = "document.extraction.run";
 const correctDocumentExtractionOperation = "document.extraction.correct";
@@ -3456,9 +3529,14 @@ export function createLedgerTransactionFingerprint(command: CreateLedgerTransact
 
 export async function listBankConnections(
   repository: BankingUseCaseRepository,
+  providers: readonly BankingProvider[] = [],
   context: TransactionReviewContext,
   input: { teamId?: string } = {},
-): Promise<{ teamId: string; connections: BankConnectionSummary[] }> {
+): Promise<{
+  teamId: string;
+  providers: BankingProviderDescriptor[];
+  connections: BankConnectionSummary[];
+}> {
   const access = await resolveTeamAccess(
     repository,
     { ...context, teamId: input.teamId ?? context.teamId },
@@ -3468,8 +3546,162 @@ export async function listBankConnections(
 
   return {
     teamId: access.teamId,
+    providers: providers.map(bankingProviderDescriptor),
     connections: await repository.listBankConnectionSummaries(access.teamId),
   };
+}
+
+export async function createBankConnectionSession(
+  repository: BankingUseCaseRepository,
+  providers: readonly BankingProvider[],
+  context: TransactionReviewContext,
+  command: CreateBankConnectionSessionCommand,
+): Promise<CreateBankConnectionSessionResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const bankingRepository = transactionRepository as BankingUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Bank provider not found");
+
+    await resolveTeamAccess(
+      bankingRepository,
+      { ...context, teamId: command.teamId },
+      "bank_connections.manage",
+      "You cannot connect bank providers for this team",
+    );
+
+    const provider = requireBankingProvider(providers, command.provider);
+
+    if (!provider.createConnectionSession) {
+      throw new AppError("CONFLICT", "Bank provider does not support connection sessions");
+    }
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      provider: provider.provider,
+      redirectUrl: command.redirectUrl,
+    });
+    const replayed = await bankingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createBankConnectionSessionOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different bank connection session",
+        );
+      }
+
+      return { ...(replayed.result as CreateBankConnectionSessionResult), replayed: true };
+    }
+
+    const session = await provider.createConnectionSession({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      redirectUrl: command.redirectUrl,
+    });
+    const result = { session, replayed: false };
+
+    await bankingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createBankConnectionSessionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function completeBankConnection(
+  repository: BankingUseCaseRepository,
+  providers: readonly BankingProvider[],
+  context: TransactionReviewContext,
+  command: CompleteBankConnectionCommand,
+): Promise<CompleteBankConnectionResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const bankingRepository = transactionRepository as BankingUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Bank provider not found");
+
+    await resolveTeamAccess(
+      bankingRepository,
+      { ...context, teamId: command.teamId },
+      "bank_connections.manage",
+      "You cannot connect bank providers for this team",
+    );
+
+    const provider = requireBankingProvider(providers, command.provider);
+
+    if (!provider.exchangeConnectionSession) {
+      throw new AppError("CONFLICT", "Bank provider does not support callback completion");
+    }
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      provider: provider.provider,
+      providerSessionId: command.providerSessionId,
+    });
+    const replayed = await bankingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      completeBankConnectionOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different bank callback",
+        );
+      }
+
+      return { ...(replayed.result as CompleteBankConnectionResult), replayed: true };
+    }
+
+    const providerConnection = await provider.exchangeConnectionSession({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      providerSessionId: command.providerSessionId,
+      publicToken: command.publicToken,
+    });
+    const connection = await persistBankConnection({
+      repository: bankingRepository,
+      provider,
+      context,
+      teamId: command.teamId,
+      providerConnection,
+    });
+
+    await appendBankSyncRequestedEvent({
+      repository: bankingRepository,
+      context,
+      teamId: command.teamId,
+      connection,
+      action: "bank_connection.sync_requested",
+      eventType: "connection_completed",
+      rawPayload: providerConnection.rawPayload,
+    });
+
+    const result = { connection, replayed: false };
+
+    await bankingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: completeBankConnectionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
 }
 
 export async function connectMockBankConnection(
@@ -3513,45 +3745,12 @@ export async function connectMockBankConnection(
       teamId: command.teamId,
       actorId: context.actor.id,
     });
-    const connection = await bankingRepository.upsertBankConnection({
+    const connection = await persistBankConnection({
+      repository: bankingRepository,
+      provider,
+      context,
       teamId: command.teamId,
       providerConnection,
-    });
-
-    await bankingRepository.upsertProviderObject({
-      teamId: command.teamId,
-      provider: provider.provider,
-      providerObjectType: "connection",
-      providerObjectId: providerConnection.providerConnectionId,
-      connectionId: connection.id,
-      internalEntityType: "bank_connection",
-      internalEntityId: connection.id,
-      rawPayload: providerConnection.rawPayload,
-    });
-
-    await bankingRepository.appendAuditEvent({
-      teamId: command.teamId,
-      actorId: context.actor.id,
-      requestId: context.requestId,
-      action: "bank_connection.connected",
-      entityType: "bank_connection",
-      entityId: connection.id,
-      metadata: {
-        provider: provider.provider,
-        providerConnectionId: providerConnection.providerConnectionId,
-      },
-    });
-
-    await bankingRepository.appendOutboxEvent({
-      teamId: command.teamId,
-      actorId: context.actor.id,
-      requestId: context.requestId,
-      type: "bank_connection.connected",
-      version: 1,
-      payload: {
-        connectionId: connection.id,
-        provider: provider.provider,
-      },
     });
 
     const result = { connection, replayed: false };
@@ -3580,12 +3779,14 @@ export async function syncBankConnection(
 
     assertCommandTeamMatchesContext(context, command.teamId, "Bank connection not found");
 
-    await resolveTeamAccess(
-      bankingRepository,
-      { ...context, teamId: command.teamId },
-      "bank_connections.manage",
-      "You cannot sync bank providers for this team",
-    );
+    if (command.enforceCallerPermission !== false) {
+      await resolveTeamAccess(
+        bankingRepository,
+        { ...context, teamId: command.teamId },
+        "bank_connections.manage",
+        "You cannot sync bank providers for this team",
+      );
+    }
 
     const fingerprint = syncBankConnectionFingerprint(command, provider.provider);
     const replayed = await bankingRepository.getIdempotencyResult(
@@ -3615,56 +3816,87 @@ export async function syncBankConnection(
       throw new AppError("NOT_FOUND", "Bank connection not found");
     }
 
-    const providerConnection = persistedProviderConnection(connection);
-    const providerAccounts = await provider.listAccounts(providerConnection);
     const syncRun = await bankingRepository.createProviderSyncRun({
       teamId: command.teamId,
       connectionId: connection.id,
     });
+    const providerConnection = persistedProviderConnection(connection);
     const accounts: BankAccount[] = [];
     const transactions: Transaction[] = [];
     let duplicateCount = 0;
 
-    for (const providerAccount of providerAccounts) {
-      const account = await bankingRepository.upsertBankAccount({
-        teamId: command.teamId,
-        connectionId: connection.id,
-        providerAccount,
-      });
-      accounts.push(account);
+    try {
+      const providerAccounts = await provider.listAccounts(providerConnection);
 
-      await bankingRepository.upsertProviderObject({
-        teamId: command.teamId,
-        provider: provider.provider,
-        providerObjectType: "account",
-        providerObjectId: providerAccount.providerAccountId,
-        connectionId: connection.id,
-        bankAccountId: account.id,
-        internalEntityType: "bank_account",
-        internalEntityId: account.id,
-        rawPayload: providerAccount.rawPayload,
-      });
+      for (const providerAccount of providerAccounts) {
+        const account = await bankingRepository.upsertBankAccount({
+          teamId: command.teamId,
+          connectionId: connection.id,
+          providerAccount,
+        });
+        accounts.push(account);
 
-      const providerTransactions = await provider.syncAccount({
-        connection: providerConnection,
-        account: providerAccount,
-      });
-
-      for (const providerTransaction of providerTransactions) {
-        const transaction = await importProviderTransaction({
-          repository: bankingRepository,
-          provider,
-          connection,
-          bankAccount: account,
-          providerTransaction,
+        await bankingRepository.upsertProviderObject({
+          teamId: command.teamId,
+          provider: provider.provider,
+          providerObjectType: "account",
+          providerObjectId: providerAccount.providerAccountId,
+          connectionId: connection.id,
+          bankAccountId: account.id,
+          internalEntityType: "bank_account",
+          internalEntityId: account.id,
+          rawPayload: providerAccount.rawPayload,
         });
 
-        if (transaction) {
-          transactions.push(transaction);
-        } else {
-          duplicateCount += 1;
+        const providerTransactions = await provider.syncAccount({
+          connection: providerConnection,
+          account: providerAccount,
+        });
+
+        for (const providerTransaction of providerTransactions) {
+          const transaction = await importProviderTransaction({
+            repository: bankingRepository,
+            provider,
+            connection,
+            bankAccount: account,
+            providerTransaction,
+          });
+
+          if (transaction) {
+            transactions.push(transaction);
+          } else {
+            duplicateCount += 1;
+          }
         }
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Bank provider sync failed";
+      const failedSyncRun = await bankingRepository.finishProviderSyncRun({
+        syncRunId: syncRun.id,
+        status: "failed",
+        accountsSynced: accounts.length,
+        transactionsImported: transactions.length,
+        duplicateCount,
+        error: message,
+      });
+      await bankingRepository.markBankConnectionSynced({
+        connectionId: connection.id,
+        syncedAt: new Date(failedSyncRun.completedAt ?? failedSyncRun.startedAt),
+        status: "error",
+      });
+      await bankingRepository.appendAuditEvent({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        action: "bank_connection.sync_failed",
+        entityType: "bank_connection",
+        entityId: connection.id,
+        metadata: {
+          provider: provider.provider,
+          error: message,
+        },
+      });
+      throw new AppError("CONFLICT", message);
     }
 
     const completedSyncRun = await bankingRepository.finishProviderSyncRun({
@@ -3721,6 +3953,189 @@ export async function syncBankConnection(
       teamId: command.teamId,
       actorId: context.actor.id,
       operation: syncBankConnectionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function requestBankConnectionSyncFromWebhook(
+  repository: BankingUseCaseRepository,
+  context: TransactionReviewContext,
+  command: RequestBankConnectionSyncFromWebhookCommand,
+): Promise<RequestBankConnectionSyncFromWebhookResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const bankingRepository = transactionRepository as BankingUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Bank connection not found");
+
+    if (!command.verification.verified) {
+      throw new AppError("FORBIDDEN", "Bank provider webhook signature is invalid");
+    }
+
+    if (command.verification.teamId !== command.teamId) {
+      throw new AppError("NOT_FOUND", "Bank connection not found");
+    }
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      provider: command.verification.provider,
+      providerConnectionId: command.verification.providerConnectionId,
+      eventType: command.verification.eventType,
+    });
+    const replayed = await bankingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      requestBankConnectionSyncFromWebhookOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different bank webhook",
+        );
+      }
+
+      return {
+        ...(replayed.result as RequestBankConnectionSyncFromWebhookResult),
+        replayed: true,
+      };
+    }
+
+    const connection = await bankingRepository.getBankConnectionByProviderConnectionId(
+      command.teamId,
+      command.verification.provider,
+      command.verification.providerConnectionId,
+    );
+
+    if (!connection) {
+      throw new AppError("NOT_FOUND", "Bank connection not found");
+    }
+
+    await appendBankSyncRequestedEvent({
+      repository: bankingRepository,
+      context,
+      teamId: command.teamId,
+      connection,
+      action: "bank_connection.webhook_sync_requested",
+      eventType: command.verification.eventType,
+      rawPayload: command.verification.rawPayload,
+    });
+
+    const result = {
+      connection,
+      eventType: command.verification.eventType,
+      replayed: false,
+    };
+
+    await bankingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: requestBankConnectionSyncFromWebhookOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function disconnectBankConnection(
+  repository: BankingUseCaseRepository,
+  provider: BankingProvider,
+  context: TransactionReviewContext,
+  command: DisconnectBankConnectionCommand,
+): Promise<DisconnectBankConnectionResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const bankingRepository = transactionRepository as BankingUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Bank connection not found");
+
+    await resolveTeamAccess(
+      bankingRepository,
+      { ...context, teamId: command.teamId },
+      "bank_connections.manage",
+      "You cannot disconnect bank providers for this team",
+    );
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      connectionId: command.connectionId,
+      provider: provider.provider,
+    });
+    const replayed = await bankingRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      disconnectBankConnectionOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different bank disconnect",
+        );
+      }
+
+      return { ...(replayed.result as DisconnectBankConnectionResult), replayed: true };
+    }
+
+    const connection = await bankingRepository.getBankConnectionForTeam(
+      command.teamId,
+      command.connectionId,
+    );
+
+    if (!connection || connection.provider !== provider.provider) {
+      throw new AppError("NOT_FOUND", "Bank connection not found");
+    }
+
+    if (provider.disconnectConnection) {
+      await provider.disconnectConnection(persistedProviderConnection(connection));
+    }
+
+    const disconnected = await bankingRepository.disconnectBankConnection({
+      connectionId: connection.id,
+      disconnectedAt: new Date(),
+    });
+
+    await bankingRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "bank_connection.disconnected",
+      entityType: "bank_connection",
+      entityId: connection.id,
+      metadata: {
+        provider: provider.provider,
+        providerConnectionId: connection.providerConnectionId,
+      },
+    });
+
+    await bankingRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "bank_connection.disconnected",
+      version: 1,
+      payload: {
+        connectionId: connection.id,
+        provider: provider.provider,
+      },
+    });
+
+    const result = { connection: disconnected, replayed: false };
+
+    await bankingRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: disconnectBankConnectionOperation,
       key: command.idempotencyKey,
       fingerprint,
       result,
@@ -7795,8 +8210,123 @@ function persistedProviderConnection(connection: BankConnection): BankingProvide
     providerConnectionId: connection.providerConnectionId,
     institutionName: connection.institutionName,
     status: "connected",
+    token: null,
     rawPayload: {},
   };
+}
+
+function bankingProviderDescriptor(provider: BankingProvider): BankingProviderDescriptor {
+  return {
+    provider: provider.provider,
+    displayName: provider.displayName,
+    environment: provider.environment,
+    capabilities: provider.capabilities,
+  };
+}
+
+function requireBankingProvider(
+  providers: readonly BankingProvider[],
+  providerName: string,
+): BankingProvider {
+  const provider = providers.find((candidate) => candidate.provider === providerName);
+
+  if (!provider) {
+    throw new AppError("NOT_FOUND", "Bank provider not found");
+  }
+
+  return provider;
+}
+
+async function persistBankConnection(input: {
+  repository: BankingUseCaseRepository;
+  provider: BankingProvider;
+  context: TransactionReviewContext;
+  teamId: string;
+  providerConnection: BankingProviderConnection;
+}) {
+  const connection = await input.repository.upsertBankConnection({
+    teamId: input.teamId,
+    providerConnection: input.providerConnection,
+  });
+
+  await input.repository.upsertProviderObject({
+    teamId: input.teamId,
+    provider: input.provider.provider,
+    providerObjectType: "connection",
+    providerObjectId: input.providerConnection.providerConnectionId,
+    connectionId: connection.id,
+    internalEntityType: "bank_connection",
+    internalEntityId: connection.id,
+    rawPayload: input.providerConnection.rawPayload,
+  });
+
+  await input.repository.appendAuditEvent({
+    teamId: input.teamId,
+    actorId: input.context.actor.id,
+    requestId: input.context.requestId,
+    action: "bank_connection.connected",
+    entityType: "bank_connection",
+    entityId: connection.id,
+    metadata: {
+      provider: input.provider.provider,
+      providerConnectionId: input.providerConnection.providerConnectionId,
+      tokenKeyId: input.providerConnection.token?.keyId ?? null,
+      tokenLastFour: input.providerConnection.token?.lastFour ?? null,
+    },
+  });
+
+  await input.repository.appendOutboxEvent({
+    teamId: input.teamId,
+    actorId: input.context.actor.id,
+    requestId: input.context.requestId,
+    type: "bank_connection.connected",
+    version: 1,
+    payload: {
+      connectionId: connection.id,
+      provider: input.provider.provider,
+    },
+  });
+
+  return connection;
+}
+
+async function appendBankSyncRequestedEvent(input: {
+  repository: BankingUseCaseRepository;
+  context: TransactionReviewContext;
+  teamId: string;
+  connection: BankConnection;
+  action: string;
+  eventType: string;
+  rawPayload: Record<string, unknown>;
+}) {
+  await input.repository.appendAuditEvent({
+    teamId: input.teamId,
+    actorId: input.context.actor.id,
+    requestId: input.context.requestId,
+    action: input.action,
+    entityType: "bank_connection",
+    entityId: input.connection.id,
+    metadata: {
+      provider: input.connection.provider,
+      providerConnectionId: input.connection.providerConnectionId,
+      eventType: input.eventType,
+    },
+  });
+
+  await input.repository.appendOutboxEvent({
+    teamId: input.teamId,
+    actorId: input.context.actor.id,
+    requestId: input.context.requestId,
+    type: "bank_connection.sync_requested",
+    version: 1,
+    payload: {
+      connectionId: input.connection.id,
+      provider: input.connection.provider,
+      providerConnectionId: input.connection.providerConnectionId,
+      eventType: input.eventType,
+      rawPayload: input.rawPayload,
+    },
+  });
 }
 
 function integrationProviderDescriptor(

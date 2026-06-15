@@ -6,8 +6,10 @@ import {
   acceptTeamInvite,
   approveAssistantAction,
   commitCsvTransactionImport,
+  completeBankConnection,
   connectIntegration,
   createDeterministicInvoicePdfRenderer,
+  createBankConnectionSession,
   connectMockBankConnection,
   createApiKey,
   createCustomer,
@@ -24,6 +26,7 @@ import {
   createTeam,
   createWebhookSubscription,
   disableIntegration,
+  disconnectBankConnection,
   generateInboxMatchSuggestions,
   getAssistantConversation,
   inviteTeamMember,
@@ -69,6 +72,7 @@ import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review"
 import { env } from "@dawn/env/server";
 import {
   createMockBankingProvider,
+  createSandboxBankingProvider,
   createMockIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
   type BankingProvider,
@@ -83,7 +87,7 @@ import { enforceAssistantRateLimit } from "../rate-limit";
 
 export type AppRouterDependencies = {
   transactionReviewRepository: DawnRepository;
-  bankingProvider: BankingProvider;
+  bankingProviders: readonly BankingProvider[];
   integrationProviders: readonly IntegrationProvider[];
   documentUrlSigner: DocumentUrlSigner;
   invoicePdfRenderer: InvoicePdfRenderer;
@@ -241,11 +245,30 @@ const bankConnectionInput = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+const bankProviderInput = z.enum(["mock-bank", "sandbox-bank"]);
+
+const createBankConnectionSessionInput = z.object({
+  teamId: z.string().min(1),
+  provider: bankProviderInput,
+  redirectUrl: z.url(),
+  idempotencyKey: z.string().min(1),
+});
+
+const completeBankConnectionInput = z.object({
+  teamId: z.string().min(1),
+  provider: bankProviderInput,
+  providerSessionId: z.string().min(1),
+  publicToken: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 const syncBankConnectionInput = z.object({
   teamId: z.string().min(1),
   connectionId: z.string().min(1),
   idempotencyKey: z.string().min(1),
 });
+
+const disconnectBankConnectionInput = syncBankConnectionInput;
 
 const integrationProviderInput = z.enum([
   "mock-accounting",
@@ -541,10 +564,29 @@ function mapAppError(error: unknown): never {
   throw error;
 }
 
+function requireBankingProvider(
+  providers: readonly BankingProvider[],
+  providerName?: string | null,
+): BankingProvider {
+  const provider = providers.find((candidate) => candidate.provider === providerName);
+
+  if (!provider) {
+    throw new AppError("NOT_FOUND", "Bank provider not found");
+  }
+
+  return provider;
+}
+
 function createDefaultDependencies(): AppRouterDependencies {
   return {
     transactionReviewRepository: new DrizzleTransactionReviewRepository(),
-    bankingProvider: createMockBankingProvider(),
+    bankingProviders: [
+      createMockBankingProvider(),
+      createSandboxBankingProvider({
+        appUrl: env.BETTER_AUTH_URL,
+        webhookSecret: env.BETTER_AUTH_SECRET,
+      }),
+    ],
     integrationProviders: createMockIntegrationProviders(),
     documentUrlSigner: createDocumentUrlSigner({
       baseUrl: env.BETTER_AUTH_URL,
@@ -557,7 +599,7 @@ function createDefaultDependencies(): AppRouterDependencies {
 
 export function createAppRouter(dependencies: AppRouterDependencies = createDefaultDependencies()) {
   const {
-    bankingProvider,
+    bankingProviders,
     documentUrlSigner,
     integrationProviders,
     invoiceEmailDeliveryProvider,
@@ -1044,11 +1086,16 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     banking: {
       list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
         try {
-          return await listBankConnections(transactionReviewRepository, {
-            actor: { id: context.session.user.id, type: "user" },
-            requestId: context.requestId,
-            teamId: input?.teamId,
-          });
+          return await listBankConnections(
+            transactionReviewRepository,
+            bankingProviders,
+            {
+              actor: { id: context.session.user.id, type: "user" },
+              requestId: context.requestId,
+              teamId: input?.teamId,
+            },
+            input,
+          );
         } catch (error) {
           mapAppError(error);
         }
@@ -1059,7 +1106,43 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
           try {
             return await connectMockBankConnection(
               transactionReviewRepository,
-              bankingProvider,
+              requireBankingProvider(bankingProviders, "mock-bank"),
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createSession: protectedProcedure
+        .input(createBankConnectionSessionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createBankConnectionSession(
+              transactionReviewRepository,
+              bankingProviders,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      complete: protectedProcedure
+        .input(completeBankConnectionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await completeBankConnection(
+              transactionReviewRepository,
+              bankingProviders,
               {
                 actor: { id: context.session.user.id, type: "user" },
                 requestId: context.requestId,
@@ -1075,9 +1158,35 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .input(syncBankConnectionInput)
         .handler(async ({ context, input }) => {
           try {
+            const connection = await transactionReviewRepository.getBankConnectionForTeam(
+              input.teamId,
+              input.connectionId,
+            );
             return await syncBankConnection(
               transactionReviewRepository,
-              bankingProvider,
+              requireBankingProvider(bankingProviders, connection?.provider),
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      disconnect: protectedProcedure
+        .input(disconnectBankConnectionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            const connection = await transactionReviewRepository.getBankConnectionForTeam(
+              input.teamId,
+              input.connectionId,
+            );
+            return await disconnectBankConnection(
+              transactionReviewRepository,
+              requireBankingProvider(bankingProviders, connection?.provider),
               {
                 actor: { id: context.session.user.id, type: "user" },
                 requestId: context.requestId,

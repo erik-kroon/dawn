@@ -42,6 +42,11 @@ function RouteComponent() {
     currency: "",
     categoryId: "",
   });
+  const [sandboxBankSession, setSandboxBankSession] = useState<{
+    providerSessionId: string;
+    linkToken: string;
+    connectUrl: string;
+  } | null>(null);
   const [documentFile, setDocumentFile] = useState<File | null>(null);
   const [extractionCorrections, setExtractionCorrections] = useState<
     Record<string, ExtractionCorrectionState>
@@ -258,12 +263,38 @@ function RouteComponent() {
       },
     }),
   );
+  const createSandboxBankSessionMutation = useMutation(
+    orpc.banking.createSession.mutationOptions({
+      onSuccess: (result) => {
+        setSandboxBankSession({
+          providerSessionId: result.session.providerSessionId,
+          linkToken: result.session.linkToken,
+          connectUrl: result.session.connectUrl,
+        });
+      },
+    }),
+  );
+  const completeSandboxBankMutation = useMutation(
+    orpc.banking.complete.mutationOptions({
+      onSuccess: async () => {
+        setSandboxBankSession(null);
+        await queryClient.invalidateQueries({ queryKey: orpc.banking.list.queryKey() });
+      },
+    }),
+  );
   const syncBankConnectionMutation = useMutation(
     orpc.banking.sync.mutationOptions({
       onSuccess: async () => {
         await queryClient.invalidateQueries({ queryKey: orpc.banking.list.queryKey() });
         await queryClient.invalidateQueries({ queryKey: orpc.ledger.summary.queryKey() });
         await transactionSync.refetch();
+      },
+    }),
+  );
+  const disconnectBankConnectionMutation = useMutation(
+    orpc.banking.disconnect.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.banking.list.queryKey() });
       },
     }),
   );
@@ -1502,8 +1533,8 @@ function RouteComponent() {
         <CardHeader>
           <CardTitle>Bank connections</CardTitle>
           <CardDescription>
-            Mock provider sync normalizes accounts and transactions through the same ledger,
-            duplicate, raw payload, audit, and outbox path real providers will use.
+            Provider sync normalizes accounts and transactions through the same ledger, duplicate,
+            raw payload, audit, and outbox path across mock and sandbox providers.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -1516,24 +1547,66 @@ function RouteComponent() {
                     (total, connection) => total + connection.accounts.length,
                     0,
                   ) ?? 0}{" "}
-                  accounts
+                  accounts · {banking.data?.providers.length ?? 0} providers
                 </p>
-                <Button
-                  disabled={
-                    !canManageBankConnections ||
-                    connectMockBankMutation.isPending ||
-                    !transactionReview.data.teamId
-                  }
-                  onClick={() =>
-                    connectMockBankMutation.mutate({
-                      teamId: transactionReview.data.teamId,
-                      idempotencyKey: crypto.randomUUID(),
-                    })
-                  }
-                >
-                  Connect mock bank
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    disabled={
+                      !canManageBankConnections ||
+                      connectMockBankMutation.isPending ||
+                      !transactionReview.data.teamId
+                    }
+                    onClick={() =>
+                      connectMockBankMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        idempotencyKey: crypto.randomUUID(),
+                      })
+                    }
+                    variant="outline"
+                  >
+                    Connect mock bank
+                  </Button>
+                  <Button
+                    disabled={
+                      !canManageBankConnections ||
+                      createSandboxBankSessionMutation.isPending ||
+                      !transactionReview.data.teamId
+                    }
+                    onClick={() =>
+                      createSandboxBankSessionMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        provider: "sandbox-bank",
+                        redirectUrl: window.location.href,
+                        idempotencyKey: crypto.randomUUID(),
+                      })
+                    }
+                  >
+                    Start sandbox bank
+                  </Button>
+                </div>
               </div>
+              {sandboxBankSession && transactionReview.data.teamId ? (
+                <div className="grid gap-2 border p-3 text-sm">
+                  <p className="font-medium">Sandbox bank callback ready</p>
+                  <p className="break-all text-muted-foreground">{sandboxBankSession.connectUrl}</p>
+                  <Button
+                    className="w-fit"
+                    disabled={completeSandboxBankMutation.isPending}
+                    onClick={() =>
+                      completeSandboxBankMutation.mutate({
+                        teamId: transactionReview.data.teamId,
+                        provider: "sandbox-bank",
+                        providerSessionId: sandboxBankSession.providerSessionId,
+                        publicToken: "public-sandbox-token",
+                        idempotencyKey: crypto.randomUUID(),
+                      })
+                    }
+                    size="sm"
+                  >
+                    Complete callback
+                  </Button>
+                </div>
+              ) : null}
               {banking.data?.connections.map(({ connection, accounts, latestSyncRun }) => (
                 <div className="grid gap-3 border p-3" key={connection.id}>
                   <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
@@ -1541,22 +1614,46 @@ function RouteComponent() {
                       <p className="font-medium">{connection.institutionName}</p>
                       <p className="text-sm text-muted-foreground">
                         {connection.provider} · {connection.status}
+                        {connection.tokenLastFour ? ` · token ${connection.tokenLastFour}` : ""}
                         {connection.lastSyncAt ? ` · synced ${connection.lastSyncAt}` : ""}
                       </p>
                     </div>
-                    <Button
-                      disabled={!canManageBankConnections || syncBankConnectionMutation.isPending}
-                      onClick={() =>
-                        syncBankConnectionMutation.mutate({
-                          teamId: connection.teamId,
-                          connectionId: connection.id,
-                          idempotencyKey: crypto.randomUUID(),
-                        })
-                      }
-                      variant="outline"
-                    >
-                      Sync now
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        disabled={
+                          !canManageBankConnections ||
+                          connection.status !== "connected" ||
+                          syncBankConnectionMutation.isPending
+                        }
+                        onClick={() =>
+                          syncBankConnectionMutation.mutate({
+                            teamId: connection.teamId,
+                            connectionId: connection.id,
+                            idempotencyKey: crypto.randomUUID(),
+                          })
+                        }
+                        variant="outline"
+                      >
+                        Sync now
+                      </Button>
+                      <Button
+                        disabled={
+                          !canManageBankConnections ||
+                          connection.status === "disconnected" ||
+                          disconnectBankConnectionMutation.isPending
+                        }
+                        onClick={() =>
+                          disconnectBankConnectionMutation.mutate({
+                            teamId: connection.teamId,
+                            connectionId: connection.id,
+                            idempotencyKey: crypto.randomUUID(),
+                          })
+                        }
+                        variant="destructive"
+                      >
+                        Disconnect
+                      </Button>
+                    </div>
                   </div>
                   <div className="grid gap-2 md:grid-cols-2">
                     {accounts.map((account) => (
@@ -1584,6 +1681,21 @@ function RouteComponent() {
               {syncBankConnectionMutation.error ? (
                 <p className="text-sm text-destructive">
                   {syncBankConnectionMutation.error.message}
+                </p>
+              ) : null}
+              {createSandboxBankSessionMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {createSandboxBankSessionMutation.error.message}
+                </p>
+              ) : null}
+              {completeSandboxBankMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {completeSandboxBankMutation.error.message}
+                </p>
+              ) : null}
+              {disconnectBankConnectionMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {disconnectBankConnectionMutation.error.message}
                 </p>
               ) : null}
             </div>

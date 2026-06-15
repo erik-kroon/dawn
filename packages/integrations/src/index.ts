@@ -1,12 +1,18 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
+
 import type { LedgerTransactionDraft, Money } from "@dawn/domain";
 
-export type BankingProviderName = "mock-bank";
+export type BankingProviderName = "mock-bank" | "sandbox-bank";
 
 export type BankingProviderCapability =
   | "createConnection"
+  | "createConnectionSession"
+  | "exchangeConnectionSession"
   | "listAccounts"
   | "syncAccount"
-  | "normalizeTransaction";
+  | "normalizeTransaction"
+  | "verifyWebhook"
+  | "disconnect";
 
 export type ProviderRawPayload = Record<string, unknown>;
 
@@ -15,6 +21,16 @@ export type BankingProviderConnection = {
   providerConnectionId: string;
   institutionName: string;
   status: "connected";
+  token?: IntegrationProviderToken | null;
+  rawPayload: ProviderRawPayload;
+};
+
+export type BankingProviderConnectionSession = {
+  provider: BankingProviderName;
+  providerSessionId: string;
+  linkToken: string;
+  connectUrl: string;
+  expiresAt: string;
   rawPayload: ProviderRawPayload;
 };
 
@@ -38,13 +54,39 @@ export type BankingProviderTransaction = {
 
 export type BankingProvider = {
   provider: BankingProviderName;
+  displayName: string;
+  environment: "local" | "sandbox" | "production";
   capabilities: readonly BankingProviderCapability[];
   createConnection(input: { teamId: string; actorId: string }): Promise<BankingProviderConnection>;
+  createConnectionSession?(input: {
+    teamId: string;
+    actorId: string;
+    redirectUrl: string;
+  }): Promise<BankingProviderConnectionSession>;
+  exchangeConnectionSession?(input: {
+    teamId: string;
+    actorId: string;
+    providerSessionId: string;
+    publicToken: string;
+  }): Promise<BankingProviderConnection>;
   listAccounts(connection: BankingProviderConnection): Promise<BankingProviderAccount[]>;
   syncAccount(input: {
     connection: BankingProviderConnection;
     account: BankingProviderAccount;
   }): Promise<BankingProviderTransaction[]>;
+  disconnectConnection?(connection: BankingProviderConnection): Promise<{
+    status: "disconnected";
+    rawPayload: ProviderRawPayload;
+  }>;
+};
+
+export type BankingProviderWebhookVerification = {
+  provider: BankingProviderName;
+  verified: boolean;
+  eventType: string;
+  teamId: string;
+  providerConnectionId: string;
+  rawPayload: ProviderRawPayload;
 };
 
 export type InvoiceEmailAttachment = {
@@ -171,6 +213,8 @@ export function providerTransactionToLedgerDraft(input: {
 export function createMockBankingProvider(): BankingProvider {
   return {
     provider: "mock-bank",
+    displayName: "Mock Bank",
+    environment: "local",
     capabilities: ["createConnection", "listAccounts", "syncAccount", "normalizeTransaction"],
     async createConnection(input) {
       return {
@@ -247,6 +291,185 @@ export function createMockBankingProvider(): BankingProvider {
       ];
     },
   };
+}
+
+export function createSandboxBankingProvider(input: {
+  appUrl: string;
+  webhookSecret: string;
+}): BankingProvider {
+  return {
+    provider: "sandbox-bank",
+    displayName: "Sandbox Open Banking",
+    environment: "sandbox",
+    capabilities: [
+      "createConnection",
+      "createConnectionSession",
+      "exchangeConnectionSession",
+      "listAccounts",
+      "syncAccount",
+      "normalizeTransaction",
+      "verifyWebhook",
+      "disconnect",
+    ],
+    async createConnection(command) {
+      return sandboxProviderConnection({
+        teamId: command.teamId,
+        actorId: command.actorId,
+        providerSessionId: `sandbox_direct_${command.teamId}`,
+        publicToken: `sandbox_public_${command.teamId}`,
+      });
+    },
+    async createConnectionSession(command) {
+      const providerSessionId = `sandbox_session_${command.teamId}_${command.actorId}`;
+      const linkToken = `sandbox_link_${Buffer.from(providerSessionId).toString("base64url")}`;
+      const connectUrl = new URL("/banking/sandbox/connect", input.appUrl);
+      connectUrl.searchParams.set("session", providerSessionId);
+      connectUrl.searchParams.set("redirect", command.redirectUrl);
+
+      return {
+        provider: "sandbox-bank",
+        providerSessionId,
+        linkToken,
+        connectUrl: connectUrl.toString(),
+        expiresAt: new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+        rawPayload: {
+          sandbox: true,
+          provider: "sandbox-bank",
+          teamId: command.teamId,
+          redirectUrl: command.redirectUrl,
+        },
+      };
+    },
+    async exchangeConnectionSession(command) {
+      return sandboxProviderConnection(command);
+    },
+    async listAccounts(connection) {
+      return [
+        {
+          providerAccountId: "sandbox_checking",
+          name: "Sandbox Operating Account",
+          currency: "USD",
+          type: "bank",
+          currentBalance: { amountMinor: 42_150_00, currency: "USD" },
+          rawPayload: {
+            provider: "sandbox-bank",
+            providerConnectionId: connection.providerConnectionId,
+            subtype: "checking",
+            mask: "4242",
+          },
+        },
+        {
+          providerAccountId: "sandbox_credit",
+          name: "Sandbox Corporate Card",
+          currency: "USD",
+          type: "credit_card",
+          currentBalance: { amountMinor: -1_850_00, currency: "USD" },
+          rawPayload: {
+            provider: "sandbox-bank",
+            providerConnectionId: connection.providerConnectionId,
+            subtype: "credit_card",
+            mask: "1885",
+          },
+        },
+      ];
+    },
+    async syncAccount(command) {
+      if (command.account.providerAccountId === "sandbox_credit") {
+        return [
+          {
+            providerTransactionId: "sandbox_txn_card_software",
+            providerAccountId: command.account.providerAccountId,
+            description: "Linear subscription",
+            postedAt: "2026-06-13T00:00:00.000Z",
+            amount: { amountMinor: -8000, currency: command.account.currency },
+            rawPayload: {
+              provider: "sandbox-bank",
+              category: "Software",
+              pending: false,
+              accountSubtype: "credit_card",
+            },
+          },
+        ];
+      }
+
+      return [
+        {
+          providerTransactionId: "sandbox_txn_client_payment",
+          providerAccountId: command.account.providerAccountId,
+          description: "Northstar project payment",
+          postedAt: "2026-06-15T00:00:00.000Z",
+          amount: { amountMinor: 12_000_00, currency: command.account.currency },
+          rawPayload: {
+            provider: "sandbox-bank",
+            category: "Income",
+            pending: false,
+            counterparty: "Northstar Studio",
+          },
+        },
+        {
+          providerTransactionId: "sandbox_txn_rent",
+          providerAccountId: command.account.providerAccountId,
+          description: "Studio rent",
+          postedAt: "2026-06-12T00:00:00.000Z",
+          amount: { amountMinor: -2_400_00, currency: command.account.currency },
+          rawPayload: {
+            provider: "sandbox-bank",
+            category: "Rent",
+            pending: false,
+            counterparty: "Workspace Co",
+          },
+        },
+      ];
+    },
+    async disconnectConnection(connection) {
+      return {
+        status: "disconnected",
+        rawPayload: {
+          provider: "sandbox-bank",
+          providerConnectionId: connection.providerConnectionId,
+          disconnectedAt: new Date().toISOString(),
+        },
+      };
+    },
+  };
+}
+
+export function verifySandboxBankingWebhook(input: {
+  body: string;
+  signature: string | null;
+  secret: string;
+}): BankingProviderWebhookVerification {
+  const expected = sandboxBankingWebhookSignature({
+    body: input.body,
+    secret: input.secret,
+  });
+
+  if (!input.signature || !constantTimeEqual(input.signature, expected)) {
+    return {
+      provider: "sandbox-bank",
+      verified: false,
+      eventType: "unknown",
+      teamId: "",
+      providerConnectionId: "",
+      rawPayload: {},
+    };
+  }
+
+  const payload = JSON.parse(input.body) as Record<string, unknown>;
+
+  return {
+    provider: "sandbox-bank",
+    verified: true,
+    eventType: typeof payload.eventType === "string" ? payload.eventType : "unknown",
+    teamId: typeof payload.teamId === "string" ? payload.teamId : "",
+    providerConnectionId:
+      typeof payload.providerConnectionId === "string" ? payload.providerConnectionId : "",
+    rawPayload: payload,
+  };
+}
+
+export function sandboxBankingWebhookSignature(input: { body: string; secret: string }) {
+  return createHmac("sha256", input.secret).update(input.body).digest("hex");
 }
 
 export function createMockInvoiceEmailDeliveryProvider(): InvoiceEmailDeliveryProvider {
@@ -344,7 +567,7 @@ export function createMockIntegrationProvider(input: {
 }
 
 function mockEncryptedProviderToken(input: {
-  provider: IntegrationProviderName;
+  provider: IntegrationProviderName | BankingProviderName;
   teamId: string;
   actorId: string;
   idempotencyKey: string;
@@ -357,4 +580,38 @@ function mockEncryptedProviderToken(input: {
     keyId: "mock-kms-local",
     lastFour: token.slice(-4),
   };
+}
+
+function sandboxProviderConnection(input: {
+  teamId: string;
+  actorId: string;
+  providerSessionId: string;
+  publicToken: string;
+}): BankingProviderConnection {
+  return {
+    provider: "sandbox-bank",
+    providerConnectionId: `sandbox_item_${input.teamId}`,
+    institutionName: "Sandbox Bank",
+    status: "connected",
+    token: mockEncryptedProviderToken({
+      provider: "sandbox-bank",
+      teamId: input.teamId,
+      actorId: input.actorId,
+      idempotencyKey: input.publicToken,
+    }),
+    rawPayload: {
+      sandbox: true,
+      provider: "sandbox-bank",
+      providerSessionId: input.providerSessionId,
+      itemId: `sandbox_item_${input.teamId}`,
+      tokenLastFour: input.publicToken.slice(-4),
+    },
+  };
+}
+
+function constantTimeEqual(left: string, right: string) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }

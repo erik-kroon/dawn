@@ -102,6 +102,46 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps bank sync requests to queued bank sync jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "bank_connection.sync_requested",
+        payload: {
+          connectionId: "conn_1",
+          provider: "sandbox-bank",
+          providerConnectionId: "sandbox_item_team_1",
+        },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "bank_connection.sync_requested",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "bank.sync",
+        teamId: "team_1",
+        connectionId: "conn_1",
+        provider: "sandbox-bank",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "bank:sync:outbox_1",
+      },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "bank_connection.sync_requested",
+        idempotencyKey: "automation:run:outbox_1",
+      },
+      webhookDeliveryJob("bank_connection.sync_requested"),
+    ]);
+  });
+
   test("maps document upload outbox events to extraction jobs", () => {
     expect(
       outboxEventToQueueMessages({

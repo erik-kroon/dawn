@@ -306,6 +306,26 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     return connection ? mapBankConnection(connection) : null;
   }
 
+  async getBankConnectionByProviderConnectionId(
+    teamId: string,
+    provider: BankConnection["provider"],
+    providerConnectionId: string,
+  ) {
+    const [connection] = await this.client
+      .select()
+      .from(schema.bankConnection)
+      .where(
+        and(
+          eq(schema.bankConnection.teamId, teamId),
+          eq(schema.bankConnection.provider, provider),
+          eq(schema.bankConnection.providerConnectionId, providerConnectionId),
+        ),
+      )
+      .limit(1);
+
+    return connection ? mapBankConnection(connection) : null;
+  }
+
   async upsertBankConnection(input: {
     teamId: string;
     providerConnection: {
@@ -313,6 +333,11 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
       providerConnectionId: string;
       institutionName: string;
       status: "connected";
+      token?: {
+        encryptedToken: string;
+        keyId: string;
+        lastFour: string;
+      } | null;
       rawPayload: Record<string, unknown>;
     };
   }) {
@@ -337,6 +362,9 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
         .set({
           institutionName: input.providerConnection.institutionName,
           status: input.providerConnection.status,
+          tokenCiphertext: input.providerConnection.token?.encryptedToken ?? null,
+          tokenKeyId: input.providerConnection.token?.keyId ?? null,
+          tokenLastFour: input.providerConnection.token?.lastFour ?? null,
           rawPayload: input.providerConnection.rawPayload,
           updatedAt: new Date(),
         })
@@ -359,12 +387,32 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
         providerConnectionId: input.providerConnection.providerConnectionId,
         institutionName: input.providerConnection.institutionName,
         status: input.providerConnection.status,
+        tokenCiphertext: input.providerConnection.token?.encryptedToken ?? null,
+        tokenKeyId: input.providerConnection.token?.keyId ?? null,
+        tokenLastFour: input.providerConnection.token?.lastFour ?? null,
         rawPayload: input.providerConnection.rawPayload,
       })
       .returning();
 
     if (!connection) {
       throw new Error("Bank connection was not created");
+    }
+
+    return mapBankConnection(connection);
+  }
+
+  async disconnectBankConnection(input: { connectionId: string; disconnectedAt: Date }) {
+    const [connection] = await this.client
+      .update(schema.bankConnection)
+      .set({
+        status: "disconnected",
+        updatedAt: input.disconnectedAt,
+      })
+      .where(eq(schema.bankConnection.id, input.connectionId))
+      .returning();
+
+    if (!connection) {
+      throw new Error("Bank connection was not updated");
     }
 
     return mapBankConnection(connection);
@@ -3563,6 +3611,8 @@ function mapBankConnection(connection: typeof schema.bankConnection.$inferSelect
     providerConnectionId: connection.providerConnectionId,
     institutionName: connection.institutionName,
     status: connection.status as BankConnection["status"],
+    tokenKeyId: connection.tokenKeyId,
+    tokenLastFour: connection.tokenLastFour,
     lastSyncAt: connection.lastSyncAt?.toISOString() ?? null,
     createdAt: connection.createdAt.toISOString(),
     updatedAt: connection.updatedAt.toISOString(),

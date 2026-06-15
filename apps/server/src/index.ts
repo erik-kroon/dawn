@@ -17,9 +17,11 @@ import {
   generateWeeklyInsights,
   listBillingWorkspace,
   listTransactionReviewWorkspace,
+  requestBankConnectionSyncFromWebhook,
   resolveTeamAccess,
   resolvePublicApiKey,
   runAutomationsForOutboxEvent,
+  syncBankConnection,
   type WebhookDeliveryProvider,
 } from "@dawn/app";
 import { createMockInsightGenerationProvider } from "@dawn/ai";
@@ -28,6 +30,12 @@ import { DrizzleTransactionReviewRepository } from "@dawn/db/transaction-review"
 import { env } from "@dawn/env/server";
 import type { DawnCloudflareBindings } from "@dawn/infra/cloudflare";
 import type { DawnQueueMessage } from "@dawn/jobs";
+import {
+  createMockBankingProvider,
+  createSandboxBankingProvider,
+  verifySandboxBankingWebhook,
+  type BankingProvider,
+} from "@dawn/integrations";
 import { transactionSyncCollection } from "@dawn/sync";
 import { initLogger } from "evlog";
 import { createAuthMiddleware, type BetterAuthInstance } from "evlog/better-auth";
@@ -394,6 +402,44 @@ app.post("/api/v1/webhook-subscriptions", async (c) => {
   }
 });
 
+app.post("/api/webhooks/banking/sandbox", async (c) => {
+  const body = await c.req.text();
+  const verification = verifySandboxBankingWebhook({
+    body,
+    signature: c.req.header("x-dawn-bank-signature") ?? null,
+    secret: env.BETTER_AUTH_SECRET,
+  });
+
+  if (!verification.verified) {
+    return c.json({ error: "Invalid signature" }, 401);
+  }
+
+  const repository = new DrizzleTransactionReviewRepository();
+
+  try {
+    const result = await requestBankConnectionSyncFromWebhook(
+      repository,
+      {
+        actor: { id: "provider:sandbox-bank", type: "provider_webhook" },
+        requestId: c.req.header("x-request-id") ?? crypto.randomUUID(),
+        teamId: verification.teamId,
+      },
+      {
+        teamId: verification.teamId,
+        verification,
+        idempotencyKey:
+          typeof verification.rawPayload.eventId === "string"
+            ? verification.rawPayload.eventId
+            : verification.providerConnectionId,
+      },
+    );
+
+    return c.json({ queued: true, connectionId: result.connection.id }, 202);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
 app.use("/*", async (c, next) => {
   const context = await createContext({ context: c });
 
@@ -587,6 +633,24 @@ async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnC
     );
   }
 
+  if (message.body.type === "bank.sync") {
+    await syncBankConnection(
+      new DrizzleTransactionReviewRepository(),
+      requireBankingProvider(message.body.provider),
+      {
+        actor: { id: "system:bank-sync", type: "system" },
+        requestId: message.body.idempotencyKey,
+        teamId: message.body.teamId,
+      },
+      {
+        teamId: message.body.teamId,
+        connectionId: message.body.connectionId,
+        idempotencyKey: message.body.idempotencyKey,
+        enforceCallerPermission: false,
+      },
+    );
+  }
+
   if (message.body.type === "webhook.deliver") {
     const result = await deliverWebhooksForOutboxEvent(
       new DrizzleTransactionReviewRepository(),
@@ -649,6 +713,23 @@ function createFetchWebhookDeliveryProvider(): WebhookDeliveryProvider {
       };
     },
   };
+}
+
+function requireBankingProvider(providerName: string): BankingProvider {
+  const providers = [
+    createMockBankingProvider(),
+    createSandboxBankingProvider({
+      appUrl: env.BETTER_AUTH_URL,
+      webhookSecret: env.BETTER_AUTH_SECRET,
+    }),
+  ];
+  const provider = providers.find((candidate) => candidate.provider === providerName);
+
+  if (!provider) {
+    throw new Error(`Unsupported banking provider: ${providerName}`);
+  }
+
+  return provider;
 }
 
 export default {

@@ -80,6 +80,15 @@ export const automationRunJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const bankSyncJobSchema = z.object({
+  type: z.literal("bank.sync"),
+  teamId: z.string().min(1),
+  connectionId: z.string().min(1),
+  provider: z.string().min(1),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const webhookDeliveryJobSchema = z.object({
   type: z.literal("webhook.deliver"),
   teamId: z.string().min(1),
@@ -110,6 +119,7 @@ export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   recurringInvoiceGenerationJobSchema,
   weeklyInsightGenerationJobSchema,
   automationRunJobSchema,
+  bankSyncJobSchema,
   webhookDeliveryJobSchema,
   teamDataExportJobSchema,
   teamDataDeletionJobSchema,
@@ -121,6 +131,7 @@ export type DocumentExtractionJob = z.infer<typeof documentExtractionJobSchema>;
 export type RecurringInvoiceGenerationJob = z.infer<typeof recurringInvoiceGenerationJobSchema>;
 export type WeeklyInsightGenerationJob = z.infer<typeof weeklyInsightGenerationJobSchema>;
 export type AutomationRunJob = z.infer<typeof automationRunJobSchema>;
+export type BankSyncJob = z.infer<typeof bankSyncJobSchema>;
 export type WebhookDeliveryJob = z.infer<typeof webhookDeliveryJobSchema>;
 export type TeamDataExportJob = z.infer<typeof teamDataExportJobSchema>;
 export type TeamDataDeletionJob = z.infer<typeof teamDataDeletionJobSchema>;
@@ -148,6 +159,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const recurringInvoiceJob = createRecurringInvoiceGenerationJob(event);
   const weeklyInsightJob = createWeeklyInsightGenerationJob(event);
   const automationJob = createAutomationRunJob(event);
+  const bankSyncJob = createBankSyncJob(event);
   const webhookJob = createWebhookDeliveryJob(event);
   const exportJob = createTeamDataExportJob(event);
   const deletionJob = createTeamDataDeletionJob(event);
@@ -158,6 +170,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
     extractionJob,
     recurringInvoiceJob,
     weeklyInsightJob,
+    bankSyncJob,
     exportJob,
     deletionJob,
     automationJob,
@@ -290,6 +303,28 @@ function createAutomationRunJob(event: OutboxEventForJob): AutomationRunJob {
     sourceOutboxEventId: event.id,
     eventType: event.type,
     idempotencyKey: `automation:run:${event.id}`,
+  };
+}
+
+function createBankSyncJob(event: OutboxEventForJob): BankSyncJob | null {
+  if (event.type !== "bank_connection.sync_requested") {
+    return null;
+  }
+
+  if (
+    typeof event.payload.connectionId !== "string" ||
+    typeof event.payload.provider !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    type: "bank.sync",
+    teamId: event.teamId,
+    connectionId: event.payload.connectionId,
+    provider: event.payload.provider,
+    sourceOutboxEventId: event.id,
+    idempotencyKey: `bank:sync:${event.id}`,
   };
 }
 

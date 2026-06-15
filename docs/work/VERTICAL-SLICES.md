@@ -459,11 +459,11 @@ Connect one real banking provider through the adapter interface.
 
 ## Acceptance Criteria
 
-- [ ] User can complete provider connection in a non-production environment.
-- [ ] Accounts and transactions sync into canonical records.
-- [ ] Webhooks are verified before mutable work.
-- [ ] Provider errors map to actionable product states.
-- [ ] Disconnecting provider does not delete historical records by default.
+- [x] User can complete provider connection in a non-production environment.
+- [x] Accounts and transactions sync into canonical records.
+- [x] Webhooks are verified before mutable work.
+- [x] Provider errors map to actionable product states.
+- [x] Disconnecting provider does not delete historical records by default.
 
 ## Verification
 
