@@ -76,6 +76,41 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps document upload outbox events to extraction jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "document.uploaded",
+        payload: {
+          documentId: "doc_1",
+          versionId: "ver_1",
+          inboxItemId: "inbox_1",
+          actorId: "user_1",
+        },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "document.uploaded",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "document.extract",
+        teamId: "team_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        inboxItemId: "inbox_1",
+        actorId: "user_1",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "document:extract:outbox_1",
+      },
+    ]);
+  });
+
   test("calculates capped exponential retry delays", () => {
     const now = new Date("2026-06-15T10:00:00.000Z");
 

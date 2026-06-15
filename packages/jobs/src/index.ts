@@ -42,13 +42,26 @@ export const syncInvalidationJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const documentExtractionJobSchema = z.object({
+  type: z.literal("document.extract"),
+  teamId: z.string().min(1),
+  documentId: z.string().min(1),
+  versionId: z.string().min(1),
+  inboxItemId: z.string().min(1),
+  actorId: z.string().min(1),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   outboxDispatchJobSchema,
   syncInvalidationJobSchema,
+  documentExtractionJobSchema,
 ]);
 
 export type OutboxDispatchJob = z.infer<typeof outboxDispatchJobSchema>;
 export type SyncInvalidationJob = z.infer<typeof syncInvalidationJobSchema>;
+export type DocumentExtractionJob = z.infer<typeof documentExtractionJobSchema>;
 export type DawnQueueMessage = z.infer<typeof dawnQueueMessageSchema>;
 
 export function createOutboxDispatchJob(event: OutboxEventForJob): OutboxDispatchJob {
@@ -69,8 +82,11 @@ export function createOutboxDispatchJob(event: OutboxEventForJob): OutboxDispatc
 export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueMessage[] {
   const dispatchJob = createOutboxDispatchJob(event);
   const syncJob = createSyncInvalidationJob(event);
+  const extractionJob = createDocumentExtractionJob(event);
 
-  return syncJob ? [dispatchJob, syncJob] : [dispatchJob];
+  return [dispatchJob, syncJob, extractionJob].filter((message): message is DawnQueueMessage =>
+    Boolean(message),
+  );
 }
 
 export function nextOutboxRetryAt(input: { attempt: number; now: Date }) {
@@ -112,6 +128,32 @@ function createSyncInvalidationJob(event: OutboxEventForJob): SyncInvalidationJo
     changedIds,
     sourceOutboxEventId: event.id,
     idempotencyKey: `sync:transactions:${event.id}`,
+  };
+}
+
+function createDocumentExtractionJob(event: OutboxEventForJob): DocumentExtractionJob | null {
+  if (event.type !== "document.uploaded") {
+    return null;
+  }
+
+  if (
+    typeof event.payload.documentId !== "string" ||
+    typeof event.payload.versionId !== "string" ||
+    typeof event.payload.inboxItemId !== "string" ||
+    typeof event.payload.actorId !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    type: "document.extract",
+    teamId: event.teamId,
+    documentId: event.payload.documentId,
+    versionId: event.payload.versionId,
+    inboxItemId: event.payload.inboxItemId,
+    actorId: event.payload.actorId,
+    sourceOutboxEventId: event.id,
+    idempotencyKey: `document:extract:${event.id}`,
   };
 }
 

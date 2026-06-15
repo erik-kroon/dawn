@@ -10,8 +10,10 @@ import {
   createLedgerTransaction,
   createTeam,
   inviteTeamMember,
+  correctDocumentExtraction,
   listBankConnections,
   listDocuments,
+  listInboxItems,
   listLedgerSummary,
   listTeamDirectory,
   listTeams,
@@ -21,6 +23,7 @@ import {
   reviewTransaction,
   syncBankConnection,
   type DawnRepository,
+  type DocumentExtractionFields,
   type DocumentUrlSigner,
   updateTeamMemberRole,
 } from "@dawn/app";
@@ -82,6 +85,36 @@ const createDocumentUploadInput = z.object({
 const createDocumentDownloadInput = z.object({
   teamId: z.string().min(1),
   documentId: z.string().min(1),
+});
+
+const documentExtractionFieldsInput = z.object({
+  documentType: z
+    .enum([
+      "receipt",
+      "invoice_received",
+      "invoice_sent",
+      "bank_statement",
+      "contract",
+      "tax_document",
+      "other",
+    ])
+    .nullable()
+    .optional(),
+  merchantName: z.string().nullable().optional(),
+  customerName: z.string().nullable().optional(),
+  issuedAt: z.string().nullable().optional(),
+  dueAt: z.string().nullable().optional(),
+  invoiceNumber: z.string().nullable().optional(),
+  totalAmountMinor: z.number().int().nullable().optional(),
+  currency: z.string().nullable().optional(),
+  taxAmountMinor: z.number().int().nullable().optional(),
+});
+
+const correctDocumentExtractionInput = z.object({
+  teamId: z.string().min(1),
+  inboxItemId: z.string().min(1),
+  fields: documentExtractionFieldsInput,
+  idempotencyKey: z.string().min(1),
 });
 
 const createLedgerTransactionInput = z.object({
@@ -484,6 +517,39 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 teamId: input.teamId,
               },
               input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    inbox: {
+      list: protectedProcedure.input(teamContextInput).handler(async ({ context, input }) => {
+        try {
+          return await listInboxItems(transactionReviewRepository, {
+            actor: { id: context.session.user.id, type: "user" },
+            requestId: context.requestId,
+            teamId: input?.teamId,
+          });
+        } catch (error) {
+          mapAppError(error);
+        }
+      }),
+      correctExtraction: protectedProcedure
+        .input(correctDocumentExtractionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await correctDocumentExtraction(
+              transactionReviewRepository,
+              {
+                actor: { id: context.session.user.id, type: "user" },
+                requestId: context.requestId,
+                teamId: input.teamId,
+              },
+              {
+                ...input,
+                fields: input.fields as DocumentExtractionFields,
+              },
             );
           } catch (error) {
             mapAppError(error);

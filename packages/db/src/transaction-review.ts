@@ -7,7 +7,14 @@ import type {
   BusinessDocumentVersion,
   CsvTransactionImportMapping,
   DawnRepository,
+  DocumentExtraction,
+  DocumentExtractionConfidence,
+  DocumentExtractionFields,
+  DocumentExtractionSource,
   IdempotencyResult,
+  InboxItem,
+  InboxSource,
+  InboxSourceType,
   JobRun,
   OutboxDispatchRepository,
   OutboxEvent,
@@ -728,6 +735,317 @@ export class DrizzleTransactionReviewRepository implements DrizzleRepository {
     };
   }
 
+  async listInboxItems(teamId: string): Promise<InboxItem[]> {
+    const [items, sources, documents, versions, extractions] = await Promise.all([
+      this.client
+        .select()
+        .from(schema.inboxItem)
+        .where(eq(schema.inboxItem.teamId, teamId))
+        .orderBy(desc(schema.inboxItem.updatedAt)),
+      this.client.select().from(schema.inboxSource).where(eq(schema.inboxSource.teamId, teamId)),
+      this.client
+        .select()
+        .from(schema.businessDocument)
+        .where(eq(schema.businessDocument.teamId, teamId)),
+      this.client
+        .select()
+        .from(schema.documentVersion)
+        .where(eq(schema.documentVersion.teamId, teamId)),
+      this.client
+        .select()
+        .from(schema.documentExtraction)
+        .where(eq(schema.documentExtraction.teamId, teamId)),
+    ]);
+
+    return items.map((item) =>
+      mapInboxItem(item, {
+        source: sources.find((source) => source.id === item.sourceId) ?? null,
+        document: documents.find((document) => document.id === item.documentId) ?? null,
+        version: versions.find((version) => version.id === item.documentVersionId) ?? null,
+        latestExtraction: latestExtractionForItem(extractions, item.id),
+      }),
+    );
+  }
+
+  async ensureInboxSource(input: {
+    sourceId: string;
+    teamId: string;
+    type: InboxSourceType;
+    name: string;
+  }) {
+    const [existing] = await this.client
+      .select()
+      .from(schema.inboxSource)
+      .where(
+        and(
+          eq(schema.inboxSource.teamId, input.teamId),
+          eq(schema.inboxSource.type, input.type),
+          eq(schema.inboxSource.name, input.name),
+        ),
+      )
+      .limit(1);
+
+    if (existing) {
+      return mapInboxSource(existing);
+    }
+
+    const [source] = await this.client
+      .insert(schema.inboxSource)
+      .values({
+        id: input.sourceId,
+        teamId: input.teamId,
+        type: input.type,
+        name: input.name,
+      })
+      .returning();
+
+    if (!source) {
+      throw new Error("Inbox source was not created");
+    }
+
+    return mapInboxSource(source);
+  }
+
+  async createInboxItemForDocumentUpload(input: {
+    inboxItemId: string;
+    sourceId: string;
+    teamId: string;
+    documentId: string;
+    documentVersionId: string;
+    createdByActorId: string;
+  }) {
+    const [existing] = await this.client
+      .select()
+      .from(schema.inboxItem)
+      .where(
+        and(
+          eq(schema.inboxItem.teamId, input.teamId),
+          eq(schema.inboxItem.documentVersionId, input.documentVersionId),
+        ),
+      )
+      .limit(1);
+
+    if (existing) {
+      return mapInboxItem(existing);
+    }
+
+    const [item] = await this.client
+      .insert(schema.inboxItem)
+      .values({
+        id: input.inboxItemId,
+        teamId: input.teamId,
+        sourceId: input.sourceId,
+        sourceType: "document_upload",
+        documentId: input.documentId,
+        documentVersionId: input.documentVersionId,
+        status: "pending_extraction",
+        extractionStatus: "pending",
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!item) {
+      throw new Error("Inbox item was not created");
+    }
+
+    return mapInboxItem(item);
+  }
+
+  async getInboxItemForTeam(teamId: string, inboxItemId: string) {
+    const [item] = await this.client
+      .select()
+      .from(schema.inboxItem)
+      .where(and(eq(schema.inboxItem.teamId, teamId), eq(schema.inboxItem.id, inboxItemId)))
+      .limit(1);
+
+    if (!item) {
+      return null;
+    }
+
+    const [source, document, version, latestExtraction] = await Promise.all([
+      this.client
+        .select()
+        .from(schema.inboxSource)
+        .where(eq(schema.inboxSource.id, item.sourceId))
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+      this.client
+        .select()
+        .from(schema.businessDocument)
+        .where(eq(schema.businessDocument.id, item.documentId))
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+      this.client
+        .select()
+        .from(schema.documentVersion)
+        .where(eq(schema.documentVersion.id, item.documentVersionId))
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+      this.client
+        .select()
+        .from(schema.documentExtraction)
+        .where(eq(schema.documentExtraction.inboxItemId, item.id))
+        .orderBy(desc(schema.documentExtraction.extractionVersion))
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+    ]);
+
+    return mapInboxItem(item, { source, document, version, latestExtraction });
+  }
+
+  async createDocumentExtraction(input: {
+    extractionId: string;
+    teamId: string;
+    inboxItemId: string;
+    documentId: string;
+    documentVersionId: string;
+    source: Exclude<DocumentExtractionSource, "user_correction">;
+    fields: DocumentExtractionFields;
+    confidence: DocumentExtractionConfidence;
+    rawText?: string | null;
+    createdByActorId: string;
+  }) {
+    const extractionVersion = await this.nextDocumentExtractionVersion(input.inboxItemId);
+    const [extraction] = await this.client
+      .insert(schema.documentExtraction)
+      .values({
+        id: input.extractionId,
+        teamId: input.teamId,
+        inboxItemId: input.inboxItemId,
+        documentId: input.documentId,
+        documentVersionId: input.documentVersionId,
+        extractionVersion,
+        source: input.source,
+        status: "completed",
+        fields: input.fields,
+        confidence: input.confidence,
+        rawText: input.rawText ?? null,
+        error: null,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!extraction) {
+      throw new Error("Document extraction was not created");
+    }
+
+    const [item] = await this.client
+      .update(schema.inboxItem)
+      .set({
+        status: "needs_review",
+        extractionStatus: "completed",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(schema.inboxItem.teamId, input.teamId), eq(schema.inboxItem.id, input.inboxItemId)),
+      )
+      .returning();
+
+    if (!item) {
+      throw new Error("Inbox item was not updated");
+    }
+
+    return {
+      inboxItem: mapInboxItem(item, { latestExtraction: extraction }),
+      extraction: mapDocumentExtraction(extraction),
+    };
+  }
+
+  async createCorrectedDocumentExtraction(input: {
+    extractionId: string;
+    teamId: string;
+    inboxItemId: string;
+    fields: DocumentExtractionFields;
+    confidence: DocumentExtractionConfidence;
+    createdByActorId: string;
+  }) {
+    const item = await this.getInboxItemForTeam(input.teamId, input.inboxItemId);
+
+    if (!item) {
+      throw new Error("Inbox item not found");
+    }
+
+    const extractionVersion = await this.nextDocumentExtractionVersion(input.inboxItemId);
+    const [extraction] = await this.client
+      .insert(schema.documentExtraction)
+      .values({
+        id: input.extractionId,
+        teamId: input.teamId,
+        inboxItemId: input.inboxItemId,
+        documentId: item.documentId,
+        documentVersionId: item.documentVersionId,
+        extractionVersion,
+        source: "user_correction",
+        status: "completed",
+        fields: input.fields,
+        confidence: input.confidence,
+        rawText: item.latestExtraction?.rawText ?? null,
+        error: null,
+        createdByActorId: input.createdByActorId,
+      })
+      .returning();
+
+    if (!extraction) {
+      throw new Error("Document extraction correction was not created");
+    }
+
+    const [updatedItem] = await this.client
+      .update(schema.inboxItem)
+      .set({
+        status: "needs_review",
+        extractionStatus: "completed",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(schema.inboxItem.teamId, input.teamId), eq(schema.inboxItem.id, input.inboxItemId)),
+      )
+      .returning();
+
+    if (!updatedItem) {
+      throw new Error("Inbox item was not updated");
+    }
+
+    return {
+      inboxItem: mapInboxItem(updatedItem, { latestExtraction: extraction }),
+      extraction: mapDocumentExtraction(extraction),
+    };
+  }
+
+  async markDocumentExtractionFailed(input: {
+    teamId: string;
+    inboxItemId: string;
+    error: string;
+    failedAt: Date;
+  }) {
+    const [item] = await this.client
+      .update(schema.inboxItem)
+      .set({
+        extractionStatus: "failed",
+        updatedAt: input.failedAt,
+      })
+      .where(
+        and(eq(schema.inboxItem.teamId, input.teamId), eq(schema.inboxItem.id, input.inboxItemId)),
+      )
+      .returning();
+
+    if (!item) {
+      throw new Error("Inbox item was not updated");
+    }
+
+    return mapInboxItem(item);
+  }
+
+  private async nextDocumentExtractionVersion(inboxItemId: string) {
+    const [latest] = await this.client
+      .select({ extractionVersion: schema.documentExtraction.extractionVersion })
+      .from(schema.documentExtraction)
+      .where(eq(schema.documentExtraction.inboxItemId, inboxItemId))
+      .orderBy(desc(schema.documentExtraction.extractionVersion))
+      .limit(1);
+
+    return (latest?.extractionVersion ?? 0) + 1;
+  }
+
   async listTransactionsForReport(input: {
     teamId: string;
     accountId?: string;
@@ -1315,6 +1633,82 @@ function mapBusinessDocumentVersion(
     uploadedAt: version.uploadedAt?.toISOString() ?? null,
     createdAt: version.createdAt.toISOString(),
   };
+}
+
+function mapInboxSource(source: typeof schema.inboxSource.$inferSelect): InboxSource {
+  return {
+    id: source.id,
+    teamId: source.teamId,
+    type: source.type as InboxSource["type"],
+    name: source.name,
+    createdAt: source.createdAt.toISOString(),
+  };
+}
+
+function mapInboxItem(
+  item: typeof schema.inboxItem.$inferSelect,
+  related: {
+    source?: typeof schema.inboxSource.$inferSelect | null;
+    document?: typeof schema.businessDocument.$inferSelect | null;
+    version?: typeof schema.documentVersion.$inferSelect | null;
+    latestExtraction?: typeof schema.documentExtraction.$inferSelect | null;
+  } = {},
+): InboxItem {
+  return {
+    id: item.id,
+    teamId: item.teamId,
+    sourceId: item.sourceId,
+    sourceType: item.sourceType as InboxItem["sourceType"],
+    documentId: item.documentId,
+    documentVersionId: item.documentVersionId,
+    status: item.status as InboxItem["status"],
+    extractionStatus: item.extractionStatus as InboxItem["extractionStatus"],
+    createdByActorId: item.createdByActorId,
+    createdAt: item.createdAt.toISOString(),
+    updatedAt: item.updatedAt.toISOString(),
+    source: related.source ? mapInboxSource(related.source) : null,
+    document: related.document
+      ? mapBusinessDocument(
+          related.document,
+          related.version?.documentId === related.document.id ? related.version : null,
+        )
+      : null,
+    latestExtraction: related.latestExtraction
+      ? mapDocumentExtraction(related.latestExtraction)
+      : null,
+  };
+}
+
+function mapDocumentExtraction(
+  extraction: typeof schema.documentExtraction.$inferSelect,
+): DocumentExtraction {
+  return {
+    id: extraction.id,
+    teamId: extraction.teamId,
+    inboxItemId: extraction.inboxItemId,
+    documentId: extraction.documentId,
+    documentVersionId: extraction.documentVersionId,
+    extractionVersion: extraction.extractionVersion,
+    source: extraction.source as DocumentExtraction["source"],
+    status: extraction.status as DocumentExtraction["status"],
+    fields: extraction.fields as DocumentExtractionFields,
+    confidence: extraction.confidence as DocumentExtractionConfidence,
+    rawText: extraction.rawText,
+    error: extraction.error,
+    createdByActorId: extraction.createdByActorId,
+    createdAt: extraction.createdAt.toISOString(),
+  };
+}
+
+function latestExtractionForItem(
+  extractions: (typeof schema.documentExtraction.$inferSelect)[],
+  inboxItemId: string,
+) {
+  return (
+    extractions
+      .filter((extraction) => extraction.inboxItemId === inboxItemId)
+      .sort((left, right) => right.extractionVersion - left.extractionVersion)[0] ?? null
+  );
 }
 
 function mapTransaction(transaction: typeof schema.transaction.$inferSelect): Transaction {

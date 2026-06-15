@@ -9,12 +9,21 @@ import {
   type BusinessDocument,
   type BusinessDocumentVersion,
   type DawnRepository,
+  type DocumentExtraction,
+  type DocumentExtractionConfidence,
+  type DocumentExtractionFields,
   type DocumentUrlSigner,
   type IdempotencyResult,
+  type InboxItem,
+  type InboxSource,
+  type InboxSourceType,
 } from "./index";
 
 class MemoryDocumentRepository {
   auditEvents: unknown[] = [];
+  inboxItems = new Map<string, InboxItem>();
+  inboxSources = new Map<string, InboxSource>();
+  extractions = new Map<string, DocumentExtraction>();
   documents = new Map<string, BusinessDocument>();
   documentVersions = new Map<string, BusinessDocumentVersion>();
   idempotency = new Map<string, IdempotencyResult<unknown>>();
@@ -58,6 +67,10 @@ class MemoryDocumentRepository {
 
   async listDocuments(teamId: string) {
     return [...this.documents.values()].filter((document) => document.teamId === teamId);
+  }
+
+  async listInboxItems(teamId: string) {
+    return [...this.inboxItems.values()].filter((item) => item.teamId === teamId);
   }
 
   async createDocumentUploadRecord(input: {
@@ -153,6 +166,170 @@ class MemoryDocumentRepository {
 
     return { document: uploadedDocument, version: uploadedVersion };
   }
+
+  async ensureInboxSource(input: {
+    sourceId: string;
+    teamId: string;
+    type: InboxSourceType;
+    name: string;
+  }) {
+    const existing = [...this.inboxSources.values()].find(
+      (source) =>
+        source.teamId === input.teamId && source.type === input.type && source.name === input.name,
+    );
+
+    if (existing) {
+      return existing;
+    }
+
+    const source: InboxSource = {
+      id: input.sourceId,
+      teamId: input.teamId,
+      type: input.type,
+      name: input.name,
+      createdAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.inboxSources.set(source.id, source);
+    return source;
+  }
+
+  async createInboxItemForDocumentUpload(input: {
+    inboxItemId: string;
+    sourceId: string;
+    teamId: string;
+    documentId: string;
+    documentVersionId: string;
+    createdByActorId: string;
+  }) {
+    const source = this.inboxSources.get(input.sourceId) ?? null;
+    const document = this.documents.get(input.documentId) ?? null;
+    const inboxItem: InboxItem = {
+      id: input.inboxItemId,
+      teamId: input.teamId,
+      sourceId: input.sourceId,
+      sourceType: "document_upload",
+      documentId: input.documentId,
+      documentVersionId: input.documentVersionId,
+      status: "pending_extraction",
+      extractionStatus: "pending",
+      createdByActorId: input.createdByActorId,
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+      source,
+      document,
+      latestExtraction: null,
+    };
+    this.inboxItems.set(inboxItem.id, inboxItem);
+    return inboxItem;
+  }
+
+  async getInboxItemForTeam(teamId: string, inboxItemId: string) {
+    const item = this.inboxItems.get(inboxItemId);
+    return item?.teamId === teamId ? item : null;
+  }
+
+  async createDocumentExtraction(input: {
+    extractionId: string;
+    teamId: string;
+    inboxItemId: string;
+    documentId: string;
+    documentVersionId: string;
+    source: "local_deterministic";
+    fields: DocumentExtractionFields;
+    confidence: DocumentExtractionConfidence;
+    rawText?: string | null;
+    createdByActorId: string;
+  }) {
+    const inboxItem = this.inboxItems.get(input.inboxItemId);
+
+    if (!inboxItem) {
+      throw new Error("Inbox item not found");
+    }
+
+    const extraction: DocumentExtraction = {
+      id: input.extractionId,
+      teamId: input.teamId,
+      inboxItemId: input.inboxItemId,
+      documentId: input.documentId,
+      documentVersionId: input.documentVersionId,
+      extractionVersion: this.extractions.size + 1,
+      source: input.source,
+      status: "completed",
+      fields: input.fields,
+      confidence: input.confidence,
+      rawText: input.rawText ?? null,
+      error: null,
+      createdByActorId: input.createdByActorId,
+      createdAt: "2026-06-15T10:02:00.000Z",
+    };
+    const updatedInboxItem: InboxItem = {
+      ...inboxItem,
+      status: "needs_review",
+      extractionStatus: "completed",
+      latestExtraction: extraction,
+      updatedAt: "2026-06-15T10:02:00.000Z",
+    };
+    this.extractions.set(extraction.id, extraction);
+    this.inboxItems.set(updatedInboxItem.id, updatedInboxItem);
+    return { inboxItem: updatedInboxItem, extraction };
+  }
+
+  async createCorrectedDocumentExtraction(input: {
+    extractionId: string;
+    teamId: string;
+    inboxItemId: string;
+    fields: DocumentExtractionFields;
+    confidence: DocumentExtractionConfidence;
+    createdByActorId: string;
+  }) {
+    const inboxItem = this.inboxItems.get(input.inboxItemId);
+
+    if (!inboxItem) {
+      throw new Error("Inbox item not found");
+    }
+
+    const extraction: DocumentExtraction = {
+      id: input.extractionId,
+      teamId: input.teamId,
+      inboxItemId: input.inboxItemId,
+      documentId: inboxItem.documentId,
+      documentVersionId: inboxItem.documentVersionId,
+      extractionVersion: this.extractions.size + 1,
+      source: "user_correction",
+      status: "completed",
+      fields: input.fields,
+      confidence: input.confidence,
+      rawText: inboxItem.latestExtraction?.rawText ?? null,
+      error: null,
+      createdByActorId: input.createdByActorId,
+      createdAt: "2026-06-15T10:03:00.000Z",
+    };
+    const updatedInboxItem = { ...inboxItem, latestExtraction: extraction };
+    this.extractions.set(extraction.id, extraction);
+    this.inboxItems.set(updatedInboxItem.id, updatedInboxItem);
+    return { inboxItem: updatedInboxItem, extraction };
+  }
+
+  async markDocumentExtractionFailed(input: {
+    teamId: string;
+    inboxItemId: string;
+    error: string;
+    failedAt: Date;
+  }) {
+    const inboxItem = this.inboxItems.get(input.inboxItemId);
+
+    if (!inboxItem || inboxItem.teamId !== input.teamId) {
+      throw new Error("Inbox item not found");
+    }
+
+    const updated = {
+      ...inboxItem,
+      extractionStatus: "failed" as const,
+      updatedAt: input.failedAt.toISOString(),
+    };
+    this.inboxItems.set(updated.id, updated);
+    return updated;
+  }
 }
 
 const signer: DocumentUrlSigner = {
@@ -247,10 +424,18 @@ describe("document use cases", () => {
     expect(completed.document.status).toBe("uploaded");
     expect(completed.document.currentVersionId).toBe(prepared.version.id);
     expect(completed.version.status).toBe("uploaded");
+    expect(completed.inboxItem).toMatchObject({
+      documentId: prepared.document.id,
+      documentVersionId: prepared.version.id,
+      status: "pending_extraction",
+    });
     expect(repository.auditEvents).toHaveLength(1);
     expect(repository.auditEvents[0]).toMatchObject({ action: "document.uploaded" });
     expect(repository.outboxEvents).toHaveLength(1);
-    expect(repository.outboxEvents[0]).toMatchObject({ type: "document.uploaded" });
+    expect(repository.outboxEvents[0]).toMatchObject({
+      type: "document.uploaded",
+      payload: { inboxItemId: completed.inboxItem.id, actorId: "user_1" },
+    });
   });
 
   test("scopes download signing to document read permission", async () => {

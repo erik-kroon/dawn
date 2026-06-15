@@ -18,8 +18,14 @@ import type {
   BusinessDocument,
   BusinessDocumentVersion,
   DawnRepository,
+  DocumentExtraction,
+  DocumentExtractionConfidence,
+  DocumentExtractionFields,
   DocumentUrlSigner,
   IdempotencyResult,
+  InboxItem,
+  InboxSource,
+  InboxSourceType,
   ProviderSyncRun,
   ReviewWorkspaceData,
   TransactionImportSession,
@@ -34,6 +40,9 @@ class MemoryTransactionReviewRepository implements DawnRepository {
   categories = new Map<string, Category>();
   documents = new Map<string, BusinessDocument>();
   documentVersions = new Map<string, BusinessDocumentVersion>();
+  extractions = new Map<string, DocumentExtraction>();
+  inboxItems = new Map<string, InboxItem>();
+  inboxSources = new Map<string, InboxSource>();
   accounts = new Map<string, LedgerAccount>();
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   importSessions: TransactionImportSession[] = [];
@@ -401,6 +410,10 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     return [...this.documents.values()].filter((document) => document.teamId === teamId);
   }
 
+  async listInboxItems(teamId: string) {
+    return [...this.inboxItems.values()].filter((item) => item.teamId === teamId);
+  }
+
   async createDocumentUploadRecord(input: {
     documentId: string;
     versionId: string;
@@ -493,6 +506,170 @@ class MemoryTransactionReviewRepository implements DawnRepository {
     this.documents.set(uploadedDocument.id, uploadedDocument);
 
     return { document: uploadedDocument, version: uploadedVersion };
+  }
+
+  async ensureInboxSource(input: {
+    sourceId: string;
+    teamId: string;
+    type: InboxSourceType;
+    name: string;
+  }) {
+    const existing = [...this.inboxSources.values()].find(
+      (source) =>
+        source.teamId === input.teamId && source.type === input.type && source.name === input.name,
+    );
+
+    if (existing) {
+      return existing;
+    }
+
+    const source: InboxSource = {
+      id: input.sourceId,
+      teamId: input.teamId,
+      type: input.type,
+      name: input.name,
+      createdAt: "2026-06-15T10:00:00.000Z",
+    };
+    this.inboxSources.set(source.id, source);
+    return source;
+  }
+
+  async createInboxItemForDocumentUpload(input: {
+    inboxItemId: string;
+    sourceId: string;
+    teamId: string;
+    documentId: string;
+    documentVersionId: string;
+    createdByActorId: string;
+  }) {
+    const source = this.inboxSources.get(input.sourceId) ?? null;
+    const document = this.documents.get(input.documentId) ?? null;
+    const inboxItem: InboxItem = {
+      id: input.inboxItemId,
+      teamId: input.teamId,
+      sourceId: input.sourceId,
+      sourceType: "document_upload",
+      documentId: input.documentId,
+      documentVersionId: input.documentVersionId,
+      status: "pending_extraction",
+      extractionStatus: "pending",
+      createdByActorId: input.createdByActorId,
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+      source,
+      document,
+      latestExtraction: null,
+    };
+    this.inboxItems.set(inboxItem.id, inboxItem);
+    return inboxItem;
+  }
+
+  async getInboxItemForTeam(teamId: string, inboxItemId: string) {
+    const item = this.inboxItems.get(inboxItemId);
+    return item?.teamId === teamId ? item : null;
+  }
+
+  async createDocumentExtraction(input: {
+    extractionId: string;
+    teamId: string;
+    inboxItemId: string;
+    documentId: string;
+    documentVersionId: string;
+    source: "local_deterministic";
+    fields: DocumentExtractionFields;
+    confidence: DocumentExtractionConfidence;
+    rawText?: string | null;
+    createdByActorId: string;
+  }) {
+    const inboxItem = this.inboxItems.get(input.inboxItemId);
+
+    if (!inboxItem) {
+      throw new Error("Inbox item not found");
+    }
+
+    const extraction: DocumentExtraction = {
+      id: input.extractionId,
+      teamId: input.teamId,
+      inboxItemId: input.inboxItemId,
+      documentId: input.documentId,
+      documentVersionId: input.documentVersionId,
+      extractionVersion: this.extractions.size + 1,
+      source: input.source,
+      status: "completed",
+      fields: input.fields,
+      confidence: input.confidence,
+      rawText: input.rawText ?? null,
+      error: null,
+      createdByActorId: input.createdByActorId,
+      createdAt: "2026-06-15T10:02:00.000Z",
+    };
+    const updatedInboxItem: InboxItem = {
+      ...inboxItem,
+      status: "needs_review",
+      extractionStatus: "completed",
+      latestExtraction: extraction,
+      updatedAt: "2026-06-15T10:02:00.000Z",
+    };
+    this.extractions.set(extraction.id, extraction);
+    this.inboxItems.set(updatedInboxItem.id, updatedInboxItem);
+    return { inboxItem: updatedInboxItem, extraction };
+  }
+
+  async createCorrectedDocumentExtraction(input: {
+    extractionId: string;
+    teamId: string;
+    inboxItemId: string;
+    fields: DocumentExtractionFields;
+    confidence: DocumentExtractionConfidence;
+    createdByActorId: string;
+  }) {
+    const inboxItem = this.inboxItems.get(input.inboxItemId);
+
+    if (!inboxItem) {
+      throw new Error("Inbox item not found");
+    }
+
+    const extraction: DocumentExtraction = {
+      id: input.extractionId,
+      teamId: input.teamId,
+      inboxItemId: input.inboxItemId,
+      documentId: inboxItem.documentId,
+      documentVersionId: inboxItem.documentVersionId,
+      extractionVersion: this.extractions.size + 1,
+      source: "user_correction",
+      status: "completed",
+      fields: input.fields,
+      confidence: input.confidence,
+      rawText: inboxItem.latestExtraction?.rawText ?? null,
+      error: null,
+      createdByActorId: input.createdByActorId,
+      createdAt: "2026-06-15T10:03:00.000Z",
+    };
+    const updatedInboxItem = { ...inboxItem, latestExtraction: extraction };
+    this.extractions.set(extraction.id, extraction);
+    this.inboxItems.set(updatedInboxItem.id, updatedInboxItem);
+    return { inboxItem: updatedInboxItem, extraction };
+  }
+
+  async markDocumentExtractionFailed(input: {
+    teamId: string;
+    inboxItemId: string;
+    error: string;
+    failedAt: Date;
+  }) {
+    const inboxItem = this.inboxItems.get(input.inboxItemId);
+
+    if (!inboxItem || inboxItem.teamId !== input.teamId) {
+      throw new Error(input.error);
+    }
+
+    const updated = {
+      ...inboxItem,
+      extractionStatus: "failed" as const,
+      updatedAt: input.failedAt.toISOString(),
+    };
+    this.inboxItems.set(updated.id, updated);
+    return updated;
   }
 
   async createTeamInvite(input: {
@@ -974,6 +1151,116 @@ describe("appRouter", () => {
     ).rejects.toMatchObject({
       code: "FORBIDDEN",
       message: "You cannot upload documents for this team",
+    });
+  });
+
+  test("lists inbox items and corrects extracted document fields through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    repository.documents.set("doc_1", {
+      id: "doc_1",
+      teamId: "team_1",
+      title: "Receipt",
+      status: "uploaded",
+      currentVersionId: "ver_1",
+      createdByActorId: "user_1",
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+    });
+    repository.documentVersions.set("ver_1", {
+      id: "ver_1",
+      documentId: "doc_1",
+      teamId: "team_1",
+      versionNumber: 1,
+      objectKey: "teams/team_1/documents/doc_1/versions/ver_1/receipt.txt",
+      fileName: "receipt.txt",
+      contentType: "text/plain",
+      byteSize: 64,
+      status: "uploaded",
+      uploadedAt: "2026-06-15T10:00:00.000Z",
+      createdAt: "2026-06-15T10:00:00.000Z",
+    });
+    repository.inboxSources.set("source_1", {
+      id: "source_1",
+      teamId: "team_1",
+      type: "document_upload",
+      name: "Document uploads",
+      createdAt: "2026-06-15T10:00:00.000Z",
+    });
+    repository.inboxItems.set("inbox_1", {
+      id: "inbox_1",
+      teamId: "team_1",
+      sourceId: "source_1",
+      sourceType: "document_upload",
+      documentId: "doc_1",
+      documentVersionId: "ver_1",
+      status: "needs_review",
+      extractionStatus: "completed",
+      createdByActorId: "user_1",
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:02:00.000Z",
+      latestExtraction: {
+        id: "extract_1",
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        documentId: "doc_1",
+        documentVersionId: "ver_1",
+        extractionVersion: 1,
+        source: "local_deterministic",
+        status: "completed",
+        fields: { merchantName: "Acme", totalAmountMinor: 4250, currency: "USD" },
+        confidence: { merchantName: 0.72, totalAmountMinor: 0.72, currency: 0.72 },
+        rawText: "Acme\nTotal USD 42.50",
+        error: null,
+        createdByActorId: "user_1",
+        createdAt: "2026-06-15T10:02:00.000Z",
+      },
+    });
+    repository.extractions.set(
+      "extract_1",
+      repository.inboxItems.get("inbox_1")?.latestExtraction as DocumentExtraction,
+    );
+    const router = await createTestRouter(repository);
+
+    const inbox = await call(
+      router.inbox.list,
+      { teamId: "team_1" },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+    const corrected = await call(
+      router.inbox.correctExtraction,
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        fields: {
+          merchantName: "Acme Supply Co",
+          totalAmountMinor: 4300,
+          currency: "USD",
+        },
+        idempotencyKey: "correct_1",
+      },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(inbox.inboxItems).toHaveLength(1);
+    expect(inbox.inboxItems[0]?.latestExtraction?.fields).toMatchObject({
+      merchantName: "Acme",
+    });
+    expect(corrected.extraction).toMatchObject({
+      source: "user_correction",
+      extractionVersion: 2,
+      fields: { merchantName: "Acme Supply Co", totalAmountMinor: 4300 },
+    });
+    expect(repository.auditEvents.at(-1)).toMatchObject({
+      action: "document_extraction.corrected",
+    });
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "document_extraction.corrected",
     });
   });
 

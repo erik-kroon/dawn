@@ -269,6 +269,116 @@ export type BusinessDocument = {
   currentVersion?: BusinessDocumentVersion | null;
 };
 
+export type InboxSourceType = "document_upload" | "email_forward";
+
+export type InboxSource = {
+  id: string;
+  teamId: string;
+  type: InboxSourceType;
+  name: string;
+  createdAt: string;
+};
+
+export type InboxItemStatus = "pending_extraction" | "needs_review" | "resolved";
+
+export type InboxItem = {
+  id: string;
+  teamId: string;
+  sourceId: string;
+  sourceType: InboxSourceType;
+  documentId: string;
+  documentVersionId: string;
+  status: InboxItemStatus;
+  extractionStatus: "pending" | "completed" | "failed";
+  createdByActorId: string;
+  createdAt: string;
+  updatedAt: string;
+  source?: InboxSource | null;
+  document?: BusinessDocument | null;
+  latestExtraction?: DocumentExtraction | null;
+};
+
+export type DocumentType =
+  | "receipt"
+  | "invoice_received"
+  | "invoice_sent"
+  | "bank_statement"
+  | "contract"
+  | "tax_document"
+  | "other";
+
+export type DocumentExtractionFields = {
+  documentType?: DocumentType | null;
+  merchantName?: string | null;
+  customerName?: string | null;
+  issuedAt?: string | null;
+  dueAt?: string | null;
+  invoiceNumber?: string | null;
+  totalAmountMinor?: number | null;
+  currency?: string | null;
+  taxAmountMinor?: number | null;
+};
+
+export type DocumentExtractionConfidence = Partial<Record<keyof DocumentExtractionFields, number>>;
+
+export type DocumentExtractionStatus = "completed" | "failed";
+
+export type DocumentExtractionSource = "local_deterministic" | "user_correction";
+
+export type DocumentExtraction = {
+  id: string;
+  teamId: string;
+  inboxItemId: string;
+  documentId: string;
+  documentVersionId: string;
+  extractionVersion: number;
+  source: DocumentExtractionSource;
+  status: DocumentExtractionStatus;
+  fields: DocumentExtractionFields;
+  confidence: DocumentExtractionConfidence;
+  rawText?: string | null;
+  error?: string | null;
+  createdByActorId: string;
+  createdAt: string;
+};
+
+export type RunDocumentExtractionCommand = {
+  teamId: string;
+  inboxItemId: string;
+  documentId: string;
+  versionId: string;
+  rawText: string;
+  idempotencyKey: string;
+};
+
+export type RunDocumentExtractionResult = {
+  inboxItem: InboxItem;
+  extraction: DocumentExtraction;
+  replayed: boolean;
+};
+
+export type CorrectDocumentExtractionCommand = {
+  teamId: string;
+  inboxItemId: string;
+  fields: DocumentExtractionFields;
+  idempotencyKey: string;
+};
+
+export type CorrectDocumentExtractionResult = {
+  inboxItem: InboxItem;
+  extraction: DocumentExtraction;
+  replayed: boolean;
+};
+
+export type DocumentExtractionProvider = {
+  source: Exclude<DocumentExtractionSource, "user_correction">;
+  extract(input: { fileName: string; contentType: string; rawText: string }): Promise<{
+    fields: DocumentExtractionFields;
+    confidence: DocumentExtractionConfidence;
+    rawText?: string | null;
+  }>;
+};
+
 export type ConnectMockBankConnectionCommand = {
   teamId: string;
   idempotencyKey: string;
@@ -322,6 +432,7 @@ export type CompleteDocumentUploadCommand = {
 export type CompleteDocumentUploadResult = {
   document: BusinessDocument;
   version: BusinessDocumentVersion;
+  inboxItem: InboxItem;
 };
 
 export type CreateDocumentDownloadCommand = {
@@ -482,7 +593,52 @@ export type DocumentRepository = {
   }): Promise<{ document: BusinessDocument; version: BusinessDocumentVersion }>;
 };
 
-export type DawnRepository = BankingUseCaseRepository & DocumentRepository;
+export type InboxRepository = {
+  listInboxItems(teamId: string): Promise<InboxItem[]>;
+  createInboxItemForDocumentUpload(input: {
+    inboxItemId: string;
+    sourceId: string;
+    teamId: string;
+    documentId: string;
+    documentVersionId: string;
+    createdByActorId: string;
+  }): Promise<InboxItem>;
+  ensureInboxSource(input: {
+    sourceId: string;
+    teamId: string;
+    type: InboxSourceType;
+    name: string;
+  }): Promise<InboxSource>;
+  getInboxItemForTeam(teamId: string, inboxItemId: string): Promise<InboxItem | null>;
+  createDocumentExtraction(input: {
+    extractionId: string;
+    teamId: string;
+    inboxItemId: string;
+    documentId: string;
+    documentVersionId: string;
+    source: Exclude<DocumentExtractionSource, "user_correction">;
+    fields: DocumentExtractionFields;
+    confidence: DocumentExtractionConfidence;
+    rawText?: string | null;
+    createdByActorId: string;
+  }): Promise<{ inboxItem: InboxItem; extraction: DocumentExtraction }>;
+  createCorrectedDocumentExtraction(input: {
+    extractionId: string;
+    teamId: string;
+    inboxItemId: string;
+    fields: DocumentExtractionFields;
+    confidence: DocumentExtractionConfidence;
+    createdByActorId: string;
+  }): Promise<{ inboxItem: InboxItem; extraction: DocumentExtraction }>;
+  markDocumentExtractionFailed(input: {
+    teamId: string;
+    inboxItemId: string;
+    error: string;
+    failedAt: Date;
+  }): Promise<InboxItem>;
+};
+
+export type DawnRepository = BankingUseCaseRepository & DocumentRepository & InboxRepository;
 
 export type OutboxDispatchRepository = {
   withTransaction<T>(callback: (repository: OutboxDispatchRepository) => Promise<T>): Promise<T>;
@@ -630,6 +786,8 @@ const commitCsvTransactionImportOperation = "csv_transaction_import.commit";
 const connectMockBankConnectionOperation = "banking.connection.mock.connect";
 const syncBankConnectionOperation = "banking.connection.sync";
 const createDocumentUploadOperation = "document.upload.create";
+const runDocumentExtractionOperation = "document.extraction.run";
+const correctDocumentExtractionOperation = "document.extraction.correct";
 const inviteTeamMemberOperation = "team.invite";
 const acceptTeamInviteOperation = "team.invite.accept";
 const updateTeamMemberRoleOperation = "team.member.role.update";
@@ -1458,6 +1616,20 @@ export async function completeDocumentUpload(
       checksumSha256: command.checksumSha256 ?? version.checksumSha256 ?? null,
       uploadedAt: new Date(),
     });
+    const source = await documentRepository.ensureInboxSource({
+      sourceId: crypto.randomUUID(),
+      teamId: command.teamId,
+      type: "document_upload",
+      name: "Document uploads",
+    });
+    const inboxItem = await documentRepository.createInboxItemForDocumentUpload({
+      inboxItemId: crypto.randomUUID(),
+      sourceId: source.id,
+      teamId: command.teamId,
+      documentId: command.documentId,
+      documentVersionId: command.versionId,
+      createdByActorId: context.actor.id,
+    });
 
     await documentRepository.appendAuditEvent({
       teamId: command.teamId,
@@ -1483,10 +1655,12 @@ export async function completeDocumentUpload(
       payload: {
         documentId: command.documentId,
         versionId: command.versionId,
+        inboxItemId: inboxItem.id,
+        actorId: context.actor.id,
       },
     });
 
-    return result;
+    return { ...result, inboxItem };
   });
 }
 
@@ -1523,6 +1697,248 @@ export async function createDocumentDownload(
     downloadUrl: download.url,
     downloadExpiresAt: download.expiresAt,
   };
+}
+
+export async function listInboxItems(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  input: { teamId?: string } = {},
+): Promise<{ teamId: string; inboxItems: InboxItem[] }> {
+  const access = await resolveTeamAccess(
+    repository,
+    { ...context, teamId: input.teamId ?? context.teamId },
+    "documents.read",
+    "You cannot read inbox items for this team",
+  );
+
+  return {
+    teamId: access.teamId,
+    inboxItems: await repository.listInboxItems(access.teamId),
+  };
+}
+
+export async function runDocumentExtraction(
+  repository: DawnRepository,
+  extractor: DocumentExtractionProvider,
+  context: TransactionReviewContext,
+  command: RunDocumentExtractionCommand,
+): Promise<RunDocumentExtractionResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const inboxRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Inbox item not found");
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      inboxItemId: command.inboxItemId,
+      documentId: command.documentId,
+      versionId: command.versionId,
+      extractor: extractor.source,
+    });
+    const replayed = await inboxRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      runDocumentExtractionOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different document extraction",
+        );
+      }
+
+      return { ...(replayed.result as RunDocumentExtractionResult), replayed: true };
+    }
+
+    const [inboxItem, document, version] = await Promise.all([
+      inboxRepository.getInboxItemForTeam(command.teamId, command.inboxItemId),
+      inboxRepository.getDocumentForTeam(command.teamId, command.documentId),
+      inboxRepository.getDocumentVersionForTeam(command.teamId, command.versionId),
+    ]);
+
+    if (
+      !inboxItem ||
+      inboxItem.documentId !== command.documentId ||
+      inboxItem.documentVersionId !== command.versionId ||
+      !document ||
+      !version ||
+      version.documentId !== command.documentId
+    ) {
+      throw new AppError("NOT_FOUND", "Inbox item not found");
+    }
+
+    try {
+      const extracted = await extractor.extract({
+        fileName: version.fileName,
+        contentType: version.contentType,
+        rawText: command.rawText,
+      });
+      const result = await inboxRepository.createDocumentExtraction({
+        extractionId: crypto.randomUUID(),
+        teamId: command.teamId,
+        inboxItemId: inboxItem.id,
+        documentId: command.documentId,
+        documentVersionId: command.versionId,
+        source: extractor.source,
+        fields: normalizeDocumentExtractionFields(extracted.fields),
+        confidence: normalizeDocumentExtractionConfidence(extracted.confidence),
+        rawText: extracted.rawText ?? command.rawText,
+        createdByActorId: context.actor.id,
+      });
+
+      await inboxRepository.appendAuditEvent({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        action: "document.extracted",
+        entityType: "inbox_item",
+        entityId: inboxItem.id,
+        metadata: {
+          documentId: command.documentId,
+          versionId: command.versionId,
+          extractionId: result.extraction.id,
+          provider: extractor.source,
+        },
+      });
+
+      await inboxRepository.appendOutboxEvent({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        requestId: context.requestId,
+        type: "document.extracted",
+        version: 1,
+        payload: {
+          inboxItemId: inboxItem.id,
+          documentId: command.documentId,
+          versionId: command.versionId,
+          extractionId: result.extraction.id,
+        },
+      });
+
+      const finalResult = { ...result, replayed: false };
+
+      await inboxRepository.saveIdempotencyResult({
+        teamId: command.teamId,
+        actorId: context.actor.id,
+        operation: runDocumentExtractionOperation,
+        key: command.idempotencyKey,
+        fingerprint,
+        result: finalResult,
+      });
+
+      return finalResult;
+    } catch (error) {
+      await inboxRepository.markDocumentExtractionFailed({
+        teamId: command.teamId,
+        inboxItemId: inboxItem.id,
+        error: errorMessage(error),
+        failedAt: new Date(),
+      });
+      throw error;
+    }
+  });
+}
+
+export async function correctDocumentExtraction(
+  repository: DawnRepository,
+  context: TransactionReviewContext,
+  command: CorrectDocumentExtractionCommand,
+): Promise<CorrectDocumentExtractionResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const inboxRepository = transactionRepository as DawnRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Inbox item not found");
+
+    await resolveTeamAccess(
+      inboxRepository,
+      { ...context, teamId: command.teamId },
+      "documents.write",
+      "You cannot correct extraction results for this team",
+    );
+
+    const normalizedFields = normalizeDocumentExtractionFields(command.fields);
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      inboxItemId: command.inboxItemId,
+      fields: normalizedFields,
+    });
+    const replayed = await inboxRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      correctDocumentExtractionOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different extraction correction",
+        );
+      }
+
+      return { ...(replayed.result as CorrectDocumentExtractionResult), replayed: true };
+    }
+
+    const inboxItem = await inboxRepository.getInboxItemForTeam(
+      command.teamId,
+      command.inboxItemId,
+    );
+
+    if (!inboxItem) {
+      throw new AppError("NOT_FOUND", "Inbox item not found");
+    }
+
+    const result = await inboxRepository.createCorrectedDocumentExtraction({
+      extractionId: crypto.randomUUID(),
+      teamId: command.teamId,
+      inboxItemId: command.inboxItemId,
+      fields: normalizedFields,
+      confidence: correctionConfidence(normalizedFields),
+      createdByActorId: context.actor.id,
+    });
+
+    await inboxRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "document_extraction.corrected",
+      entityType: "inbox_item",
+      entityId: command.inboxItemId,
+      metadata: {
+        extractionId: result.extraction.id,
+        fields: Object.keys(normalizedFields),
+      },
+    });
+
+    await inboxRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "document_extraction.corrected",
+      version: 1,
+      payload: {
+        inboxItemId: command.inboxItemId,
+        extractionId: result.extraction.id,
+      },
+    });
+
+    const finalResult = { ...result, replayed: false };
+
+    await inboxRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: correctDocumentExtractionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result: finalResult,
+    });
+
+    return finalResult;
+  });
 }
 
 async function importProviderTransaction(input: {
@@ -1674,6 +2090,120 @@ export function createDocumentUploadFingerprint(command: CreateDocumentUploadCom
     byteSize: normalized.byteSize,
     checksumSha256: normalized.checksumSha256,
   });
+}
+
+export function createDeterministicDocumentExtractor(): DocumentExtractionProvider {
+  return {
+    source: "local_deterministic",
+    async extract(input) {
+      const rawText = input.rawText.trim();
+      const text = rawText || input.fileName;
+      const fields = inferDocumentExtractionFields(text, input.fileName);
+
+      return {
+        fields,
+        confidence: confidenceForExtractedFields(fields, rawText.length > 0),
+        rawText,
+      };
+    },
+  };
+}
+
+function inferDocumentExtractionFields(text: string, fileName: string): DocumentExtractionFields {
+  const currencyMatch = text.match(/\b(USD|EUR|GBP|SEK|NOK|DKK)\b/i);
+  const amountMatch = text.match(/(?:total|amount|paid|due)[^\d-]*(-?\d+(?:[.,]\d{1,2})?)/i);
+  const dateMatch = text.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  const invoiceMatch = text.match(/\b(?:invoice|receipt|ref)[\s#:]*([A-Z0-9-]{3,})\b/i);
+  const merchantName =
+    text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0 && !/^(total|amount|date|invoice)\b/i.test(line)) ??
+    titleFromFileName(fileName);
+
+  return normalizeDocumentExtractionFields({
+    documentType: /invoice/i.test(text)
+      ? "invoice_received"
+      : /statement/i.test(text)
+        ? "bank_statement"
+        : /receipt/i.test(text) || amountMatch
+          ? "receipt"
+          : "other",
+    merchantName,
+    issuedAt: dateMatch?.[1] ?? null,
+    invoiceNumber: invoiceMatch?.[1] ?? null,
+    totalAmountMinor: amountMatch ? decimalAmountToMinor(amountMatch[1] ?? "0") : null,
+    currency: currencyMatch?.[1]?.toUpperCase() ?? null,
+  });
+}
+
+function normalizeDocumentExtractionFields(
+  fields: DocumentExtractionFields,
+): DocumentExtractionFields {
+  return {
+    documentType: fields.documentType ?? null,
+    merchantName: normalizedOptionalText(fields.merchantName),
+    customerName: normalizedOptionalText(fields.customerName),
+    issuedAt: normalizedOptionalText(fields.issuedAt),
+    dueAt: normalizedOptionalText(fields.dueAt),
+    invoiceNumber: normalizedOptionalText(fields.invoiceNumber),
+    totalAmountMinor:
+      typeof fields.totalAmountMinor === "number" && Number.isSafeInteger(fields.totalAmountMinor)
+        ? fields.totalAmountMinor
+        : null,
+    currency: normalizedOptionalText(fields.currency)?.toUpperCase() ?? null,
+    taxAmountMinor:
+      typeof fields.taxAmountMinor === "number" && Number.isSafeInteger(fields.taxAmountMinor)
+        ? fields.taxAmountMinor
+        : null,
+  };
+}
+
+function normalizeDocumentExtractionConfidence(
+  confidence: DocumentExtractionConfidence,
+): DocumentExtractionConfidence {
+  return Object.fromEntries(
+    Object.entries(confidence)
+      .filter(([, value]) => typeof value === "number" && Number.isFinite(value))
+      .map(([key, value]) => [key, Math.max(0, Math.min(1, value ?? 0))]),
+  ) as DocumentExtractionConfidence;
+}
+
+function confidenceForExtractedFields(
+  fields: DocumentExtractionFields,
+  hasRawText: boolean,
+): DocumentExtractionConfidence {
+  return Object.fromEntries(
+    Object.entries(fields)
+      .filter(([, value]) => value !== null && value !== undefined && value !== "")
+      .map(([key]) => [key, hasRawText ? 0.72 : 0.35]),
+  ) as DocumentExtractionConfidence;
+}
+
+function correctionConfidence(fields: DocumentExtractionFields): DocumentExtractionConfidence {
+  return Object.fromEntries(
+    Object.entries(fields)
+      .filter(([, value]) => value !== null && value !== undefined && value !== "")
+      .map(([key]) => [key, 1]),
+  ) as DocumentExtractionConfidence;
+}
+
+function normalizedOptionalText(value: string | null | undefined) {
+  const normalized = value?.trim();
+  return normalized ? normalized : null;
+}
+
+function decimalAmountToMinor(value: string) {
+  const normalized = value.replace(",", ".");
+  const [major = "0", minor = ""] = normalized.split(".");
+  const sign = major.trim().startsWith("-") ? -1 : 1;
+  const majorDigits = major.replace(/[^0-9]/g, "");
+  const minorDigits = minor
+    .replace(/[^0-9]/g, "")
+    .padEnd(2, "0")
+    .slice(0, 2);
+
+  return sign * (Number(majorDigits || "0") * 100 + Number(minorDigits || "0"));
 }
 
 function documentObjectKey(

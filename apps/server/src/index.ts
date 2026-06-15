@@ -24,6 +24,7 @@ import { evlog, type EvlogVariables } from "evlog/hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
+import { processDocumentExtractionJob } from "./document-extraction";
 import { createR2DocumentObjectStorage } from "./document-storage";
 import { createCloudflareOutboxQueuePublisher } from "./outbox-queue";
 import { publishTenantSyncInvalidation } from "./tenant-sync";
@@ -288,6 +289,14 @@ function safeHeaderFileName(fileName: string) {
 async function handleQueueMessage(message: Message<DawnQueueMessage>, env: DawnCloudflareBindings) {
   if (message.body.type === "sync.invalidate") {
     await publishTenantSyncInvalidation(env, message.body);
+  }
+
+  if (message.body.type === "document.extract") {
+    await processDocumentExtractionJob({
+      repository: new DrizzleTransactionReviewRepository(),
+      storage: createR2DocumentObjectStorage(env.DAWN_DOCUMENTS),
+      message: message.body,
+    });
   }
 }
 

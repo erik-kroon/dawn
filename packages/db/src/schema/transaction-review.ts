@@ -478,6 +478,87 @@ export const documentVersion = pgTable(
   ],
 );
 
+export const inboxSource = pgTable(
+  "inbox_source",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    type: text("type").notNull(),
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("inbox_source_team_type_name_idx").on(table.teamId, table.type, table.name),
+  ],
+);
+
+export const inboxItem = pgTable(
+  "inbox_item",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    sourceId: text("source_id")
+      .notNull()
+      .references(() => inboxSource.id, { onDelete: "cascade" }),
+    sourceType: text("source_type").notNull(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => businessDocument.id, { onDelete: "cascade" }),
+    documentVersionId: text("document_version_id")
+      .notNull()
+      .references(() => documentVersion.id, { onDelete: "cascade" }),
+    status: text("status").default("pending_extraction").notNull(),
+    extractionStatus: text("extraction_status").default("pending").notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("inbox_item_document_version_idx").on(table.teamId, table.documentVersionId),
+    index("inbox_item_team_status_idx").on(table.teamId, table.status),
+    index("inbox_item_team_updated_idx").on(table.teamId, table.updatedAt),
+  ],
+);
+
+export const documentExtraction = pgTable(
+  "document_extraction",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    inboxItemId: text("inbox_item_id")
+      .notNull()
+      .references(() => inboxItem.id, { onDelete: "cascade" }),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => businessDocument.id, { onDelete: "cascade" }),
+    documentVersionId: text("document_version_id")
+      .notNull()
+      .references(() => documentVersion.id, { onDelete: "cascade" }),
+    extractionVersion: integer("extraction_version").notNull(),
+    source: text("source").notNull(),
+    status: text("status").notNull(),
+    fields: jsonb("fields").$type<Record<string, unknown>>().notNull(),
+    confidence: jsonb("confidence").$type<Record<string, unknown>>().notNull(),
+    rawText: text("raw_text"),
+    error: text("error"),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("document_extraction_version_idx").on(table.inboxItemId, table.extractionVersion),
+    index("document_extraction_team_idx").on(table.teamId, table.createdAt),
+  ],
+);
+
 export const idempotencyKey = pgTable(
   "idempotency_key",
   {
@@ -519,6 +600,9 @@ export const teamRelations = relations(team, ({ many }) => ({
   providerObjects: many(providerObject),
   documents: many(businessDocument),
   documentVersions: many(documentVersion),
+  inboxSources: many(inboxSource),
+  inboxItems: many(inboxItem),
+  documentExtractions: many(documentExtraction),
 }));
 
 export const teamMembershipRelations = relations(teamMembership, ({ one }) => ({

@@ -12,7 +12,7 @@ import { Input } from "@dawn/ui/components/input";
 import { Label } from "@dawn/ui/components/label";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 
 import { authClient } from "@/lib/auth-client";
 import { useTransactionSync } from "@/sync/transactions";
@@ -42,6 +42,9 @@ function RouteComponent() {
     categoryId: "",
   });
   const [documentFile, setDocumentFile] = useState<File | null>(null);
+  const [extractionCorrections, setExtractionCorrections] = useState<
+    Record<string, ExtractionCorrectionState>
+  >({});
   const [syncReviewError, setSyncReviewError] = useState<string | null>(null);
   const [syncReviewingId, setSyncReviewingId] = useState<string | null>(null);
 
@@ -78,6 +81,10 @@ function RouteComponent() {
   });
   const documents = useQuery({
     ...orpc.documents.list.queryOptions({ input: { teamId: currentTeamId } }),
+    enabled: Boolean(currentTeamId),
+  });
+  const inbox = useQuery({
+    ...orpc.inbox.list.queryOptions({ input: { teamId: currentTeamId } }),
     enabled: Boolean(currentTeamId),
   });
   const teamDirectory = useQuery({
@@ -165,6 +172,7 @@ function RouteComponent() {
     onSuccess: async () => {
       setDocumentFile(null);
       await queryClient.invalidateQueries({ queryKey: orpc.documents.list.queryKey() });
+      await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
     },
   });
   const documentDownloadMutation = useMutation({
@@ -175,6 +183,18 @@ function RouteComponent() {
       window.location.assign(result.downloadUrl);
     },
   });
+  const extractionCorrectionMutation = useMutation(
+    orpc.inbox.correctExtraction.mutationOptions({
+      onSuccess: async (result) => {
+        setExtractionCorrections((corrections) => {
+          const next = { ...corrections };
+          delete next[result.inboxItem.id];
+          return next;
+        });
+        await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
+      },
+    }),
+  );
   const csvCommitMutation = useMutation(
     orpc.csvImport.commit.mutationOptions({
       onSuccess: async () => {
@@ -578,6 +598,112 @@ function RouteComponent() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Inbox review</CardTitle>
+          <CardDescription>
+            Uploaded documents become reviewable inbox items after asynchronous extraction.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {transactionReview.data ? (
+            <div className="grid gap-3">
+              <div className="overflow-hidden border">
+                {inbox.data?.inboxItems.map((item) => {
+                  const draft =
+                    extractionCorrections[item.id] ??
+                    extractionFieldsToCorrectionState(item.latestExtraction?.fields);
+
+                  return (
+                    <div className="grid gap-3 border-b p-3 last:border-b-0" key={item.id}>
+                      <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <p className="font-medium">{item.document?.title ?? item.documentId}</p>
+                          <p className="text-muted-foreground">
+                            {item.sourceType.replace("_", " ")} · {item.status.replace("_", " ")} ·{" "}
+                            extraction {item.extractionStatus}
+                          </p>
+                        </div>
+                        <p className="font-mono text-xs text-muted-foreground">
+                          {item.latestExtraction
+                            ? `v${item.latestExtraction.extractionVersion} · ${item.latestExtraction.source.replace("_", " ")}`
+                            : "pending"}
+                        </p>
+                      </div>
+                      <div className="grid gap-2 md:grid-cols-4">
+                        <CorrectionInput
+                          itemId={item.id}
+                          initial={draft}
+                          label="Merchant"
+                          onChange={setExtractionCorrections}
+                          value={draft.merchantName}
+                          field="merchantName"
+                        />
+                        <CorrectionInput
+                          itemId={item.id}
+                          initial={draft}
+                          label="Date"
+                          onChange={setExtractionCorrections}
+                          value={draft.issuedAt}
+                          field="issuedAt"
+                        />
+                        <CorrectionInput
+                          itemId={item.id}
+                          initial={draft}
+                          label="Amount"
+                          onChange={setExtractionCorrections}
+                          value={draft.totalAmount}
+                          field="totalAmount"
+                        />
+                        <CorrectionInput
+                          itemId={item.id}
+                          initial={draft}
+                          label="Currency"
+                          onChange={setExtractionCorrections}
+                          value={draft.currency}
+                          field="currency"
+                        />
+                      </div>
+                      {item.latestExtraction ? (
+                        <p className="text-xs text-muted-foreground">
+                          Confidence: {formatExtractionConfidence(item.latestExtraction.confidence)}
+                        </p>
+                      ) : null}
+                      <div className="flex justify-end">
+                        <Button
+                          disabled={
+                            extractionCorrectionMutation.isPending || !transactionReview.data.teamId
+                          }
+                          onClick={() =>
+                            extractionCorrectionMutation.mutate({
+                              teamId: transactionReview.data.teamId,
+                              inboxItemId: item.id,
+                              fields: correctionStateToExtractionFields(draft),
+                              idempotencyKey: crypto.randomUUID(),
+                            })
+                          }
+                          variant="outline"
+                        >
+                          Save corrections
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+                {inbox.data?.inboxItems.length === 0 ? (
+                  <p className="p-3 text-sm text-muted-foreground">No inbox items yet.</p>
+                ) : null}
+              </div>
+              {extractionCorrectionMutation.error ? (
+                <p className="text-sm text-destructive">
+                  {extractionCorrectionMutation.error.message}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>CSV transaction import</CardTitle>
           <CardDescription>
             Imported rows use the same ledger normalization, duplicate detection, audit, and outbox
@@ -841,6 +967,15 @@ type CsvImportPreviewData = {
   }[];
 };
 
+type ExtractionCorrectionState = {
+  merchantName: string;
+  issuedAt: string;
+  totalAmount: string;
+  currency: string;
+};
+
+type ExtractionCorrectionField = keyof ExtractionCorrectionState;
+
 function canImportCsv(csvText: string, accountId: string, mapping: CsvImportMappingState) {
   return (
     csvText.trim().length > 0 &&
@@ -861,6 +996,62 @@ function normalizedCsvMapping(mapping: CsvImportMappingState) {
   };
 }
 
+function extractionFieldsToCorrectionState(
+  fields?: {
+    merchantName?: string | null;
+    issuedAt?: string | null;
+    totalAmountMinor?: number | null;
+    currency?: string | null;
+  } | null,
+): ExtractionCorrectionState {
+  return {
+    merchantName: fields?.merchantName ?? "",
+    issuedAt: fields?.issuedAt ?? "",
+    totalAmount:
+      typeof fields?.totalAmountMinor === "number"
+        ? (fields.totalAmountMinor / 100).toFixed(2)
+        : "",
+    currency: fields?.currency ?? "",
+  };
+}
+
+function correctionStateToExtractionFields(state: ExtractionCorrectionState) {
+  return {
+    merchantName: state.merchantName.trim() || null,
+    issuedAt: state.issuedAt.trim() || null,
+    totalAmountMinor: decimalInputToMinor(state.totalAmount),
+    currency: state.currency.trim().toUpperCase() || null,
+  };
+}
+
+function decimalInputToMinor(value: string) {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  const [major = "0", minor = ""] = trimmed.replace(",", ".").split(".");
+  const sign = major.startsWith("-") ? -1 : 1;
+  const majorDigits = major.replace(/[^0-9]/g, "");
+  const minorDigits = minor
+    .replace(/[^0-9]/g, "")
+    .padEnd(2, "0")
+    .slice(0, 2);
+
+  return sign * (Number(majorDigits || "0") * 100 + Number(minorDigits || "0"));
+}
+
+function formatExtractionConfidence(confidence: Record<string, number | undefined>) {
+  const entries = Object.entries(confidence).filter(([, value]) => typeof value === "number");
+
+  if (entries.length === 0) {
+    return "none";
+  }
+
+  return entries.map(([key, value]) => `${key}: ${Math.round((value ?? 0) * 100)}%`).join(" · ");
+}
+
 function formatBytes(byteSize: number) {
   if (byteSize < 1024) {
     return `${byteSize} B`;
@@ -871,6 +1062,40 @@ function formatBytes(byteSize: number) {
   }
 
   return `${(byteSize / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function CorrectionInput({
+  field,
+  initial,
+  itemId,
+  label,
+  onChange,
+  value,
+}: {
+  field: ExtractionCorrectionField;
+  initial: ExtractionCorrectionState;
+  itemId: string;
+  label: string;
+  onChange: Dispatch<SetStateAction<Record<string, ExtractionCorrectionState>>>;
+  value: string;
+}) {
+  return (
+    <Label className="flex flex-col gap-1 text-sm">
+      {label}
+      <Input
+        onChange={(event) =>
+          onChange((corrections) => ({
+            ...corrections,
+            [itemId]: {
+              ...(corrections[itemId] ?? initial),
+              [field]: event.target.value,
+            },
+          }))
+        }
+        value={value}
+      />
+    </Label>
+  );
 }
 
 function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {

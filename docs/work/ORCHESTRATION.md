@@ -54,7 +54,7 @@ pass, and the implementing agent has inspected the diff.
 | 10  | Banking Provider Adapter Interface And Mock Provider         | Verified foundation, live manual sync blocked            | Slices 4, 8              | Adapter/app/API tests; migration; dashboard/server smoke; typecheck/check.                                               |
 | 11  | First Real Banking Provider                                  | Blocked on provider choice/credentials                   | Slice 10                 | Sandbox/provider tests; webhook signature tests; manual sandbox connection.                                              |
 | 12  | Documents And R2 Storage                                     | Verified foundation, manual upload/download blocked      | Slices 3, 7, 8           | Metadata/permission tests; R2 mock/local test; web/server smoke.                                                         |
-| 13  | Inbox And Document Extraction Pipeline                       | Not started                                              | Slice 12                 | Extraction schema tests; worker tests; manual inbox review.                                                              |
+| 13  | Inbox And Document Extraction Pipeline                       | Verified foundation, manual inbox review blocked         | Slice 12                 | Extraction/job/app/API/server tests; migration; web/server smoke.                                                        |
 | 14  | Inbox-To-Transaction Matching                                | Not started                                              | Slices 4, 13             | Matching domain tests; accept/reject tests; manual samples.                                                              |
 | 15  | Customers And Invoice Drafts                                 | Not started                                              | Slices 3, 4              | Invoice totals/state tests; customer/draft tests; manual draft.                                                          |
 | 16  | Invoice Delivery, PDF, Payments, And Recurrence              | Not started                                              | Slices 15, 8             | Lifecycle tests; send/payment tests; sandbox/dev email manual flow.                                                      |
@@ -173,6 +173,12 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 12     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 225 files.                                                                                     |
 | 2026-06-15 slice 12     | `bun run --filter server build`                                                                                                                                                                                                                                                                                              | Pass    | Server Worker bundle built successfully after adding document upload/download routes.                                                        |
 | 2026-06-15 slice 12     | `bun run dev:web` + `env SKIP_ENV_VALIDATION=true POLAR_ACCESS_TOKEN=dummy ... bun run dev:server` + browser open `http://localhost:3001/` and `/dashboard`                                                                                                                                                                  | Partial | Web shell and unauthenticated redirect loaded with no console errors; authenticated document-panel upload/download remains blocked.          |
+| 2026-06-15 slice 13     | `bun run db:generate`                                                                                                                                                                                                                                                                                                        | Pass    | Generated `packages/db/src/migrations/0008_blue_misty_knight.sql` for inbox sources, inbox items, and document extraction versions.          |
+| 2026-06-15 slice 13     | `bun test packages/jobs/src/index.test.ts packages/app/src/documents.test.ts packages/app/src/inbox-extraction.test.ts apps/server/src/document-extraction.test.ts packages/api/src/router.test.ts`                                                                                                                          | Pass    | 25 tests passed for extraction job contract, inbox creation, deterministic extraction, corrections, worker success/failure, and API routes.  |
+| 2026-06-15 slice 13     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 229 files.                                                                                     |
+| 2026-06-15 slice 13     | `bun run --filter server build`                                                                                                                                                                                                                                                                                              | Pass    | Server Worker bundle built successfully after adding document extraction queue processing.                                                   |
+| 2026-06-15 slice 13     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed; Vite reported the existing large chunk warning.                                                       |
+| 2026-06-15 slice 13     | `bun run dev:web` + `env SKIP_ENV_VALIDATION=true POLAR_ACCESS_TOKEN=dummy ... bun run dev:server` + browser open `http://localhost:3001/` and `/dashboard`                                                                                                                                                                  | Partial | Web shell and unauthenticated redirect loaded with no console errors; authenticated inbox review remains blocked.                            |
 
 ## Commit Log
 
@@ -191,7 +197,7 @@ pass, and the implementing agent has inspected the diff.
 | `f926ce5` | Outbox dispatcher queue bridge       | Added job contracts, app dispatcher, outbox retry metadata, persisted job runs, Cloudflare queue publisher, and trigger.   |
 | `0a83b5c` | Tenant realtime fanout               | Added transaction realtime protocol, TenantCoordinator fanout, queue invalidation bridge, and web subscription refetch.    |
 | `28d9e47` | Mock banking provider sync           | Added provider adapter package, mock bank sync use cases, persistence, API routes, dashboard status, and migration.        |
-| `c2ef645` | Documents and R2 storage             | Added document metadata/versioning, signed R2 upload/download flow, protected API routes, dashboard panel, and migration.   |
+| `c2ef645` | Documents and R2 storage             | Added document metadata/versioning, signed R2 upload/download flow, protected API routes, dashboard panel, and migration.  |
 
 ## Implementation Notes
 
@@ -296,6 +302,16 @@ adds `document` and `document_version`, and the dashboard includes a compact
 documents panel that uploads file bytes to the signed URL and requests signed
 downloads through the protected API.
 
+Slice 13 foundation added `inbox_source`, `inbox_item`, and
+`document_extraction` tables with versioned extraction results. Completing a
+document upload now creates a document-upload inbox item and emits a
+`document.uploaded` payload that the jobs package maps to a `document.extract`
+queue message. The server queue handler reads the R2 object, runs a deterministic
+local extractor through the app use case, and persists extraction fields plus
+confidence. The API exposes inbox list and extraction correction routes, and the
+dashboard has an inbox review panel that displays extracted fields, confidence,
+and saves user corrections as new extraction versions with audit/outbox events.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -340,3 +356,7 @@ downloads through the protected API.
   local or preview database with an R2-compatible `DAWN_DOCUMENTS` binding.
   Current verification covers app/API/server contracts, signer behavior, memory
   object storage, server bundle, and unauthenticated web-shell smoke.
+- Slice 13 still needs authenticated manual review against a migrated local or
+  preview runtime with Queue and R2 bindings. Current verification covers
+  deterministic extraction contracts, worker success/failure paths, correction
+  persistence, API routes, server bundle, and unauthenticated web-shell smoke.
