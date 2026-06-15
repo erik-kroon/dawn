@@ -62,7 +62,7 @@ pass, and the implementing agent has inspected the diff.
 | 18  | Reporting And Weekly Insights                                | Verified foundation, authenticated dashboard review blocked | Slices 4, 14, 16, 17     | Report fixture tests; mocked insight tests; job/API tests; typecheck/check; HTTP/browser smoke.                          |
 | 19  | TanStack AI Assistant Read And Suggest Tools                 | Verified foundation, authenticated assistant review blocked | Slice 18                 | Tool schema tests; app/API permission tests; migration; typecheck/check; HTTP/browser smoke.                             |
 | 20  | AI Draft, Mutate, And Approval Gates                         | Verified foundation, authenticated approval flow blocked    | Slice 19                 | Approval-gated draft/mutate/send tests; API tests; migration; typecheck/check; HTTP/browser smoke.                       |
-| 21  | AI Evaluation Harness                                        | Not started                                                 | Slices 19, 20            | Eval runner with deterministic fixtures.                                                                                 |
+| 21  | AI Evaluation Harness                                        | Verified deterministic foundation, provider evals blocked   | Slices 19, 20            | Deterministic eval fixtures, runner, release gate, focused tests, typecheck/check.                                       |
 | 22  | Automation Rules                                             | Not started                                                 | Slices 8, 20             | Trigger/action tests; manual event-driven automation.                                                                    |
 | 23  | Public API, OAuth Apps, API Keys, And Webhooks               | Not started                                                 | Slices 3, 8              | API contract tests; scope tests; webhook retry/failure tests.                                                            |
 | 24  | Accounting, Payments, Messaging, And Email Provider Adapters | Not started                                                 | Slices 16, 23            | Adapter contract tests; sandbox tests where available; manual status review.                                             |
@@ -212,6 +212,10 @@ pass, and the implementing agent has inspected the diff.
 | 2026-06-15 slice 20     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
 | 2026-06-15 slice 20     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 249 files.                                                                                                         |
 | 2026-06-15 slice 20     | `curl -I http://localhost:3001/` and `/dashboard`; Browser navigation to `/dashboard` with local API server                                                                                                                                                                                                                  | Partial | Vite served both routes with 200 responses; Browser redirected `/dashboard` to `/login` with no warnings/errors, so authenticated approval flow remains blocked. |
+| 2026-06-15 slice 21     | `bun test packages/ai/src/insights.test.ts packages/ai/src/evals.test.ts`                                                                                                                                                                                                                                                    | Pass    | 8 tests passed for deterministic eval fixtures, release-gate metrics, actionable failures, and tool/insight contracts.                                           |
+| 2026-06-15 slice 21     | `bun run eval:ai`                                                                                                                                                                                                                                                                                                            | Pass    | Deterministic eval gate passed: 8/8 cases, 100% accuracy, zero false mutations, hallucinated sources, permission failures, and refusal failures.                 |
+| 2026-06-15 slice 21     | `bun run check-types`                                                                                                                                                                                                                                                                                                        | Pass    | Full workspace typecheck/build passed with the existing Vite large chunk warning.                                                                                |
+| 2026-06-15 slice 21     | `bun run check`                                                                                                                                                                                                                                                                                                              | Pass    | `oxlint` passed and `oxfmt --write` formatted 253 files.                                                                                                         |
 
 ## Commit Log
 
@@ -239,6 +243,7 @@ pass, and the implementing agent has inspected the diff.
 | `d9ecab3` | Reporting and insight foundation     | Added source-cited report queries, weekly insight jobs, persisted insights, protected API route, and dashboard overview.         |
 | `4a9aaf3` | Assistant read and suggest tools     | Added permissioned assistant tool schemas, persisted conversations/tool calls, protected routes, and dashboard assistant UI.     |
 | `1299415` | Assistant approval gates             | Added approval-gated assistant draft, mutation, and invoice-send actions backed by app use cases, API routes, UI, and migration. |
+| `2e1e371` | AI evaluation harness                | Added deterministic AI eval fixtures, runner, CLI release gate, tests, and short release-gate guidance.                          |
 
 ## Implementation Notes
 
@@ -422,6 +427,15 @@ events, and keeps external side effects behind explicit approval. Postgres now
 stores `assistant_action_approval`, the API exposes approve/reject routes, and
 the dashboard shows pending action previews with approve/reject controls.
 
+Slice 21 foundation added `packages/ai/src/evals.ts` with deterministic fixtures
+and a runner for transaction categorization, inbox matching, receipt extraction,
+invoice drafting, cashflow explanation, tool selection, refusal behavior, and
+permission enforcement. The runner records per-category accuracy, cost, latency,
+false positives, false mutations, hallucinated sources, permission/refusal
+failures, and correction acceptance, then applies a strict release gate through
+`bun run eval:ai`. `docs/ai/EVALUATIONS.md` documents the verification path for
+AI tool, prompt, provider, retrieval, and approval-policy changes.
+
 ## Blockers And Watch Items
 
 - Live banking, payment, email, AI, and Cloudflare provider work may require
@@ -492,3 +506,8 @@ the dashboard shows pending action previews with approve/reject controls.
   migrated local or preview database. Current verification covers approval
   persistence, permission-gated execution, app/API contracts, migration
   generation, typecheck/check, HTTP smoke, and Browser unauthenticated redirect.
+- Slice 21 still needs eval runs against a configured AI provider and a larger
+  production-like fixture corpus before it should be treated as product-quality
+  AI confidence. Current verification covers deterministic fixtures, mocked
+  provider metrics, release-gate behavior, typecheck/check, and failure
+  actionability.
