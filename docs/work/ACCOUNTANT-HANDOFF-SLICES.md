@@ -51,7 +51,7 @@ Live Gmail OAuth and email delivery should not block completion of local product
 | 3. CSV Import Wizard Parity Plus                        | Completed   | Added header auto-detection, mapped column selectors, sign inversion, richer preview metadata, duplicate visibility, synchronous commit, queued large-import sessions, R2-backed payload handoff, worker execution, payload cleanup, and operations-page queued feedback.                                    |
 | 4. Gmail Connector Production Readiness                 | Local backend/runtime hardening completed | Gmail config health, scheduled/manual sync locking, skipped-count reporting, and deterministic provider-boundary tests landed. Live OAuth smoke remains blocked on Google credentials and a test mailbox.                                                                                                    |
 | 5. Receipt Matching Parity Plus                         | Completed   | Bidirectional transaction/inbox suggestions, hard-negative feedback, expired suggestion revival, and focused domain/app/job tests landed. Browser smoke remains deferred while inbox/transactions UI files are under concurrent coss work.                                                                   |
-| 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, signed download links, skipped attachment counts, exported-after-storage status, packet download token policy, and accountant email-link delivery landed. Visible export history UI and live email provider setup remain open. |
+| 6. Accountant Export Package Depth                      | Partial     | CSV/XLSX selection, delimiter choice, manifest hashes, attachments, queued packet storage, worker processing, signed download links, skipped attachment counts, exported-after-storage status, packet download token policy, accountant email-link delivery, and failed export telemetry landed. Visible export history UI and live email provider setup remain open. |
 | 7. Accountant Access And Handoff Audit                  | Partial     | Accountant role can view/export ready packets without transaction categorization or other unsafe write permissions. Stored packet records, export history API, signed download/email audits, revocable packet links, and email-only handoff API exist; visible history UI and failed-send audit remain open. |
 | 8. Operational Hardening And Accountant Close Loop      | Partial     | Operations API now returns selected-period accountant close readiness from lifecycle states. Operations UI, representative monthly fixture, and retry affordances remain open.                                                                                                                                |
 
@@ -411,9 +411,9 @@ Status: Partially completed on 2026-06-15 for synchronous package format depth:
 CSV/XLSX selection, CSV delimiter, manifest hashes, attachments, skipped
 attachment counts, exported transaction state, and queued object-storage export
 processing, durable packet records, signed download link creation, scoped
-accountant packet download token policy, and accountant email-link delivery
-through a provider boundary. Visible export history UI and live email provider
-setup remain open.
+accountant packet download token policy, accountant email-link delivery through
+a provider boundary, and failed export telemetry that leaves transactions
+retryable. Visible export history UI and live email provider setup remain open.
 
 ## Scope
 
@@ -448,7 +448,7 @@ setup remain open.
 - [x] The user can download the export through a signed link.
 - [x] The user can send the package to an accountant email address.
 - [x] Successful exports mark transactions exported and remove them from the ready queue.
-- [ ] Failed exports are visible, retryable, and do not mark transactions exported.
+- [x] Failed exports are visible, retryable, and do not mark transactions exported.
 
 ## Verification
 
@@ -475,6 +475,9 @@ setup remain open.
   provider message IDs, audit, outbox, and idempotent replay.
 - Live transactional email provider setup remains open; local behavior is covered
   through the mock email provider boundary.
+- `bun test apps/server/src/accountant-packet-export.test.ts` passed: 2 tests.
+- Worker tests cover failed archive storage writing redacted audit, outbox, and
+  job-run telemetry while leaving ready transactions unexported for retry.
 - Browser smoke for export settings modal and download.
 - Open the produced ZIP and verify file names, CSV rows, manifest counts, and attachment presence.
 - `bun run check-types` passed.
