@@ -3,6 +3,7 @@ import type {
   InboxMatchCandidate,
   InboxMatchSuggestion,
   TeamMatchAlias,
+  TeamMatchFeedback,
   Transaction,
 } from "@dawn/domain";
 import { suggestInboxTransactionMatches } from "@dawn/domain";
@@ -95,6 +96,10 @@ export type TeamAlias = TeamMatchAlias & {
   id: string;
   teamId: string;
   createdAt: string;
+};
+
+export type MatchFeedback = TeamMatchFeedback & {
+  teamId: string;
 };
 
 export type HardNegativeTransactionMatch = {
@@ -388,6 +393,7 @@ export type InboxRepository = {
     failedAt: Date;
   }): Promise<InboxItem>;
   listTeamAliases(teamId: string): Promise<TeamAlias[]>;
+  listTeamMatchFeedback(teamId: string): Promise<MatchFeedback[]>;
   listHardNegativeMatches(
     teamId: string,
     inboxItemId: string,
@@ -969,9 +975,10 @@ export async function generateInboxMatchSuggestions(
     "You cannot read transactions for this team",
   );
 
-  const [inboxItem, aliases, hardNegatives] = await Promise.all([
+  const [inboxItem, aliases, feedback, hardNegatives] = await Promise.all([
     repository.getInboxItemForTeam(command.teamId, command.inboxItemId),
     repository.listTeamAliases(command.teamId),
+    repository.listTeamMatchFeedback(command.teamId),
     repository.listHardNegativeMatches(command.teamId, command.inboxItemId),
   ]);
 
@@ -995,6 +1002,7 @@ export async function generateInboxMatchSuggestions(
     candidates,
     {
       aliases,
+      feedback,
       hardNegatives,
     },
   )
@@ -1065,13 +1073,14 @@ export async function matchPendingInboxForTransaction(
     }
 
     const limit = normalizeMatchCandidateLimit(command.limit);
-    const [candidateInboxItems, aliases] = await Promise.all([
+    const [candidateInboxItems, aliases, feedback] = await Promise.all([
       inboxRepository.listInboxMatchCandidatesForTransaction({
         teamId: command.teamId,
         transaction,
         limit,
       }),
       inboxRepository.listTeamAliases(command.teamId),
+      inboxRepository.listTeamMatchFeedback(command.teamId),
     ]);
     const persistedSuggestions: InboxTransactionMatchSuggestion[] = [];
 
@@ -1094,6 +1103,7 @@ export async function matchPendingInboxForTransaction(
         ],
         {
           aliases,
+          feedback,
           hardNegatives,
         },
       ).filter((candidate) => candidate.score >= 0.35);

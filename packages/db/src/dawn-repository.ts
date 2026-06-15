@@ -19,6 +19,7 @@ import type {
   InboxSource,
   InboxSourceType,
   JobRun,
+  MatchFeedback,
   OutboxDispatchRepository,
   OutboxEvent,
   ProviderSyncRun,
@@ -1302,6 +1303,71 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       .orderBy(desc(schema.teamAlias.createdAt));
 
     return aliases.map(mapTeamAlias);
+  }
+
+  async listTeamMatchFeedback(teamId: string): Promise<MatchFeedback[]> {
+    const rows = await this.client
+      .select({
+        suggestion: schema.inboxMatchSuggestion,
+        extraction: schema.documentExtraction,
+        transaction: schema.transaction,
+      })
+      .from(schema.inboxMatchSuggestion)
+      .innerJoin(
+        schema.documentExtraction,
+        eq(schema.documentExtraction.inboxItemId, schema.inboxMatchSuggestion.inboxItemId),
+      )
+      .innerJoin(
+        schema.transaction,
+        eq(schema.transaction.id, schema.inboxMatchSuggestion.transactionId),
+      )
+      .where(
+        and(
+          eq(schema.inboxMatchSuggestion.teamId, teamId),
+          inArray(schema.inboxMatchSuggestion.status, ["accepted", "rejected"]),
+        ),
+      )
+      .orderBy(
+        desc(schema.inboxMatchSuggestion.updatedAt),
+        desc(schema.documentExtraction.extractionVersion),
+      )
+      .limit(400);
+    const latestRowsBySuggestion = new Map<string, (typeof rows)[number]>();
+
+    for (const row of rows) {
+      if (!latestRowsBySuggestion.has(row.suggestion.id)) {
+        latestRowsBySuggestion.set(row.suggestion.id, row);
+      }
+    }
+
+    const feedbackByKey = new Map<string, MatchFeedback>();
+
+    for (const row of latestRowsBySuggestion.values()) {
+      const source =
+        typeof row.extraction.fields.merchantName === "string"
+          ? row.extraction.fields.merchantName
+          : null;
+      const target = row.transaction.description;
+      const status = row.suggestion.status === "accepted" ? "accepted" : "rejected";
+
+      if (!source || !target) {
+        continue;
+      }
+
+      const key = `${status}:${source}:${target}`;
+      const existing = feedbackByKey.get(key);
+
+      feedbackByKey.set(key, {
+        teamId,
+        source,
+        target,
+        status,
+        count: (existing?.count ?? 0) + 1,
+        lastOccurredAt: existing?.lastOccurredAt ?? row.suggestion.updatedAt.toISOString(),
+      });
+    }
+
+    return [...feedbackByKey.values()];
   }
 
   async listHardNegativeMatches(

@@ -110,6 +110,24 @@ class MemoryMatchingRepository {
     return this.aliases.filter((alias) => alias.teamId === teamId);
   }
 
+  async listTeamMatchFeedback(teamId: string) {
+    return [...this.suggestions.values()]
+      .filter(
+        (suggestion) =>
+          suggestion.teamId === teamId &&
+          (suggestion.status === "accepted" || suggestion.status === "rejected"),
+      )
+      .map((suggestion) => ({
+        teamId,
+        source: this.inboxItem.latestExtraction?.fields.merchantName ?? "",
+        target: suggestion.transaction?.description ?? "",
+        status: suggestion.status as "accepted" | "rejected",
+        count: 1,
+        lastOccurredAt: suggestion.updatedAt,
+      }))
+      .filter((feedback) => feedback.source && feedback.target);
+  }
+
   async listHardNegativeMatches(teamId: string, inboxItemId: string) {
     return this.hardNegatives.filter(
       (match) => match.teamId === teamId && match.inboxItemId === inboxItemId,
@@ -492,6 +510,13 @@ describe("inbox matching use cases", () => {
     });
     expect(repository.auditEvents).toHaveLength(1);
     expect(repository.outboxEvents).toHaveLength(1);
+    expect(await repository.listTeamMatchFeedback("team_1")).toMatchObject([
+      {
+        source: "Figma Inc",
+        target: "Figma Inc INV-100",
+        status: "accepted",
+      },
+    ]);
   });
 
   test("rejects a suggestion and remembers the hard negative", async () => {
@@ -512,6 +537,13 @@ describe("inbox matching use cases", () => {
     expect(rejected.suggestion.status).toBe("rejected");
     expect(repository.hardNegatives).toMatchObject([
       { inboxItemId: "inbox_1", transactionId: "txn_1", reason: "wrong receipt" },
+    ]);
+    expect(await repository.listTeamMatchFeedback("team_1")).toMatchObject([
+      {
+        source: "Figma Inc",
+        target: "Figma Inc INV-100",
+        status: "rejected",
+      },
     ]);
 
     const next = await generateInboxMatchSuggestions(

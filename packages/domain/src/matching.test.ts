@@ -87,6 +87,111 @@ describe("inbox transaction matching", () => {
     expect(suggestions[0]?.explanation).toContain("Team alias links merchant to this counterparty");
   });
 
+  test("uses accepted feedback to strengthen future merchant pairs", () => {
+    const baseline = suggestInboxTransactionMatches(baseInput, [
+      {
+        transaction: transaction({ id: "txn_feedback", description: "Figma subscription" }),
+        counterpartyName: "Figma",
+      },
+    ]);
+    const withFeedback = suggestInboxTransactionMatches(
+      baseInput,
+      [
+        {
+          transaction: transaction({ id: "txn_feedback", description: "Figma subscription" }),
+          counterpartyName: "Figma",
+        },
+      ],
+      {
+        feedback: [
+          {
+            source: "Figma Inc",
+            target: "Figma subscription",
+            status: "accepted",
+            count: 2,
+            lastOccurredAt: "2026-06-14T00:00:00.000Z",
+          },
+        ],
+      },
+    );
+
+    expect(withFeedback[0]?.score ?? 0).toBeGreaterThan(baseline[0]?.score ?? 0);
+    expect(withFeedback[0]?.signals.feedback).toBeGreaterThan(0);
+    expect(withFeedback[0]?.explanation).toContain("Team feedback supports this match");
+  });
+
+  test("decays similar rejected feedback without permanently blocking matches", () => {
+    const baseline = suggestInboxTransactionMatches(baseInput, [
+      {
+        transaction: transaction({ id: "txn_feedback_penalty", description: "Figma subscription" }),
+        counterpartyName: "Figma",
+      },
+    ]);
+    const penalized = suggestInboxTransactionMatches(
+      baseInput,
+      [
+        {
+          transaction: transaction({
+            id: "txn_feedback_penalty",
+            description: "Figma subscription",
+          }),
+          counterpartyName: "Figma",
+        },
+      ],
+      {
+        feedbackReferenceAt: "2026-06-14T00:00:00.000Z",
+        feedback: [
+          {
+            source: "Figma Inc",
+            target: "Figma subscription",
+            status: "rejected",
+            count: 3,
+            lastOccurredAt: "2026-03-01T00:00:00.000Z",
+          },
+        ],
+      },
+    );
+
+    expect(penalized[0]?.transactionId).toBe("txn_feedback_penalty");
+    expect(penalized[0]?.score ?? 0).toBeLessThan(baseline[0]?.score ?? 0);
+    expect(penalized[0]?.signals.feedback).toBeLessThan(0);
+  });
+
+  test("lets repeated confirmations override stale negative feedback", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      baseInput,
+      [
+        {
+          transaction: transaction({ id: "txn_feedback_override", description: "Figma subscription" }),
+          counterpartyName: "Figma",
+        },
+      ],
+      {
+        feedbackReferenceAt: "2026-06-14T00:00:00.000Z",
+        feedback: [
+          {
+            source: "Figma Inc",
+            target: "Figma subscription",
+            status: "rejected",
+            count: 3,
+            lastOccurredAt: "2025-12-01T00:00:00.000Z",
+          },
+          {
+            source: "Figma Inc",
+            target: "Figma subscription",
+            status: "accepted",
+            count: 3,
+            lastOccurredAt: "2026-06-14T00:00:00.000Z",
+          },
+        ],
+      },
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_feedback_override");
+    expect(suggestions[0]?.signals.feedback).toBeGreaterThan(0);
+    expect(suggestions[0]?.explanation).toContain("Team feedback supports this match");
+  });
+
   test("uses sender text as a supporting signal", () => {
     const suggestions = suggestInboxTransactionMatches(
       {

@@ -2,7 +2,7 @@
 
 Triage: ready-for-agent
 Publication: Local repo artifact. No project issue tracker or remote is assumed.
-Status: Slice 4 implemented; Slice 5 next
+Status: Slice 5 implemented; Slice 6 next
 Date: 2026-06-15
 Source material: `docs/PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, Dawn matching code, and Midday reference matching docs/code under `ref/midday`.
 
@@ -295,18 +295,27 @@ Make confirmed, rejected, and unmatched outcomes improve future matches per team
 
 ## Acceptance Criteria
 
-- [ ] Accepting a match strengthens future merchant/counterparty pairs for that team.
-- [ ] Rejecting a match suppresses the exact inbox/transaction pair.
-- [ ] Repeated similar declines lower future confidence but do not permanently block all matches.
-- [ ] Repeated confirmations can override stale negatives.
-- [ ] Feedback is strictly team-scoped.
-- [ ] Suggestion status history provides enough evidence for calibration.
+- [x] Accepting a match strengthens future merchant/counterparty pairs for that team.
+- [x] Rejecting a match suppresses the exact inbox/transaction pair.
+- [x] Repeated similar declines lower future confidence but do not permanently block all matches.
+- [x] Repeated confirmations can override stale negatives.
+- [x] Feedback is strictly team-scoped.
+- [x] Suggestion status history provides enough evidence for calibration.
+
+## Implementation Notes
+
+- Added team-scoped accepted/rejected feedback memory derived from suggestion status history.
+- Passing feedback into forward and reverse matching alongside aliases and hard negatives.
+- Added deterministic recency decay using the feedback set reference timestamp rather than wall-clock time.
+- Exact hard negatives still suppress exact pairs; similar rejected feedback applies only as a recoverable score penalty.
+- App tests now assert accepted/rejected feedback persistence from existing accept/reject flows.
 
 ## Verification
 
-- Domain tests for alias boost, exact hard-negative suppression, decayed negative penalty, confirmation override, and team isolation.
-- App tests for accepted/rejected feedback persistence.
-- `bun run check-types`
+- [x] Domain tests for alias boost, exact hard-negative suppression, decayed negative penalty, confirmation override, and team isolation through team-scoped feedback input.
+- [x] App tests for accepted/rejected feedback persistence.
+- [x] `bun test packages/domain/src/matching.test.ts packages/app/src/inbox-matching.test.ts`
+- [x] `bun run check-types`
 
 ## Dependencies
 

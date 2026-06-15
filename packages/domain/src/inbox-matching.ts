@@ -51,6 +51,7 @@ export type MatchSignals = {
   senderDomain?: MatchSignal;
   documentText?: MatchSignal;
   alias?: MatchSignal;
+  feedback?: MatchSignal;
   hardNegative?: MatchSignal;
   risk?: MatchSignal;
 };
@@ -96,6 +97,14 @@ export type TeamMatchAlias = {
   target: string;
 };
 
+export type TeamMatchFeedback = {
+  source: string;
+  target: string;
+  status: "accepted" | "rejected";
+  count?: number;
+  lastOccurredAt?: string | null;
+};
+
 export type HardNegativeMatch = {
   inboxItemId: string;
   transactionId: string;
@@ -104,6 +113,8 @@ export type HardNegativeMatch = {
 export type InboxMatchMemory = {
   aliases?: readonly TeamMatchAlias[];
   hardNegatives?: readonly HardNegativeMatch[];
+  feedback?: readonly TeamMatchFeedback[];
+  feedbackReferenceAt?: string | null;
 };
 
 export type InboxMatchConfidence = "low" | "medium" | "high";
@@ -119,6 +130,7 @@ export type InboxMatchSignalScores = {
   senderDomain?: number;
   documentText?: number;
   alias?: number;
+  feedback?: number;
   hardNegative?: number;
   risk?: number;
 };
@@ -370,6 +382,17 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
     });
   }
 
+  const feedbackSignal = teamFeedbackSignal({
+    merchantName: candidate.document.fields.merchantName,
+    searchText,
+    feedback: candidate.memory?.feedback ?? [],
+    referenceAt: candidate.memory?.feedbackReferenceAt,
+  });
+
+  if (feedbackSignal) {
+    addSignal(signals, explanation, "feedback", feedbackSignal);
+  }
+
   addConservativeRiskSignals(signals, explanation, candidate.document.fields);
 
   const score = clampMatchScore(
@@ -423,6 +446,7 @@ function legacySignalScores(signals: MatchSignals): InboxMatchSignalScores {
     senderDomain: signals.senderDomain?.score,
     documentText: signals.documentText?.score,
     alias: signals.alias?.score,
+    feedback: signals.feedback?.score,
     hardNegative: signals.hardNegative?.score,
     risk: signals.risk?.score,
   };
@@ -776,6 +800,121 @@ function normalizeNameTokens(value: string | null | undefined) {
     .split(" ")
     .map((token) => token.trim())
     .filter((token) => token.length > 0 && !companySuffixes.has(token));
+}
+
+function teamFeedbackSignal(input: {
+  merchantName: string | null | undefined;
+  searchText: string;
+  feedback: readonly TeamMatchFeedback[];
+  referenceAt?: string | null;
+}): MatchSignal | null {
+  const matchingFeedback = input.feedback.filter((entry) =>
+    feedbackAppliesToPair(input.merchantName, input.searchText, entry),
+  );
+
+  if (matchingFeedback.length === 0) {
+    return null;
+  }
+
+  const referenceAt = input.referenceAt ?? latestFeedbackTimestamp(matchingFeedback);
+  const acceptedScore = matchingFeedback
+    .filter((entry) => entry.status === "accepted")
+    .reduce((total, entry) => total + feedbackEntryWeight(entry), 0);
+  const rejectedScore = matchingFeedback
+    .filter((entry) => entry.status === "rejected")
+    .reduce((total, entry) => total + feedbackEntryWeight(entry, referenceAt), 0);
+  const score = clampFeedbackScore(acceptedScore - rejectedScore);
+
+  if (score === 0) {
+    return null;
+  }
+
+  return {
+    score,
+    matched: true,
+    reason: score > 0 ? "Team feedback supports this match" : "Team feedback weakens this match",
+    evidence: {
+      acceptedScore: clampMatchScore(acceptedScore),
+      rejectedScore: clampMatchScore(rejectedScore),
+      feedbackCount: matchingFeedback.reduce((total, entry) => total + feedbackCount(entry), 0),
+    },
+  };
+}
+
+function feedbackAppliesToPair(
+  merchantName: string | null | undefined,
+  searchText: string,
+  entry: TeamMatchFeedback,
+) {
+  const merchantMatchesSource = nameSimilarityScore(merchantName, [entry.source]) >= 0.8;
+  const merchantMatchesTarget = nameSimilarityScore(merchantName, [entry.target]) >= 0.8;
+  const sourceMatchesTransaction = feedbackTargetMatchesSearchText(entry.source, searchText);
+  const targetMatchesTransaction = feedbackTargetMatchesSearchText(entry.target, searchText);
+
+  return (
+    (merchantMatchesSource && targetMatchesTransaction) ||
+    (merchantMatchesTarget && sourceMatchesTransaction)
+  );
+}
+
+function feedbackTargetMatchesSearchText(target: string, searchText: string) {
+  const normalizedTarget = normalizeSearchText(target);
+
+  return (
+    Boolean(normalizedTarget && searchTextIncludesTerm(searchText, normalizedTarget)) ||
+    nameSimilarityScore(target, [searchText]) >= 0.8
+  );
+}
+
+function feedbackEntryWeight(entry: TeamMatchFeedback, referenceAt?: string | null) {
+  const count = feedbackCount(entry);
+  const base = Math.min(entry.status === "accepted" ? 0.08 : 0.12, count * 0.04);
+  return entry.status === "rejected"
+    ? base * negativeFeedbackDecay(entry.lastOccurredAt, referenceAt)
+    : base;
+}
+
+function feedbackCount(entry: TeamMatchFeedback) {
+  return Math.max(1, Math.min(10, entry.count ?? 1));
+}
+
+function negativeFeedbackDecay(
+  lastOccurredAt: string | null | undefined,
+  referenceAt: string | null | undefined,
+) {
+  if (!lastOccurredAt || !referenceAt) {
+    return 1;
+  }
+
+  const occurredAt = new Date(lastOccurredAt);
+  const referenceDate = new Date(referenceAt);
+
+  if (Number.isNaN(occurredAt.getTime()) || Number.isNaN(referenceDate.getTime())) {
+    return 1;
+  }
+
+  const ageDays = Math.max(0, (referenceDate.getTime() - occurredAt.getTime()) / 86_400_000);
+
+  if (ageDays <= 30) {
+    return 1;
+  }
+
+  if (ageDays <= 90) {
+    return 0.6;
+  }
+
+  return 0.25;
+}
+
+function latestFeedbackTimestamp(feedback: readonly TeamMatchFeedback[]) {
+  return feedback
+    .map((entry) => entry.lastOccurredAt)
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0];
+}
+
+function clampFeedbackScore(score: number) {
+  return Math.max(-0.12, Math.min(0.08, Math.round(score * 100) / 100));
 }
 
 function addConservativeRiskSignals(
