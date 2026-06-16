@@ -6,6 +6,7 @@ import { defineConfig } from "vite-plus";
 export default defineConfig({
   server: {
     port: 3001,
+    strictPort: true,
   },
   resolve: {
     tsconfigPaths: true,

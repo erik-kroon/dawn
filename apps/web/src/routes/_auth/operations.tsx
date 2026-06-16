@@ -7,6 +7,7 @@ import {
   detectCsvTransactionColumnMapping,
   formatMoney,
   parseCsvTransactionRows,
+  type Money,
 } from "@dawn/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useBlocker, useNavigate } from "@tanstack/react-router";
@@ -69,6 +70,13 @@ type CsvImportPreviewData = {
   readyCount: number;
   duplicateCount: number;
   invalidCount: number;
+  summary: {
+    readyDateRange: { from: string; to: string } | null;
+    readyCurrencyTotals: Record<string, Money>;
+    readyIncomeCount: number;
+    readyExpenseCount: number;
+    readyZeroAmountCount: number;
+  };
   headers: string[];
   detectedMapping: {
     postedAt?: string | null;
@@ -138,6 +146,10 @@ function OperationsRoute() {
     invertAmount: false,
     categoryId: "",
   });
+  const [csvPreviewFingerprint, setCsvPreviewFingerprint] = useState<string | null>(null);
+  const [csvCommitAcknowledgementFingerprint, setCsvCommitAcknowledgementFingerprint] = useState<
+    string | null
+  >(null);
   const [accountantClosePeriod, setAccountantClosePeriod] = useState<AccountantClosePeriodState>(
     () => defaultAccountantClosePeriod(),
   );
@@ -416,9 +428,23 @@ function OperationsRoute() {
       onSuccess: async () => {
         await queryClient.invalidateQueries({ queryKey: orpc.transactionReview.list.queryKey() });
         await queryClient.invalidateQueries({ queryKey: orpc.ledger.summary.queryKey() });
+        await queryClient.invalidateQueries({ queryKey: orpc.operations.list.queryKey() });
       },
     }),
   );
+  const csvImportDraftFingerprint = useMemo(
+    () =>
+      csvImportInputFingerprint({
+        accountId: csvAccountId,
+        csvText,
+        mapping: csvMapping,
+      }),
+    [csvAccountId, csvMapping, csvText],
+  );
+  const hasCurrentCsvPreview =
+    Boolean(csvPreviewMutation.data) && csvPreviewFingerprint === csvImportDraftFingerprint;
+  const hasCsvCommitAcknowledgement =
+    hasCurrentCsvPreview && csvCommitAcknowledgementFingerprint === csvImportDraftFingerprint;
   const hasCsvImportDraft =
     Boolean(csvFileName || csvText.trim() || csvPreviewMutation.data) && !csvCommitMutation.data;
   const csvRows = useMemo(() => {
@@ -433,6 +459,10 @@ function OperationsRoute() {
     }
   }, [csvText]);
   const csvHeaders = useMemo(() => Object.keys(csvRows[0]?.values ?? {}), [csvRows]);
+
+  useEffect(() => {
+    setCsvCommitAcknowledgementFingerprint(null);
+  }, [csvImportDraftFingerprint]);
 
   useBlocker({
     disabled: !hasCsvImportDraft,
@@ -1366,6 +1396,8 @@ function OperationsRoute() {
                     }
                     csvPreviewMutation.reset();
                     csvCommitMutation.reset();
+                    setCsvPreviewFingerprint(null);
+                    setCsvCommitAcknowledgementFingerprint(null);
                   }}
                   type="file"
                 />
@@ -1477,11 +1509,20 @@ function OperationsRoute() {
                     return;
                   }
 
-                  csvPreviewMutation.mutate({
+                  const previewInput = {
                     teamId: currentTeamId,
                     accountId: csvAccountId,
                     csvText,
                     mapping: normalizedCsvMapping(csvMapping),
+                  };
+                  const previewFingerprint = csvImportDraftFingerprint;
+
+                  setCsvPreviewFingerprint(null);
+                  setCsvCommitAcknowledgementFingerprint(null);
+                  csvPreviewMutation.reset();
+                  csvCommitMutation.reset();
+                  csvPreviewMutation.mutate(previewInput, {
+                    onSuccess: () => setCsvPreviewFingerprint(previewFingerprint),
                   });
                 }}
                 variant="outline"
@@ -1492,6 +1533,9 @@ function OperationsRoute() {
                 disabled={
                   !currentTeamId ||
                   csvCommitMutation.isPending ||
+                  !canImportCsv(csvText, csvAccountId, csvMapping) ||
+                  !hasCurrentCsvPreview ||
+                  !hasCsvCommitAcknowledgement ||
                   (csvPreviewMutation.data?.readyCount ?? 0) === 0
                 }
                 onClick={() => {
@@ -1512,14 +1556,40 @@ function OperationsRoute() {
                 Commit ready rows
               </Button>
             </div>
-            {csvPreviewMutation.data ? (
-              <CsvImportPreview preview={csvPreviewMutation.data} />
+            {csvPreviewMutation.data && !hasCurrentCsvPreview ? (
+              <p className="text-sm text-muted-foreground">
+                Preview is stale after CSV, account, or mapping changes. Preview again before
+                committing.
+              </p>
+            ) : null}
+            {csvPreviewMutation.data && hasCurrentCsvPreview ? (
+              <>
+                <CsvImportPreview preview={csvPreviewMutation.data} />
+                <label className="flex items-start gap-3 border border-border bg-card/30 p-3 text-sm">
+                  <Checkbox
+                    aria-label="Acknowledge CSV preview checks"
+                    checked={hasCsvCommitAcknowledgement}
+                    onCheckedChange={(checked) =>
+                      setCsvCommitAcknowledgementFingerprint(
+                        checked ? csvImportDraftFingerprint : null,
+                      )
+                    }
+                  />
+                  <span className="grid gap-1">
+                    <span className="font-medium">Preview reviewed</span>
+                    <span className="text-xs leading-5 text-muted-foreground">
+                      Account, date range, amount signs, duplicate rows, and invalid rows are
+                      understood for this CSV.
+                    </span>
+                  </span>
+                </label>
+              </>
             ) : null}
             {csvCommitMutation.data ? (
               <p className="text-sm text-muted-foreground">
                 {csvCommitMutation.data.mode === "queued"
-                  ? `Queued ${csvCommitMutation.data.preview.readyCount} ready rows for background import. Track the job in Operational trace.`
-                  : `Imported ${csvCommitMutation.data.importSession.importedCount} transactions.`}
+                  ? `Queued ${csvCommitMutation.data.preview.readyCount} ready rows for background import. ${csvCommitMutation.data.importSession.duplicateCount} duplicate, ${csvCommitMutation.data.importSession.invalidCount} invalid, ${csvCommitMutation.data.importSession.rowCount} total. Track the job in Operational trace.`
+                  : `Imported ${csvCommitMutation.data.importSession.importedCount} transactions. ${csvCommitMutation.data.importSession.duplicateCount} duplicate, ${csvCommitMutation.data.importSession.invalidCount} invalid, ${csvCommitMutation.data.importSession.rowCount} total.`}
               </p>
             ) : null}
             <ErrorText error={csvPreviewMutation.error} />
@@ -1688,7 +1758,13 @@ function OperationsRoute() {
                 </div>
               );
             })}
-            {canExportPackets && !packetExports.data?.packets.length ? (
+            {canExportPackets && packetExports.isLoading ? (
+              <Muted>Loading stored accountant packet exports...</Muted>
+            ) : null}
+            {canExportPackets && packetExports.isError ? (
+              <Muted>Packet export history is unavailable. Check packet export migrations.</Muted>
+            ) : null}
+            {canExportPackets && packetExports.data && packetExports.data.packets.length === 0 ? (
               <Muted>No stored accountant packet exports yet.</Muted>
             ) : null}
             {!canExportPackets ? (
@@ -1950,6 +2026,18 @@ function normalizedCsvMapping(mapping: CsvImportMappingState) {
   };
 }
 
+function csvImportInputFingerprint(input: {
+  accountId: string;
+  csvText: string;
+  mapping: CsvImportMappingState;
+}) {
+  return JSON.stringify({
+    accountId: input.accountId,
+    csvText: input.csvText,
+    mapping: normalizedCsvMapping(input.mapping),
+  });
+}
+
 function mappingStateFromDetected(mapping: {
   postedAt?: string | null;
   description?: string | null;
@@ -2028,6 +2116,35 @@ function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
         <span>Date: {detected.postedAt || "not detected"}</span>
         <span>Amount: {detected.amount || detected.debit || "not detected"}</span>
       </div>
+      <div className="grid gap-2 border border-border/70 p-2 text-xs sm:grid-cols-3">
+        <p>
+          <span className="block text-muted-foreground">Ready date range</span>
+          <span className="font-medium">
+            {preview.summary.readyDateRange
+              ? formatDateRange(
+                  preview.summary.readyDateRange.from,
+                  preview.summary.readyDateRange.to,
+                )
+              : "No ready rows"}
+          </span>
+        </p>
+        <p>
+          <span className="block text-muted-foreground">Ready signed total</span>
+          <span className="font-medium">{csvPreviewTotalsLabel(preview.summary)}</span>
+        </p>
+        <p>
+          <span className="block text-muted-foreground">Ready row signs</span>
+          <span className="font-medium">
+            {preview.summary.readyExpenseCount} expense · {preview.summary.readyIncomeCount} income
+            {preview.summary.readyZeroAmountCount > 0
+              ? ` · ${preview.summary.readyZeroAmountCount} zero`
+              : ""}
+          </span>
+        </p>
+      </div>
+      {detected.amount && detected.invertAmount ? (
+        <p className="text-xs text-warning">Amount column is inverted for preview normalization.</p>
+      ) : null}
       <div className="max-h-64 overflow-auto border border-border">
         {preview.rows.slice(0, 25).map((row) => (
           <div
@@ -2050,6 +2167,16 @@ function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
       </div>
     </div>
   );
+}
+
+function csvPreviewTotalsLabel(previewSummary: CsvImportPreviewData["summary"]) {
+  const totals = Object.values(previewSummary.readyCurrencyTotals);
+
+  if (totals.length === 0) {
+    return "No ready rows";
+  }
+
+  return totals.map((money) => formatMoney(money)).join(" · ");
 }
 
 function mappedCsvValue(values: Record<string, string>, column: string, fallback: string) {

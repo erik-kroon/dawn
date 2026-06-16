@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import {
   createEmailInboxTokenCodec,
+  createGmailEmailInboxProvider,
   createMockEmailInboxProvider,
+  EmailInboxProviderAuthError,
   emailInboxArtifactFileName,
   emailInboxEvidenceDeduplicationKey,
   InboxConnector,
@@ -66,5 +68,46 @@ describe("email inbox connector", () => {
       "coffee-shop-receipt-mock_message_body_1.txt",
     );
     expect(new Set(synced.evidence.map(emailInboxEvidenceDeduplicationKey)).size).toBe(2);
+  });
+
+  test("redacts raw Gmail token exchange failure responses", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = Object.assign(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: "invalid_grant",
+            error_description: "bad secret GOCSPX-do-not-surface-this-value",
+          }),
+          { status: 400 },
+        ),
+      { preconnect: originalFetch.preconnect },
+    ) as typeof fetch;
+
+    try {
+      const provider = createGmailEmailInboxProvider({
+        clientId: "1234567890-test.apps.googleusercontent.com",
+        clientSecret: "GOCSPX-abcdefghijklmnopqrstuvwxyz",
+      });
+      let capturedError: unknown;
+
+      try {
+        await provider.exchangeCodeForTokens({
+          code: "oauth_code_1",
+          redirectUrl: "http://localhost:3001/inbox",
+        });
+      } catch (error) {
+        capturedError = error;
+      }
+
+      expect(capturedError).toBeInstanceOf(EmailInboxProviderAuthError);
+      expect((capturedError as Error).message).toBe(
+        "Gmail token exchange failed with 400 (invalid_grant)",
+      );
+      expect((capturedError as Error).message).not.toContain("GOCSPX");
+      expect((capturedError as Error).message).not.toContain("bad secret");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

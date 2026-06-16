@@ -1,11 +1,23 @@
 import { polar, checkout, portal } from "@polar-sh/better-auth";
 import { createDb } from "@dawn/db";
 import * as schema from "@dawn/db/schema/auth";
+import { googleEmailInboxScopes, resolveGoogleOAuthCredentials } from "@dawn/env/google-oauth";
 import { env } from "@dawn/env/server";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 
+import {
+  googleAuthTokensFromAccessTokenResult,
+  googleAuthTokensFromRefreshResult,
+  type GoogleAuthAccountTokens,
+} from "./google-tokens";
 import { polarClient } from "./lib/payments";
+
+export {
+  googleAuthTokensFromAccessTokenResult,
+  googleAuthTokensFromRefreshResult,
+  type GoogleAuthAccountTokens,
+} from "./google-tokens";
 
 function resolveTrustedOrigins(configuredOrigin: string) {
   const origins = [configuredOrigin];
@@ -53,6 +65,18 @@ function defaultCookieAttributesForAuthUrl(authUrl: string) {
 export function createAuth() {
   const db = createDb();
   const plugins = [];
+  const googleOAuthCredentials = resolveGoogleOAuthCredentials(env);
+  const googleSocialProvider = googleOAuthCredentials
+    ? {
+        google: {
+          clientId: googleOAuthCredentials.clientId,
+          clientSecret: googleOAuthCredentials.clientSecret,
+          scope: googleEmailInboxScopes,
+          accessType: "offline" as const,
+          prompt: "select_account consent" as const,
+        },
+      }
+    : undefined;
 
   if (polarClient && env.POLAR_SUCCESS_URL) {
     plugins.push(
@@ -87,6 +111,11 @@ export function createAuth() {
     emailAndPassword: {
       enabled: true,
     },
+    socialProviders: googleSocialProvider,
+    account: {
+      encryptOAuthTokens: true,
+      updateAccountOnSignIn: true,
+    },
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL,
     advanced: {
@@ -97,3 +126,57 @@ export function createAuth() {
 }
 
 export const auth = createAuth();
+
+export async function getGoogleAuthAccountTokensForUser(
+  userId: string,
+): Promise<GoogleAuthAccountTokens | null> {
+  const refreshed = await getRefreshedGoogleAuthAccountTokensForUser(userId);
+
+  if (refreshed) {
+    return refreshed;
+  }
+
+  return getCurrentGoogleAuthAccountTokensForUser(userId);
+}
+
+async function getRefreshedGoogleAuthAccountTokensForUser(
+  userId: string,
+): Promise<GoogleAuthAccountTokens | null> {
+  try {
+    const tokens = await auth.api.refreshToken({
+      body: {
+        providerId: "google",
+        userId,
+      },
+    });
+
+    if (!tokens.accessToken) {
+      return null;
+    }
+
+    return googleAuthTokensFromRefreshResult(tokens);
+  } catch {
+    return null;
+  }
+}
+
+async function getCurrentGoogleAuthAccountTokensForUser(
+  userId: string,
+): Promise<GoogleAuthAccountTokens | null> {
+  try {
+    const tokens = await auth.api.getAccessToken({
+      body: {
+        providerId: "google",
+        userId,
+      },
+    });
+
+    if (!tokens.accessToken) {
+      return null;
+    }
+
+    return googleAuthTokensFromAccessTokenResult(tokens);
+  } catch {
+    return null;
+  }
+}

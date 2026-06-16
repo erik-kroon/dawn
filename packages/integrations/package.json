@@ -14,7 +14,8 @@
     "check-types": "tsgo --noEmit"
   },
   "dependencies": {
-    "@dawn/domain": "workspace:*"
+    "@dawn/domain": "workspace:*",
+    "@dawn/env": "workspace:*"
   },
   "devDependencies": {
     "@dawn/config": "workspace:*",

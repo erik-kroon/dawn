@@ -394,7 +394,7 @@ function TrackerRoute() {
                           {formatMoney(totals.value)}
                         </TableCell>
                         <TableCell>
-                          <Badge variant={project.status === "active" ? "outline" : "muted"}>
+                          <Badge variant={project.status === "active" ? "outline" : "secondary"}>
                             {project.status === "active" ? "In progress" : "Completed"}
                           </Badge>
                         </TableCell>

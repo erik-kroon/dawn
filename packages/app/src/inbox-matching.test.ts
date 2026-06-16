@@ -11,7 +11,13 @@ import {
   type InboxTransactionMatchSuggestion,
   type TeamAlias,
 } from "./index";
-import type { Actor, InboxMatchSuggestion, TeamRole, Transaction } from "@dawn/domain";
+import type {
+  Actor,
+  InboxMatchSuggestion,
+  TeamRole,
+  Transaction,
+  TransactionAccountantStatus,
+} from "@dawn/domain";
 
 class MemoryMatchingRepository {
   role: TeamRole = "member";
@@ -99,6 +105,42 @@ class MemoryMatchingRepository {
         (transaction) => transaction.teamId === teamId && transaction.id === transactionId,
       ) ?? null
     );
+  }
+
+  async countTransactionAttachmentsForTeam(input: { teamId: string; transactionId: string }) {
+    return this.attachments.filter(
+      (attachment) =>
+        attachment.transactionId === input.transactionId &&
+        this.transactions.some(
+          (transaction) =>
+            transaction.teamId === input.teamId && transaction.id === input.transactionId,
+        ),
+    ).length;
+  }
+
+  async updateTransactionAccountantStatusForTeam(input: {
+    teamId: string;
+    transactionId: string;
+    accountantStatus: TransactionAccountantStatus;
+    reason?: string | null;
+  }) {
+    const index = this.transactions.findIndex(
+      (transaction) =>
+        transaction.teamId === input.teamId && transaction.id === input.transactionId,
+    );
+
+    if (index === -1) {
+      throw new Error("Transaction not found");
+    }
+
+    const updated = {
+      ...this.transactions[index]!,
+      accountantStatus: input.accountantStatus,
+      accountantStatusReason: input.reason ?? null,
+      accountantStatusUpdatedAt: "2026-06-14T00:00:00.000Z",
+    };
+    this.transactions[index] = updated;
+    return updated;
   }
 
   async listTransactionsForReport(input: { teamId: string }) {
@@ -433,6 +475,7 @@ describe("inbox matching use cases", () => {
       status: "accepted",
     });
     expect(repository.attachments).toEqual([{ transactionId: "txn_1", documentId: "doc_1" }]);
+    expect(repository.transactions[0]?.accountantStatus).toBe("receipt_found");
     expect(repository.inboxItem.status).toBe("resolved");
     expect(repository.auditEvents).toHaveLength(1);
     expect(repository.outboxEvents).toMatchObject([{ type: "inbox_match.auto_matched" }]);
@@ -446,6 +489,7 @@ describe("inbox matching use cases", () => {
 
     expect(rejected.suggestion.status).toBe("rejected");
     expect(repository.attachments).toEqual([]);
+    expect(repository.transactions[0]?.accountantStatus).toBe("needs_review");
     expect(repository.inboxItem.status).toBe("needs_review");
     expect(repository.hardNegatives).toMatchObject([
       { inboxItemId: "inbox_1", transactionId: "txn_1", reason: "wrong auto-match" },
@@ -459,6 +503,35 @@ describe("inbox matching use cases", () => {
         }),
       ]),
     );
+  });
+
+  test("moves reviewed transactions into and out of ready-to-export when receipt matches change", async () => {
+    const repository = new MemoryMatchingRepository();
+    repository.transactions = [{ ...repository.transactions[0]!, reviewState: "reviewed" }];
+    const generated = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      { teamId: "team_1", inboxItemId: "inbox_1" },
+    );
+
+    await acceptInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: generated.suggestions[0]?.id ?? "",
+      idempotencyKey: "accept_ready_1",
+    });
+
+    expect(repository.attachments).toEqual([{ transactionId: "txn_1", documentId: "doc_1" }]);
+    expect(repository.transactions[0]?.accountantStatus).toBe("ready_to_export");
+
+    await rejectInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: generated.suggestions[0]?.id ?? "",
+      reason: "wrong receipt",
+      idempotencyKey: "reject_ready_1",
+    });
+
+    expect(repository.attachments).toEqual([]);
+    expect(repository.transactions[0]?.accountantStatus).toBe("missing_receipt");
   });
 
   test("ranks multiple bounded transaction candidates through repository retrieval", async () => {

@@ -187,6 +187,14 @@ export type CsvTransactionImportPreviewRow = {
   draft: LedgerTransactionDraft | null;
 };
 
+export type CsvTransactionImportPreviewSummary = {
+  readyDateRange: { from: string; to: string } | null;
+  readyCurrencyTotals: Record<string, Money>;
+  readyIncomeCount: number;
+  readyExpenseCount: number;
+  readyZeroAmountCount: number;
+};
+
 export type CsvTransactionImportPreview = {
   teamId: string;
   accountId: string;
@@ -197,6 +205,7 @@ export type CsvTransactionImportPreview = {
   readyCount: number;
   duplicateCount: number;
   invalidCount: number;
+  summary: CsvTransactionImportPreviewSummary;
 };
 
 export type TransactionImportSession = {
@@ -2799,7 +2808,45 @@ async function buildCsvImportPreview(
     readyCount: previewRows.filter((row) => row.status === "ready").length,
     duplicateCount: previewRows.filter((row) => row.status === "duplicate").length,
     invalidCount: previewRows.filter((row) => row.status === "invalid").length,
+    summary: csvImportPreviewSummary(previewRows),
   };
+}
+
+function csvImportPreviewSummary(
+  rows: readonly CsvTransactionImportPreviewRow[],
+): CsvTransactionImportPreviewSummary {
+  const readyDrafts = rows
+    .filter((row) => row.status === "ready" && row.draft)
+    .map((row) => row.draft!);
+  const postedTimes = readyDrafts.map((draft) => new Date(draft.postedAt).getTime());
+  const readyDateRange =
+    postedTimes.length > 0
+      ? {
+          from: new Date(Math.min(...postedTimes)).toISOString(),
+          to: new Date(Math.max(...postedTimes)).toISOString(),
+        }
+      : null;
+
+  return {
+    readyDateRange,
+    readyCurrencyTotals: moneyTotals(readyDrafts.map((draft) => draft.money)),
+    readyIncomeCount: readyDrafts.filter((draft) => draft.money.amountMinor > 0).length,
+    readyExpenseCount: readyDrafts.filter((draft) => draft.money.amountMinor < 0).length,
+    readyZeroAmountCount: readyDrafts.filter((draft) => draft.money.amountMinor === 0).length,
+  };
+}
+
+function moneyTotals(moneyValues: readonly Money[]) {
+  const totals: Record<string, Money> = {};
+
+  for (const money of moneyValues) {
+    totals[money.currency] = {
+      currency: money.currency,
+      amountMinor: (totals[money.currency]?.amountMinor ?? 0) + money.amountMinor,
+    };
+  }
+
+  return totals;
 }
 
 function normalizeLedgerTransactionDraft(

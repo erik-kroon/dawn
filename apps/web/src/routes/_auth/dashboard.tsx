@@ -2,7 +2,7 @@ import { Button } from "@dawn/ui/components/button";
 import { Input } from "@dawn/ui/components/input";
 import { formatMoney } from "@dawn/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import {
   BarChart3Icon,
   BotIcon,
@@ -200,7 +200,7 @@ function RouteComponent() {
               </span>
             </p>
             <MiniBars />
-            <WidgetFoot href="/transactions">See detailed graph</WidgetFoot>
+            <WidgetFoot to="/transactions">See detailed graph</WidgetFoot>
           </DashboardWidget>
 
           <DashboardWidget>
@@ -213,7 +213,7 @@ function RouteComponent() {
               and runway is
             </p>
             <p className="mt-auto pb-5 text-2xl font-medium">n/a</p>
-            <WidgetFoot href="/operations">See burnrate</WidgetFoot>
+            <WidgetFoot to="/operations">See burnrate</WidgetFoot>
           </DashboardWidget>
 
           <DashboardWidget>
@@ -222,7 +222,7 @@ function RouteComponent() {
               <span className="text-foreground">{documentCount} uploaded files</span> available for
               review and extraction
             </p>
-            <WidgetFoot href="/inbox">Show documents</WidgetFoot>
+            <WidgetFoot to="/inbox">Show documents</WidgetFoot>
           </DashboardWidget>
 
           <DashboardWidget>
@@ -231,7 +231,7 @@ function RouteComponent() {
             <p className="mt-auto pb-5 text-2xl font-medium">
               {formatMoney(report?.totals.expenses ?? { amountMinor: 0, currency: "USD" })}
             </p>
-            <WidgetFoot href="/transactions">See biggest cost</WidgetFoot>
+            <WidgetFoot to="/transactions">See biggest cost</WidgetFoot>
           </DashboardWidget>
 
           <DashboardWidget>
@@ -241,7 +241,7 @@ function RouteComponent() {
               <span className="text-foreground">{report?.unpaidInvoices.length ?? 0} unpaid</span>{" "}
               and <span className="text-foreground">{draftInvoiceCount} draft</span> invoices
             </p>
-            <WidgetFoot href="/operations">See unpaid invoices</WidgetFoot>
+            <WidgetFoot to="/operations">See unpaid invoices</WidgetFoot>
           </DashboardWidget>
 
           <DashboardWidget>
@@ -250,7 +250,7 @@ function RouteComponent() {
               <span className="text-foreground">{pendingInboxCount || inboxFallbackCount}</span>{" "}
               items need document or transaction review
             </p>
-            <WidgetFoot href="/inbox">Review inbox</WidgetFoot>
+            <WidgetFoot to="/inbox">Review inbox</WidgetFoot>
           </DashboardWidget>
 
           <DashboardWidget>
@@ -263,23 +263,22 @@ function RouteComponent() {
               this period
             </p>
             <MiniLine />
-            <WidgetFoot href="/transactions">See which subscriptions went up?</WidgetFoot>
+            <WidgetFoot to="/transactions">See which subscriptions went up?</WidgetFoot>
           </DashboardWidget>
         </div>
 
         <div className="flex flex-wrap justify-center gap-2">
           {[
-            { href: "/transactions", label: "Revenue", icon: BarChart3Icon },
-            { href: "/operations", label: "Duplicate invoice", icon: ReceiptTextIcon },
-            { href: "/transactions", label: "Expenses", icon: WalletCardsIcon },
-            { href: "/tracker", label: "Time track", icon: TimerIcon },
-            { href: "/inbox", label: "Upload", icon: UploadIcon },
-          ].map(({ href, icon: Icon, label }) => (
+            { to: "/transactions", label: "Revenue", icon: BarChart3Icon },
+            { to: "/operations", label: "Duplicate invoice", icon: ReceiptTextIcon },
+            { to: "/transactions", label: "Expenses", icon: WalletCardsIcon },
+            { to: "/tracker", label: "Time track", icon: TimerIcon },
+            { to: "/inbox", label: "Upload", icon: UploadIcon },
+          ].map(({ to, icon: Icon, label }) => (
             <Button
               className="border-border"
               key={label}
-              nativeButton={false}
-              render={<a href={href} />}
+              render={<Link to={to} />}
               size="sm"
               variant="outline"
             >
@@ -385,14 +384,20 @@ function WidgetLabel({ icon: Icon, label }: { icon?: typeof BarChart3Icon; label
   );
 }
 
-function WidgetFoot({ children, href }: { children: ReactNode; href: string }) {
+function WidgetFoot({
+  children,
+  to,
+}: {
+  children: ReactNode;
+  to: "/inbox" | "/operations" | "/transactions";
+}) {
   return (
-    <a
+    <Link
       className="mt-auto pt-6 text-xs text-muted-foreground transition-colors duration-150 ease-out hover:text-foreground"
-      href={href}
+      to={to}
     >
       {children}
-    </a>
+    </Link>
   );
 }
 

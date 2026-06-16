@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  connectEmailInboxFromProviderToken,
   completeEmailInboxOAuth,
+  createEmailInboxOAuthStateCodec,
   createEmailInboxAuthorizationUrl,
   listEmailInboxWorkspace,
   requestDueEmailInboxSyncs,
@@ -498,6 +500,28 @@ const context = {
   requestId: "request_1",
   teamId: "team_1",
 };
+const oauthRedirectUrl = "http://localhost:3000/inbox";
+const oauthStateCodec = createEmailInboxOAuthStateCodec({
+  secret: "test_oauth_state_secret_that_is_long_enough",
+  allowedRedirectOrigins: ["http://localhost:3000"],
+  now: () => new Date("2026-06-15T10:00:00.000Z"),
+});
+
+function createOAuthState(
+  input: {
+    teamId?: string;
+    actorId?: string;
+    provider?: "mock-email-inbox";
+    redirectUrl?: string;
+  } = {},
+) {
+  return oauthStateCodec.createState({
+    teamId: input.teamId ?? "team_1",
+    actorId: input.actorId ?? "user_1",
+    provider: input.provider ?? "mock-email-inbox",
+    redirectUrl: input.redirectUrl ?? oauthRedirectUrl,
+  });
+}
 
 function createEmailInboxConnectors(provider: EmailInboxProvider = createMockEmailInboxProvider()) {
   return [
@@ -520,28 +544,38 @@ describe("email inbox use cases", () => {
     const authorization = await createEmailInboxAuthorizationUrl(
       repository as unknown as DawnRepository,
       connectors,
+      oauthStateCodec,
       context,
       {
         teamId: "team_1",
         provider: "mock-email-inbox",
-        redirectUrl: "http://localhost:3000/inbox/oauth/callback",
-        state: "state_1",
+        redirectUrl: oauthRedirectUrl,
       },
     );
     const connected = await completeEmailInboxOAuth(
       repository as unknown as DawnRepository,
       connectors,
+      oauthStateCodec,
       context,
       {
         teamId: "team_1",
         provider: "mock-email-inbox",
         code: "oauth_code_1",
-        redirectUrl: "http://localhost:3000/inbox/oauth/callback",
+        redirectUrl: oauthRedirectUrl,
+        state: authorization.state,
         idempotencyKey: "email_oauth_1",
       },
     );
+    const workspace = await listEmailInboxWorkspace(
+      repository as unknown as DawnRepository,
+      connectors,
+      context,
+      { teamId: "team_1" },
+    );
 
-    expect(authorization.authorizationUrl).toContain("state=state_1");
+    expect(authorization.authorizationUrl).toContain(
+      `state=${encodeURIComponent(authorization.state)}`,
+    );
     expect(connected.connection).toMatchObject({
       category: "email",
       provider: "mock-email-inbox",
@@ -552,7 +586,141 @@ describe("email inbox use cases", () => {
     expect(repository.connections.get(connected.connection.id)?.tokenCiphertext).not.toContain(
       "mock_refresh",
     );
+    expect(workspace.connections[0]?.grantedScopes).toEqual(["email.inbox.readonly"]);
     expect(repository.outboxEvents.at(-1)).toMatchObject({ type: "email_inbox.connected" });
+  });
+
+  test("stores an encrypted email inbox connection from provider tokens", async () => {
+    const repository = new MemoryEmailInboxRepository();
+
+    const connected = await connectEmailInboxFromProviderToken(
+      repository as unknown as DawnRepository,
+      connectors,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-email-inbox",
+        tokens: {
+          accessToken: "provider_access_token",
+          refreshToken: "provider_refresh_token",
+          expiresAt: "2026-06-15T16:00:00.000Z",
+          tokenType: "Bearer",
+          scopes: ["email.inbox.readonly"],
+          rawPayload: { source: "test-token" },
+        },
+        idempotencyKey: "email_provider_token_1",
+        source: "google_login",
+      },
+    );
+
+    expect(connected.connection).toMatchObject({
+      category: "email",
+      provider: "mock-email-inbox",
+      providerConnectionId: "mock_email_account_1",
+      displayName: "receipts@example.com",
+      status: "connected",
+    });
+    expect(repository.connections.get(connected.connection.id)?.tokenCiphertext).not.toContain(
+      "provider_refresh_token",
+    );
+    expect(connected.connection.rawPayload?.emailInbox).toMatchObject({
+      source: "google_login",
+      grantedScopes: ["email.inbox.readonly"],
+    });
+    expect(repository.auditEvents.at(-1)).toMatchObject({
+      action: "email_inbox.connected",
+      metadata: { source: "google_login" },
+    });
+  });
+
+  test("rejects unsafe or mismatched email inbox OAuth state", async () => {
+    const repository = new MemoryEmailInboxRepository();
+
+    await expect(
+      createEmailInboxAuthorizationUrl(
+        repository as unknown as DawnRepository,
+        connectors,
+        oauthStateCodec,
+        context,
+        {
+          teamId: "team_1",
+          provider: "mock-email-inbox",
+          redirectUrl: "https://evil.example/inbox",
+        },
+      ),
+    ).rejects.toThrow("Email inbox OAuth redirect URL is not allowed");
+
+    await expect(
+      createEmailInboxAuthorizationUrl(
+        repository as unknown as DawnRepository,
+        connectors,
+        oauthStateCodec,
+        context,
+        {
+          teamId: "team_1",
+          provider: "mock-email-inbox",
+          redirectUrl: "http://localhost:3000/dashboard",
+        },
+      ),
+    ).rejects.toThrow("Email inbox OAuth redirect URL is not allowed");
+
+    await expect(
+      completeEmailInboxOAuth(
+        repository as unknown as DawnRepository,
+        connectors,
+        oauthStateCodec,
+        context,
+        {
+          teamId: "team_1",
+          provider: "mock-email-inbox",
+          code: "oauth_code_1",
+          redirectUrl: oauthRedirectUrl,
+          state: await createOAuthState({ actorId: "user_2" }),
+          idempotencyKey: "email_oauth_mismatch",
+        },
+      ),
+    ).rejects.toThrow("Email inbox OAuth state is invalid");
+
+    await expect(
+      completeEmailInboxOAuth(
+        repository as unknown as DawnRepository,
+        connectors,
+        oauthStateCodec,
+        context,
+        {
+          teamId: "team_1",
+          provider: "mock-email-inbox",
+          code: "oauth_code_1",
+          redirectUrl: oauthRedirectUrl,
+          state: "not-a-valid-state",
+          idempotencyKey: "email_oauth_tampered",
+        },
+      ),
+    ).rejects.toThrow("Email inbox OAuth state is invalid");
+
+    const expiredStateCodec = createEmailInboxOAuthStateCodec({
+      secret: "test_oauth_state_secret_that_is_long_enough",
+      allowedRedirectOrigins: ["http://localhost:3000"],
+      now: () => new Date("2026-06-15T10:11:00.000Z"),
+    });
+
+    await expect(
+      completeEmailInboxOAuth(
+        repository as unknown as DawnRepository,
+        connectors,
+        expiredStateCodec,
+        context,
+        {
+          teamId: "team_1",
+          provider: "mock-email-inbox",
+          code: "oauth_code_1",
+          redirectUrl: oauthRedirectUrl,
+          state: await createOAuthState(),
+          idempotencyKey: "email_oauth_expired",
+        },
+      ),
+    ).rejects.toThrow("Email inbox OAuth state expired");
+    expect(repository.connections).toHaveLength(0);
   });
 
   test("reports due and skipped scheduled sync requests", async () => {
@@ -560,12 +728,14 @@ describe("email inbox use cases", () => {
     const connected = await completeEmailInboxOAuth(
       repository as unknown as DawnRepository,
       connectors,
+      oauthStateCodec,
       context,
       {
         teamId: "team_1",
         provider: "mock-email-inbox",
         code: "oauth_code_1",
-        redirectUrl: "http://localhost:3000/inbox/oauth/callback",
+        redirectUrl: oauthRedirectUrl,
+        state: await createOAuthState(),
         idempotencyKey: "email_oauth_1",
       },
     );
@@ -628,12 +798,14 @@ describe("email inbox use cases", () => {
     const connected = await completeEmailInboxOAuth(
       repository as unknown as DawnRepository,
       connectors,
+      oauthStateCodec,
       context,
       {
         teamId: "team_1",
         provider: "mock-email-inbox",
         code: "oauth_code_1",
-        redirectUrl: "http://localhost:3000/inbox/oauth/callback",
+        redirectUrl: oauthRedirectUrl,
+        state: await createOAuthState(),
         idempotencyKey: "email_oauth_1",
       },
     );
@@ -692,12 +864,14 @@ describe("email inbox use cases", () => {
     const connected = await completeEmailInboxOAuth(
       repository as unknown as DawnRepository,
       connectors,
+      oauthStateCodec,
       context,
       {
         teamId: "team_1",
         provider: "mock-email-inbox",
         code: "oauth_code_1",
-        redirectUrl: "http://localhost:3000/inbox/oauth/callback",
+        redirectUrl: oauthRedirectUrl,
+        state: await createOAuthState(),
         idempotencyKey: "email_oauth_1",
       },
     );
@@ -727,12 +901,14 @@ describe("email inbox use cases", () => {
     const connected = await completeEmailInboxOAuth(
       repository as unknown as DawnRepository,
       connectors,
+      oauthStateCodec,
       context,
       {
         teamId: "team_1",
         provider: "mock-email-inbox",
         code: "oauth_code_1",
-        redirectUrl: "http://localhost:3000/inbox/oauth/callback",
+        redirectUrl: oauthRedirectUrl,
+        state: await createOAuthState(),
         idempotencyKey: "email_oauth_1",
       },
     );

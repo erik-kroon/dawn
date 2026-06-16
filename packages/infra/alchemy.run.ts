@@ -26,6 +26,7 @@ const stage = resolveCloudflareStage(
 );
 const stageConfig = cloudflareStageConfig[stage];
 const app = await alchemy("dawn", { stage });
+const gmailRuntimeBindings = resolveGmailRuntimeBindings();
 
 const documentsBucket = await R2Bucket("documents", {
   name: cloudflareResourceName(stage, "documents"),
@@ -85,6 +86,7 @@ const dawnRuntimeBindings = {
   // POLAR_ACCESS_TOKEN: alchemy.secret(requiredEnv("POLAR_ACCESS_TOKEN")),
   POLAR_SUCCESS_URL: requiredEnv("POLAR_SUCCESS_URL"),
   DATABASE_URL: alchemy.secret(requiredEnv("DATABASE_URL")),
+  ...gmailRuntimeBindings,
   DAWN_DOCUMENTS: documentsBucket,
   DAWN_JOBS: jobsQueue,
   DAWN_JOBS_DLQ: jobsDeadLetterQueue,
@@ -166,4 +168,53 @@ function requiredEnv(name: string) {
   }
 
   return `missing-${name}`;
+}
+
+function optionalEnv(name: string) {
+  return process.env[name] ?? alchemy.env[name] ?? null;
+}
+
+function resolveGmailRuntimeBindings() {
+  const clientId = optionalEnv("GMAIL_CLIENT_ID");
+  const clientSecret = optionalEnv("GMAIL_CLIENT_SECRET");
+
+  if (Boolean(clientId) !== Boolean(clientSecret)) {
+    throw new Error("GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET must be set together");
+  }
+
+  if (clientId && clientSecret && !looksLikeGoogleOAuthCredentials(clientId, clientSecret)) {
+    throw new Error(
+      "Gmail OAuth credentials are invalid: expected GMAIL_CLIENT_ID to end with .apps.googleusercontent.com and GMAIL_CLIENT_SECRET to start with GOCSPX-",
+    );
+  }
+
+  return {
+    GMAIL_CLIENT_ID: clientId ?? "",
+    GMAIL_CLIENT_SECRET: alchemy.secret(clientSecret ?? ""),
+  };
+}
+
+function looksLikeGoogleOAuthCredentials(clientId: string, clientSecret: string) {
+  return (
+    /^[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(clientId) &&
+    /^GOCSPX-[A-Za-z0-9_-]{20,}$/.test(clientSecret) &&
+    !isPlaceholderCredentialValue(clientId) &&
+    !isPlaceholderCredentialValue(clientSecret)
+  );
+}
+
+function isPlaceholderCredentialValue(value: string) {
+  const normalized = value.trim().toLowerCase();
+
+  return (
+    normalized === "changeme" ||
+    normalized === "change-me" ||
+    normalized === "example" ||
+    normalized === "placeholder" ||
+    normalized === "test" ||
+    normalized.startsWith("<") ||
+    normalized.includes("your_") ||
+    normalized.includes("your-") ||
+    normalized.includes("replace")
+  );
 }

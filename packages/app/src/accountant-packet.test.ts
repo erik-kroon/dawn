@@ -18,7 +18,7 @@ import {
 } from "./testkit/fixtures";
 
 describe("exportAccountantPacket", () => {
-  test("generates a ZIP with CSV, manifest, available attachments, audit, and outbox", async () => {
+  test("generates a ZIP with CSV, XLSX, manifest, available attachments, audit, and outbox", async () => {
     const repository = createReviewRepository("member");
     repository.transactions.set(
       "txn_1",
@@ -72,7 +72,14 @@ describe("exportAccountantPacket", () => {
         },
       },
     );
-    const zipText = Buffer.from(result.bodyBase64, "base64").toString("utf8");
+    const zipEntries = readStoredZipEntries(result.bodyBase64);
+    const attachmentPath = "attachments/2026-06-14-txn_1-receipt.pdf";
+    const manifest = JSON.parse(zipEntryText(zipEntries, "manifest.json")) as {
+      transactionCount: number;
+      attachmentCount: number;
+      skippedAttachmentCount: number;
+      files: { path: string }[];
+    };
 
     expect(result.contentType).toBe("application/zip");
     expect(result.manifest).toMatchObject({
@@ -84,16 +91,57 @@ describe("exportAccountantPacket", () => {
     });
     expect(result.manifest.files.map((file) => file.path)).toEqual([
       "transactions.csv",
-      "manifest.json",
+      "transactions.xlsx",
       "attachments/2026-06-14-txn_1-receipt.pdf",
     ]);
-    expect(zipText).toContain("transactions.csv");
-    expect(zipText).toContain("manifest.json");
-    expect(zipText).toContain("Figma subscription");
-    expect(zipText).toContain("receipt bytes");
+    expect([...zipEntries.keys()]).toEqual([
+      "transactions.csv",
+      "transactions.xlsx",
+      "manifest.json",
+      attachmentPath,
+    ]);
+    expect(zipEntryText(zipEntries, "transactions.csv")).toContain(
+      "2026-06-14,Figma subscription,-12.00,USD",
+    );
+    expect(zipEntryText(zipEntries, "transactions.xlsx")).toContain("Figma subscription");
+    expect(manifest).toMatchObject({
+      transactionCount: 1,
+      attachmentCount: 1,
+      skippedAttachmentCount: 0,
+    });
+    expect(manifest.files.map((file) => file.path)).toEqual([
+      "transactions.csv",
+      "transactions.xlsx",
+      attachmentPath,
+    ]);
+    expect(zipEntryText(zipEntries, attachmentPath)).toBe("receipt bytes");
     expect(repository.transactions.get("txn_1")?.accountantStatus).toBe("exported");
-    expect(repository.auditEvents).toMatchObject([{ action: "accountant_packet.exported" }]);
-    expect(repository.outboxEvents).toMatchObject([{ type: "accountant_packet.exported" }]);
+    expect(repository.auditEvents).toMatchObject([
+      {
+        action: "accountant_packet.exported",
+        metadata: {
+          formats: ["csv", "xlsx"],
+          csvDelimiter: ",",
+          transactionCount: 1,
+          attachmentCount: 1,
+          skippedAttachmentCount: 0,
+          currencyTotals: { USD: { amountMinor: -1200, currency: "USD" } },
+        },
+      },
+    ]);
+    expect(repository.outboxEvents).toMatchObject([
+      {
+        type: "accountant_packet.exported",
+        payload: {
+          formats: ["csv", "xlsx"],
+          csvDelimiter: ",",
+          transactionCount: 1,
+          attachmentCount: 1,
+          skippedAttachmentCount: 0,
+          currencyTotals: { USD: { amountMinor: -1200, currency: "USD" } },
+        },
+      },
+    ]);
   });
 
   test("supports CSV delimiter and XLSX export settings with file hashes", async () => {
@@ -142,7 +190,6 @@ describe("exportAccountantPacket", () => {
     expect(result.manifest.files.map((file) => file.path)).toEqual([
       "transactions.csv",
       "transactions.xlsx",
-      "manifest.json",
     ]);
     expect(result.manifest.files.every((file) => file.sha256)).toBe(true);
     expect(zipText).toContain("date;description;amount;currency");
@@ -187,6 +234,93 @@ describe("exportAccountantPacket", () => {
 
     expect(result.manifest.transactionCount).toBe(1);
     expect(repository.transactions.get("txn_1")?.accountantStatus).toBe("exported");
+  });
+
+  test("rejects explicit transaction selections that are not all exportable in the packet period", async () => {
+    const repository = createReviewRepository("member");
+    repository.transactions.set(
+      "txn_1",
+      createTestTransaction({
+        id: "txn_1",
+        categoryId: "cat_1",
+        postedAt: "2026-06-14T00:00:00.000Z",
+        reviewState: "reviewed",
+      }),
+    );
+    repository.transactions.set(
+      "txn_2",
+      createTestTransaction({
+        id: "txn_2",
+        categoryId: "cat_1",
+        postedAt: "2026-07-01T00:00:00.000Z",
+        reviewState: "reviewed",
+      }),
+    );
+    repository.packetAttachments.push(
+      {
+        transactionId: "txn_1",
+        documentId: "doc_1",
+        inboxItemId: "inbox_1",
+        versionId: "ver_1",
+        objectKey: "receipt-1.pdf",
+        fileName: "receipt-1.pdf",
+        contentType: "application/pdf",
+        byteSize: 12,
+        title: "Receipt 1",
+      },
+      {
+        transactionId: "txn_2",
+        documentId: "doc_2",
+        inboxItemId: "inbox_2",
+        versionId: "ver_2",
+        objectKey: "receipt-2.pdf",
+        fileName: "receipt-2.pdf",
+        contentType: "application/pdf",
+        byteSize: 12,
+        title: "Receipt 2",
+      },
+    );
+
+    await expect(
+      exportAccountantPacket(
+        repository,
+        { actor: testActor, requestId: "request_1" },
+        {
+          teamId: "team_1",
+          from: "2026-06-01T00:00:00.000Z",
+          to: "2026-06-30T23:59:59.999Z",
+          transactionIds: ["txn_1", "txn_2"],
+          idempotencyKey: "packet_partial_selection",
+        },
+      ),
+    ).rejects.toEqual(
+      new AppError(
+        "CONFLICT",
+        "Every selected transaction must be ready to export and inside the packet period",
+      ),
+    );
+    await expect(
+      requestAccountantPacketExport(
+        repository,
+        { actor: testActor, requestId: "request_2" },
+        {
+          teamId: "team_1",
+          from: "2026-06-01T00:00:00.000Z",
+          to: "2026-06-30T23:59:59.999Z",
+          transactionIds: ["txn_1", "txn_2"],
+          idempotencyKey: "packet_partial_selection_request",
+        },
+      ),
+    ).rejects.toEqual(
+      new AppError(
+        "CONFLICT",
+        "Every selected transaction must be ready to export and inside the packet period",
+      ),
+    );
+    expect(repository.transactions.get("txn_1")?.accountantStatus).not.toBe("exported");
+    expect(repository.transactions.get("txn_2")?.accountantStatus).not.toBe("exported");
+    expect(repository.auditEvents).toHaveLength(0);
+    expect(repository.outboxEvents).toHaveLength(0);
   });
 
   test("requires at least one export format", async () => {
@@ -415,8 +549,12 @@ describe("exportAccountantPacket", () => {
         type: "accountant_packet.exported",
         payload: {
           packetId: first.packetId,
+          formats: ["csv", "xlsx"],
+          csvDelimiter: ",",
           objectKey: first.objectKey,
           byteSize: first.byteSize,
+          skippedAttachmentCount: 0,
+          currencyTotals: { USD: { amountMinor: -1200, currency: "USD" } },
         },
       },
     ]);
@@ -895,3 +1033,43 @@ describe("exportAccountantPacket", () => {
     ).rejects.toEqual(new AppError("FORBIDDEN", "Accountant packet export link was revoked"));
   });
 });
+
+function readStoredZipEntries(bodyBase64: string) {
+  const bytes = Buffer.from(bodyBase64, "base64");
+  const entries = new Map<string, Buffer>();
+  let offset = 0;
+
+  while (offset < bytes.byteLength) {
+    const signature = bytes.readUInt32LE(offset);
+
+    if (signature === 0x02014b50 || signature === 0x06054b50) {
+      break;
+    }
+
+    expect(signature).toBe(0x04034b50);
+    expect(bytes.readUInt16LE(offset + 8)).toBe(0);
+
+    const compressedSize = bytes.readUInt32LE(offset + 18);
+    const uncompressedSize = bytes.readUInt32LE(offset + 22);
+    const fileNameLength = bytes.readUInt16LE(offset + 26);
+    const extraFieldLength = bytes.readUInt16LE(offset + 28);
+    const nameStart = offset + 30;
+    const contentStart = nameStart + fileNameLength + extraFieldLength;
+    const contentEnd = contentStart + compressedSize;
+    const name = bytes.subarray(nameStart, nameStart + fileNameLength).toString("utf8");
+
+    expect(compressedSize).toBe(uncompressedSize);
+    entries.set(name, bytes.subarray(contentStart, contentEnd));
+    offset = contentEnd;
+  }
+
+  return entries;
+}
+
+function zipEntryText(entries: Map<string, Buffer>, path: string) {
+  const entry = entries.get(path);
+
+  expect(entry).toBeDefined();
+
+  return entry?.toString("utf8") ?? "";
+}

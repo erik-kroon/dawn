@@ -29,7 +29,7 @@ describe("Button", () => {
     expect(button).not.toBeNull();
     expect(button?.getAttribute("aria-label")).toBe("Save changes");
     expect(button?.getAttribute("data-slot")).toBe("button");
-    expect(button?.className).toContain("border-border");
+    expect(button?.className).toContain("border-input");
     expect(button?.textContent).toBe("Save");
 
     button?.click();

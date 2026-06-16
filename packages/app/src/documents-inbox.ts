@@ -1610,6 +1610,11 @@ async function maybeAutoAcceptInboxMatch(input: {
     suggestionId: persisted.id,
     actorId: input.context.actor.id,
   });
+  await updateMatchedTransactionAccountantStatus(
+    input.repository,
+    input.teamId,
+    accepted.suggestion.transactionId,
+  );
 
   await input.repository.appendAuditEvent({
     teamId: input.teamId,

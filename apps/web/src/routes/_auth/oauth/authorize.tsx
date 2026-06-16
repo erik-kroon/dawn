@@ -6,12 +6,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@dawn/ui/components/card";
+import { toastManager } from "@dawn/ui/components/toast";
 import { publicApiScopeLabels } from "@dawn/domain";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { ExternalLinkIcon, ShieldCheckIcon, XIcon } from "lucide-react";
 import { useMemo } from "react";
-import { toast } from "sonner";
 
 import {
   oauthConsentIdempotencyKey,
@@ -64,7 +64,7 @@ function OAuthAuthorizeRoute() {
         );
       },
       onError: (error) => {
-        toast.error(error.message);
+        toastManager.add({ title: error.message, type: "error" });
       },
     }),
   );

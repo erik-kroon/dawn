@@ -1,19 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 import { appRequestFromSession } from "./context";
+import { createApiTestSessionContext } from "./testkit/context";
 
 describe("api context request intake", () => {
   test("resolves session context into an app request", () => {
     const request = appRequestFromSession(
-      {
-        requestId: "request_1",
-        session: {
-          user: {
-            id: "user_1",
-            email: "owner@example.com",
-          },
-        },
-      },
+      createApiTestSessionContext({ id: "user_1", email: "owner@example.com" }),
       {
         teamId: "team_1",
         idempotencyKey: "idem_1",

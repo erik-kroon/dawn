@@ -1,5 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
+import { googleGmailReadonlyScope } from "@dawn/env/google-oauth";
+
 type EmailInboxRawPayload = Record<string, unknown>;
 
 export type EmailInboxEncryptedToken = {
@@ -264,6 +266,13 @@ export class InboxConnector {
     input: EmailInboxTokenExchangeInput,
   ): Promise<InboxConnectorConnectionResult> {
     const tokens = await this.#provider.exchangeCodeForTokens(input);
+
+    return this.createConnectionFromTokens(tokens);
+  }
+
+  async createConnectionFromTokens(
+    tokens: EmailInboxTokenBundle,
+  ): Promise<InboxConnectorConnectionResult> {
     const user = await this.#provider.getUserInfo(tokens);
     const token = await this.#tokenCodec.encrypt(tokens);
 
@@ -543,7 +552,7 @@ export function createGmailEmailInboxProvider(input: {
     provider: "gmail",
     displayName: "Gmail",
     capabilities: ["oauth", "refreshToken", "syncEvidence", "attachmentEvidence", "bodyEvidence"],
-    defaultScopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/gmail.readonly"],
+    defaultScopes: ["openid", "email", "profile", googleGmailReadonlyScope],
     createAuthUrl(command) {
       assertConfigured(input.clientId, "Gmail client ID");
       const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -752,9 +761,10 @@ async function postGoogleToken(input: {
   });
 
   if (!response.ok) {
-    const text = await response.text();
+    const googleErrorCode = await googleOAuthErrorCode(response);
+    const errorSuffix = googleErrorCode ? ` (${googleErrorCode})` : "";
     throw new EmailInboxProviderAuthError(
-      `Gmail token exchange failed: ${text}`,
+      `Gmail token exchange failed with ${response.status}${errorSuffix}`,
       response.status === 400 || response.status === 401
         ? "reauthorization_required"
         : "invalid_credentials",
@@ -763,6 +773,17 @@ async function postGoogleToken(input: {
   }
 
   return (await response.json()) as GoogleTokenPayload;
+}
+
+async function googleOAuthErrorCode(response: Response) {
+  try {
+    const payload = (await response.clone().json()) as { error?: unknown };
+    const code = typeof payload.error === "string" ? payload.error.trim() : "";
+
+    return /^[A-Za-z0-9_.-]{1,80}$/.test(code) ? code : null;
+  } catch {
+    return null;
+  }
 }
 
 function googleTokenPayloadToBundle(

@@ -9,7 +9,9 @@
       "default": "./src/*.ts"
     }
   },
-  "scripts": {},
+  "scripts": {
+    "check-types": "tsgo --noEmit"
+  },
   "dependencies": {
     "@dawn/db": "workspace:*",
     "@dawn/env": "workspace:*",

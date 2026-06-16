@@ -15,6 +15,11 @@ import {
   type WebhookDeliveryProvider,
 } from "@dawn/app";
 import { DrizzleDawnRepository } from "@dawn/db/dawn-repository";
+import {
+  googleOAuthCredentialStatus,
+  resolveGoogleOAuthCredentials,
+  type GoogleOAuthCredentialStatus,
+} from "@dawn/env/google-oauth";
 import type { DawnCloudflareBindings } from "@dawn/infra/cloudflare";
 import {
   createDawnQueueMessageHandlerRegistry,
@@ -49,7 +54,7 @@ export type DawnWorkerHealth = {
     "bound" | "missing"
   >;
   configuration: {
-    gmail: "configured" | "missing";
+    gmail: GoogleOAuthCredentialStatus;
   };
 };
 
@@ -80,7 +85,7 @@ export function createDawnWorkerRuntime(env: DawnCloudflareBindings): DawnWorker
           tenantCoordinator: env.DAWN_TENANT_COORDINATOR ? "bound" : "missing",
         },
         configuration: {
-          gmail: env.GMAIL_CLIENT_ID && env.GMAIL_CLIENT_SECRET ? "configured" : "missing",
+          gmail: googleOAuthCredentialStatus(env),
         },
       };
     },
@@ -328,13 +333,14 @@ function createWorkerEmailInboxConnectors(env: DawnCloudflareBindings) {
     secret: env.BETTER_AUTH_SECRET,
     keyId: "worker-email-inbox-token-v1",
   });
+  const googleOAuthCredentials = resolveGoogleOAuthCredentials(env);
   const providers = [
     createMockEmailInboxProvider(),
-    ...(env.GMAIL_CLIENT_ID && env.GMAIL_CLIENT_SECRET
+    ...(googleOAuthCredentials
       ? [
           createGmailEmailInboxProvider({
-            clientId: env.GMAIL_CLIENT_ID,
-            clientSecret: env.GMAIL_CLIENT_SECRET,
+            clientId: googleOAuthCredentials.clientId,
+            clientSecret: googleOAuthCredentials.clientSecret,
           }),
         ]
       : []),

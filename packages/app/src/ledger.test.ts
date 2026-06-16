@@ -659,6 +659,16 @@ describe("CSV transaction import", () => {
     expect(preview.readyCount).toBe(1);
     expect(preview.duplicateCount).toBe(1);
     expect(preview.invalidCount).toBe(1);
+    expect(preview.summary).toEqual({
+      readyDateRange: {
+        from: "2026-06-15T00:00:00.000Z",
+        to: "2026-06-15T00:00:00.000Z",
+      },
+      readyCurrencyTotals: { USD: { amountMinor: 5000, currency: "USD" } },
+      readyIncomeCount: 1,
+      readyExpenseCount: 0,
+      readyZeroAmountCount: 0,
+    });
     expect(preview.headers).toEqual(["Date", "Description", "Amount"]);
     expect(preview.detectedMapping).toMatchObject({
       postedAt: "Date",
@@ -719,6 +729,16 @@ describe("CSV transaction import", () => {
     const result = await commitCsvTransactionImport(repository, context, command);
 
     expect(preview.readyCount).toBe(2);
+    expect(preview.summary).toEqual({
+      readyDateRange: {
+        from: "2026-06-14T00:00:00.000Z",
+        to: "2026-06-15T00:00:00.000Z",
+      },
+      readyCurrencyTotals: { USD: { amountMinor: 3766, currency: "USD" } },
+      readyIncomeCount: 1,
+      readyExpenseCount: 1,
+      readyZeroAmountCount: 0,
+    });
     expect(result.transactions.map((transaction) => transaction.money)).toEqual([
       { amountMinor: -1234, currency: "USD" },
       { amountMinor: 5000, currency: "USD" },

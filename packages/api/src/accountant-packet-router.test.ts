@@ -357,6 +357,73 @@ describe("transactionReview.exportPacket router", () => {
     });
   });
 
+  test("rejects in-app packet email when no delivery provider is configured", async () => {
+    process.env.DATABASE_URL ??= "postgres://test";
+    process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";
+    process.env.BETTER_AUTH_URL ??= "http://localhost:3000";
+    process.env.POLAR_ACCESS_TOKEN ??= "test";
+    process.env.POLAR_SUCCESS_URL ??= "http://localhost:3001/success";
+    process.env.CORS_ORIGIN ??= "http://localhost:3001";
+
+    const repository = createReviewRepository("admin");
+    repository.accountantPacketExports.set("packet_1", {
+      packetId: "packet_1",
+      teamId: "team_1",
+      actorId: "user_1",
+      objectKey: "teams/team_1/accountant-packets/packet_1.zip",
+      fileName: "accountant-packet.zip",
+      contentType: "application/zip",
+      byteSize: 128,
+      status: "available",
+      revokedAt: null,
+      revokedByActorId: null,
+      revokeReason: null,
+      manifest: {
+        packetId: "packet_1",
+        teamId: "team_1",
+        actorId: "user_1",
+        generatedAt: "2026-06-15T12:00:00.000Z",
+        filters: {
+          from: "2026-06-01T00:00:00.000Z",
+          to: "2026-06-30T23:59:59.999Z",
+          transactionIds: ["txn_1"],
+        },
+        settings: { formats: ["csv"], csvDelimiter: "," },
+        transactionCount: 1,
+        attachmentCount: 0,
+        skippedAttachmentCount: 0,
+        currencyTotals: { USD: { amountMinor: -1200, currency: "USD" } },
+        files: [],
+      },
+      createdAt: "2026-06-15T12:00:00.000Z",
+    });
+    const { createAppRouter } = await import("./routers/index");
+    const router = createAppRouter({
+      dawnRepository: repository as unknown as DawnRepository,
+      bankingProviders: [],
+      integrationProviders: [],
+      emailInboxConnectors: [],
+      documentUrlSigner,
+      invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
+      invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
+    });
+
+    await expect(
+      call(
+        router.transactionReview.sendPacketEmail,
+        {
+          teamId: "team_1",
+          packetId: "packet_1",
+          toEmail: "accountant@example.com",
+          idempotencyKey: "email_packet_1",
+        },
+        {
+          context: createApiTestContext({ id: "user_1", email: "owner@example.com" }),
+        },
+      ),
+    ).rejects.toThrow("Accountant packet email delivery is not configured");
+  });
+
   test("emails stored packet exports through the router", async () => {
     process.env.DATABASE_URL ??= "postgres://test";
     process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";

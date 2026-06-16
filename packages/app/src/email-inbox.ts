@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { IntegrationCategory, IntegrationConnection, IntegrationSyncRun } from "@dawn/domain";
 import type {
@@ -7,7 +7,9 @@ import type {
   EmailInboxProviderName,
   EmailInboxSettings,
   EmailInboxSyncCursor,
+  EmailInboxTokenBundle,
   InboxConnector,
+  InboxConnectorConnectionResult,
 } from "@dawn/integrations";
 import {
   EmailInboxProviderAuthError,
@@ -43,6 +45,7 @@ export type EmailInboxProviderDescriptor = {
 export type EmailInboxWorkspaceConnection = {
   connection: IntegrationConnection;
   accountEmail: string | null;
+  grantedScopes: readonly string[];
   syncCursor: EmailInboxSyncCursor | null;
   settings: EmailInboxSettings;
   reauthorizationRequired: boolean;
@@ -59,13 +62,13 @@ export type CreateEmailInboxAuthorizationUrlCommand = {
   teamId: string;
   provider: EmailInboxProviderName;
   redirectUrl: string;
-  state?: string | null;
   loginHint?: string | null;
 };
 
 export type CreateEmailInboxAuthorizationUrlResult = {
   provider: EmailInboxProviderName;
   authorizationUrl: string;
+  state: string;
 };
 
 export type CompleteEmailInboxOAuthCommand = {
@@ -73,10 +76,24 @@ export type CompleteEmailInboxOAuthCommand = {
   provider: EmailInboxProviderName;
   code: string;
   redirectUrl: string;
+  state: string;
   idempotencyKey: string;
 };
 
 export type CompleteEmailInboxOAuthResult = {
+  connection: IntegrationConnection;
+  replayed: boolean;
+};
+
+export type ConnectEmailInboxFromProviderTokenCommand = {
+  teamId: string;
+  provider: EmailInboxProviderName;
+  tokens: EmailInboxTokenBundle;
+  idempotencyKey: string;
+  source?: "google_login" | "provider_token";
+};
+
+export type ConnectEmailInboxFromProviderTokenResult = {
   connection: IntegrationConnection;
   replayed: boolean;
 };
@@ -166,6 +183,77 @@ export type EmailInboxObjectStorage = {
   put(input: { objectKey: string; body: ArrayBuffer; contentType: string }): Promise<void>;
 };
 
+export type EmailInboxOAuthStatePayload = {
+  teamId: string;
+  actorId: string;
+  provider: EmailInboxProviderName;
+  redirectUrl: string;
+  nonce: string;
+  expiresAt: string;
+};
+
+export type EmailInboxOAuthStateCodec = {
+  createState(input: {
+    teamId: string;
+    actorId: string;
+    provider: EmailInboxProviderName;
+    redirectUrl: string;
+  }): Promise<string>;
+  verifyState(state: string): Promise<EmailInboxOAuthStatePayload>;
+};
+
+export function createEmailInboxOAuthStateCodec(input: {
+  secret: string;
+  allowedRedirectOrigins: readonly string[];
+  now?: () => Date;
+  ttlSeconds?: number;
+}): EmailInboxOAuthStateCodec {
+  const now = input.now ?? (() => new Date());
+  const ttlSeconds = input.ttlSeconds ?? 10 * 60;
+  const allowedOrigins = new Set(
+    input.allowedRedirectOrigins.map((origin) => new URL(origin).origin),
+  );
+
+  function assertRedirectUrl(redirectUrl: string) {
+    let url: URL;
+
+    try {
+      url = new URL(redirectUrl);
+    } catch {
+      throw new AppError("FORBIDDEN", "Email inbox OAuth redirect URL is not allowed");
+    }
+
+    if (url.pathname !== "/inbox" || !allowedOrigins.has(url.origin)) {
+      throw new AppError("FORBIDDEN", "Email inbox OAuth redirect URL is not allowed");
+    }
+  }
+
+  return {
+    async createState(stateInput) {
+      assertRedirectUrl(stateInput.redirectUrl);
+
+      const payload: EmailInboxOAuthStatePayload = {
+        ...stateInput,
+        nonce: randomUUID(),
+        expiresAt: new Date(now().getTime() + ttlSeconds * 1_000).toISOString(),
+      };
+
+      return signEmailInboxOAuthState(input.secret, payload);
+    },
+    async verifyState(state) {
+      const payload = verifyEmailInboxOAuthStateSignature(input.secret, state);
+
+      assertRedirectUrl(payload.redirectUrl);
+
+      if (new Date(payload.expiresAt).getTime() <= now().getTime()) {
+        throw new AppError("FORBIDDEN", "Email inbox OAuth state expired");
+      }
+
+      return payload;
+    },
+  };
+}
+
 export type EmailInboxUseCaseRepository = TransactionReviewRepository &
   IntegrationRepository &
   DocumentsInboxUseCaseRepository & {
@@ -210,6 +298,7 @@ export type EmailInboxUseCaseRepository = TransactionReviewRepository &
   };
 
 const completeEmailInboxOAuthOperation = "email_inbox.oauth.complete";
+const connectEmailInboxFromProviderTokenOperation = "email_inbox.provider_token.connect";
 const syncEmailInboxOperation = "email_inbox.sync";
 const updateEmailInboxSettingsOperation = "email_inbox.settings.update";
 const requestEmailInboxSyncOperation = "email_inbox.sync.request";
@@ -239,6 +328,7 @@ export async function listEmailInboxWorkspace(
       .map((summary) => ({
         connection: summary.connection,
         accountEmail: emailInboxAccountEmail(summary.connection),
+        grantedScopes: emailInboxMetadata(summary.connection.rawPayload).grantedScopes,
         syncCursor: emailInboxSyncCursor(summary.connection.rawPayload),
         settings: emailInboxSettings(summary.connection.rawPayload),
         reauthorizationRequired:
@@ -251,6 +341,7 @@ export async function listEmailInboxWorkspace(
 export async function createEmailInboxAuthorizationUrl(
   repository: EmailInboxUseCaseRepository,
   connectors: readonly InboxConnector[],
+  stateCodec: EmailInboxOAuthStateCodec,
   context: TransactionReviewContext,
   command: CreateEmailInboxAuthorizationUrlCommand,
 ): Promise<CreateEmailInboxAuthorizationUrlResult> {
@@ -263,12 +354,19 @@ export async function createEmailInboxAuthorizationUrl(
   );
 
   const connector = requireInboxConnector(connectors, command.provider);
+  const state = await stateCodec.createState({
+    teamId: command.teamId,
+    actorId: context.actor.id,
+    provider: command.provider,
+    redirectUrl: command.redirectUrl,
+  });
 
   return {
     provider: connector.provider,
+    state,
     authorizationUrl: connector.createAuthUrl({
       redirectUrl: command.redirectUrl,
-      state: command.state ?? undefined,
+      state,
       loginHint: command.loginHint ?? undefined,
     }),
   };
@@ -277,6 +375,7 @@ export async function createEmailInboxAuthorizationUrl(
 export async function completeEmailInboxOAuth(
   repository: EmailInboxUseCaseRepository,
   connectors: readonly InboxConnector[],
+  stateCodec: EmailInboxOAuthStateCodec,
   context: TransactionReviewContext,
   command: CompleteEmailInboxOAuthCommand,
 ): Promise<CompleteEmailInboxOAuthResult> {
@@ -290,12 +389,23 @@ export async function completeEmailInboxOAuth(
       "integrations.write",
       "You cannot connect email inbox integrations for this team",
     );
+    const oauthState = await stateCodec.verifyState(command.state);
+
+    if (
+      oauthState.teamId !== command.teamId ||
+      oauthState.actorId !== context.actor.id ||
+      oauthState.provider !== command.provider ||
+      oauthState.redirectUrl !== command.redirectUrl
+    ) {
+      throw new AppError("FORBIDDEN", "Email inbox OAuth state is invalid");
+    }
 
     const fingerprint = JSON.stringify({
       teamId: command.teamId,
       provider: command.provider,
       code: command.code,
       redirectUrl: command.redirectUrl,
+      state: command.state,
     });
     const replayed = await emailRepository.getIdempotencyResult(
       command.teamId,
@@ -320,59 +430,14 @@ export async function completeEmailInboxOAuth(
       code: command.code,
       redirectUrl: command.redirectUrl,
     });
-    const rawPayload = {
-      ...providerConnection.connection.rawPayload,
-      emailInbox: {
-        provider: command.provider,
-        accountEmail: providerConnection.connection.accountEmail,
-        providerConnectionId: providerConnection.connection.providerConnectionId,
-        grantedScopes: [...providerConnection.connection.grantedScopes],
-        expiresAt: providerConnection.connection.expiresAt ?? null,
-        syncCursor: null,
-        settings: defaultEmailInboxSettings(),
-        connectedAt: new Date().toISOString(),
-      },
-    };
-    const connection = await emailRepository.upsertIntegrationConnection({
-      connectionId: crypto.randomUUID(),
+    const connection = await upsertEmailInboxProviderConnection({
+      repository: emailRepository,
+      connector,
+      context,
       teamId: command.teamId,
-      category: emailInboxCategory,
       provider: command.provider,
-      providerConnectionId: providerConnection.connection.providerConnectionId,
-      displayName: providerConnection.connection.accountEmail,
-      capabilities: connector.capabilities.map(String),
-      tokenCiphertext: providerConnection.token.encryptedToken,
-      tokenKeyId: providerConnection.token.keyId,
-      tokenLastFour: providerConnection.token.lastFour,
-      rawPayload,
-      createdByActorId: context.actor.id,
-    });
-
-    await emailRepository.appendAuditEvent({
-      teamId: command.teamId,
-      actorId: context.actor.id,
-      requestId: context.requestId,
-      action: "email_inbox.connected",
-      entityType: "integration_connection",
-      entityId: connection.id,
-      metadata: {
-        provider: connection.provider,
-        accountEmail: providerConnection.connection.accountEmail,
-        scopes: providerConnection.connection.grantedScopes,
-      },
-    });
-
-    await emailRepository.appendOutboxEvent({
-      teamId: command.teamId,
-      actorId: context.actor.id,
-      requestId: context.requestId,
-      type: "email_inbox.connected",
-      version: 1,
-      payload: {
-        connectionId: connection.id,
-        provider: connection.provider,
-        accountEmail: providerConnection.connection.accountEmail,
-      },
+      providerConnection,
+      source: "oauth",
     });
 
     const result = { connection, replayed: false };
@@ -381,6 +446,78 @@ export async function completeEmailInboxOAuth(
       teamId: command.teamId,
       actorId: context.actor.id,
       operation: completeEmailInboxOAuthOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function connectEmailInboxFromProviderToken(
+  repository: EmailInboxUseCaseRepository,
+  connectors: readonly InboxConnector[],
+  context: TransactionReviewContext,
+  command: ConnectEmailInboxFromProviderTokenCommand,
+): Promise<ConnectEmailInboxFromProviderTokenResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const emailRepository = transactionRepository as EmailInboxUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Email inbox provider not found");
+    await resolveTeamAccess(
+      emailRepository,
+      { ...context, teamId: command.teamId },
+      "integrations.write",
+      "You cannot connect email inbox integrations for this team",
+    );
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      provider: command.provider,
+      source: command.source ?? "provider_token",
+      scopes: [...command.tokens.scopes].sort(),
+      expiresAt: command.tokens.expiresAt ?? null,
+      hasRefreshToken: Boolean(command.tokens.refreshToken),
+    });
+    const replayed = await emailRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      connectEmailInboxFromProviderTokenOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different Gmail login connection",
+        );
+      }
+
+      return {
+        ...(replayed.result as ConnectEmailInboxFromProviderTokenResult),
+        replayed: true,
+      };
+    }
+
+    const connector = requireInboxConnector(connectors, command.provider);
+    const providerConnection = await connector.createConnectionFromTokens(command.tokens);
+    const connection = await upsertEmailInboxProviderConnection({
+      repository: emailRepository,
+      connector,
+      context,
+      teamId: command.teamId,
+      provider: command.provider,
+      providerConnection,
+      source: command.source ?? "provider_token",
+    });
+    const result = { connection, replayed: false };
+
+    await emailRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: connectEmailInboxFromProviderTokenOperation,
       key: command.idempotencyKey,
       fingerprint,
       result,
@@ -859,6 +996,95 @@ function emailInboxProviderDescriptor(connector: InboxConnector): EmailInboxProv
   };
 }
 
+async function upsertEmailInboxProviderConnection(input: {
+  repository: EmailInboxUseCaseRepository;
+  connector: InboxConnector;
+  context: TransactionReviewContext;
+  teamId: string;
+  provider: EmailInboxProviderName;
+  providerConnection: InboxConnectorConnectionResult;
+  source: "oauth" | "google_login" | "provider_token";
+}) {
+  assertEmailInboxMailboxScopes(input.connector, input.providerConnection.connection.grantedScopes);
+  const rawPayload = {
+    ...input.providerConnection.connection.rawPayload,
+    emailInbox: {
+      provider: input.provider,
+      accountEmail: input.providerConnection.connection.accountEmail,
+      providerConnectionId: input.providerConnection.connection.providerConnectionId,
+      grantedScopes: [...input.providerConnection.connection.grantedScopes],
+      expiresAt: input.providerConnection.connection.expiresAt ?? null,
+      syncCursor: null,
+      settings: defaultEmailInboxSettings(),
+      connectedAt: new Date().toISOString(),
+      source: input.source,
+    },
+  };
+  const connection = await input.repository.upsertIntegrationConnection({
+    connectionId: crypto.randomUUID(),
+    teamId: input.teamId,
+    category: emailInboxCategory,
+    provider: input.provider,
+    providerConnectionId: input.providerConnection.connection.providerConnectionId,
+    displayName: input.providerConnection.connection.accountEmail,
+    capabilities: input.connector.capabilities.map(String),
+    tokenCiphertext: input.providerConnection.token.encryptedToken,
+    tokenKeyId: input.providerConnection.token.keyId,
+    tokenLastFour: input.providerConnection.token.lastFour,
+    rawPayload,
+    createdByActorId: input.context.actor.id,
+  });
+
+  await input.repository.appendAuditEvent({
+    teamId: input.teamId,
+    actorId: input.context.actor.id,
+    requestId: input.context.requestId,
+    action: "email_inbox.connected",
+    entityType: "integration_connection",
+    entityId: connection.id,
+    metadata: {
+      provider: connection.provider,
+      accountEmail: input.providerConnection.connection.accountEmail,
+      scopes: input.providerConnection.connection.grantedScopes,
+      source: input.source,
+    },
+  });
+
+  await input.repository.appendOutboxEvent({
+    teamId: input.teamId,
+    actorId: input.context.actor.id,
+    requestId: input.context.requestId,
+    type: "email_inbox.connected",
+    version: 1,
+    payload: {
+      connectionId: connection.id,
+      provider: connection.provider,
+      accountEmail: input.providerConnection.connection.accountEmail,
+      source: input.source,
+    },
+  });
+
+  return connection;
+}
+
+function assertEmailInboxMailboxScopes(
+  connector: InboxConnector,
+  grantedScopes: readonly string[],
+) {
+  const requiredScopes = connector.defaultScopes.filter(
+    (scope) => scope === "email.inbox.readonly" || scope.includes("gmail.readonly"),
+  );
+  const granted = new Set(grantedScopes);
+  const missing = requiredScopes.filter((scope) => !granted.has(scope));
+
+  if (missing.length > 0) {
+    throw new AppError(
+      "CONFLICT",
+      `Email inbox connection is missing required mailbox scope: ${missing.join(", ")}`,
+    );
+  }
+}
+
 async function importEmailInboxEvidence(input: {
   repository: EmailInboxUseCaseRepository;
   storage: EmailInboxObjectStorage;
@@ -1328,6 +1554,67 @@ function emailInboxDocumentTitle(evidence: EmailInboxEvidence) {
 
 function sha256Hex(body: Buffer) {
   return createHash("sha256").update(body).digest("hex");
+}
+
+function signEmailInboxOAuthState(secret: string, payload: EmailInboxOAuthStatePayload) {
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signature = hmacSha256(secret, encodedPayload);
+
+  return `${encodedPayload}.${signature}`;
+}
+
+function verifyEmailInboxOAuthStateSignature(secret: string, state: string) {
+  const [encodedPayload, signature] = state.split(".");
+
+  if (!encodedPayload || !signature) {
+    throw new AppError("FORBIDDEN", "Email inbox OAuth state is invalid");
+  }
+
+  const expected = hmacSha256(secret, encodedPayload);
+
+  if (!safeEqual(signature, expected)) {
+    throw new AppError("FORBIDDEN", "Email inbox OAuth state is invalid");
+  }
+
+  let payload: EmailInboxOAuthStatePayload;
+
+  try {
+    payload = JSON.parse(base64UrlDecode(encodedPayload)) as EmailInboxOAuthStatePayload;
+  } catch {
+    throw new AppError("FORBIDDEN", "Email inbox OAuth state is invalid");
+  }
+
+  if (
+    !payload.teamId ||
+    !payload.actorId ||
+    !payload.provider ||
+    !payload.redirectUrl ||
+    !payload.nonce ||
+    !payload.expiresAt
+  ) {
+    throw new AppError("FORBIDDEN", "Email inbox OAuth state is invalid");
+  }
+
+  return payload;
+}
+
+function hmacSha256(secret: string, value: string) {
+  return createHmac("sha256", secret).update(value).digest("base64url");
+}
+
+function safeEqual(left: string, right: string) {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+}
+
+function base64UrlEncode(value: string) {
+  return Buffer.from(value, "utf8").toString("base64url");
+}
+
+function base64UrlDecode(value: string) {
+  return Buffer.from(value, "base64url").toString("utf8");
 }
 
 function assertCommandTeamMatchesContext(

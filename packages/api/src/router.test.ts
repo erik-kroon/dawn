@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { call } from "@orpc/server";
-import { createDeterministicInvoicePdfRenderer } from "@dawn/app";
+import { createDeterministicInvoicePdfRenderer, createEmailInboxOAuthStateCodec } from "@dawn/app";
 import { MemoryAppRepository } from "@dawn/app/testkit/memory-repository";
+import type { GoogleAuthAccountTokens } from "@dawn/auth";
 import type {
   ApiKey,
   AutomationRule,
@@ -28,8 +29,11 @@ import type {
   ReportSourceRef,
   RecurringInvoiceSchedule,
   TeamInvite,
+  TeamMember,
+  TeamMembership,
   TeamRole,
   TimeEntry,
+  Transaction,
   OAuthApp,
   OAuthGrant,
   WebhookDelivery,
@@ -72,8 +76,11 @@ import {
   withSelectedTeam,
 } from "./testkit/context";
 
+type RecordedOutboxEvent = Parameters<DawnRepository["appendOutboxEvent"]>[0];
+
 class MemoryTransactionReviewRepository extends MemoryAppRepository implements DawnRepository {
   declare auditEvents: AuditLogEntry[];
+  declare outboxEvents: RecordedOutboxEvent[];
   bankAccounts = new Map<string, BankAccount>();
   bankConnections = new Map<string, BankConnection>();
   customers = new Map<string, Customer>();
@@ -143,7 +150,7 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     });
   }
 
-  async appendOutboxEvent(input: unknown) {
+  async appendOutboxEvent(input: RecordedOutboxEvent) {
     this.outboxEvents.push(input);
   }
 
@@ -700,6 +707,41 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       }));
   }
 
+  async listInboxMatchCandidatesForTransaction(input: {
+    teamId: string;
+    transaction: Transaction;
+    limit: number;
+  }) {
+    return [...this.inboxItems.values()]
+      .filter((item) => item.teamId === input.teamId)
+      .filter(
+        (item) =>
+          item.status === "needs_review" &&
+          item.extractionStatus === "completed" &&
+          Boolean(item.latestExtraction),
+      )
+      .filter(
+        (item) =>
+          !this.attachments.some(
+            (attachment) =>
+              attachment.documentId === item.documentId ||
+              attachment.transactionId === input.transaction.id,
+          ),
+      )
+      .filter(
+        (item) =>
+          ![...this.matchSuggestions.values()].some(
+            (suggestion) =>
+              suggestion.teamId === input.teamId &&
+              suggestion.inboxItemId === item.id &&
+              suggestion.transactionId === input.transaction.id &&
+              (suggestion.status === "suggested" || suggestion.status === "accepted"),
+          ),
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, input.limit);
+  }
+
   async upsertInboxMatchSuggestions(input: {
     teamId: string;
     inboxItemId: string;
@@ -1186,7 +1228,7 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
   async getTimeEntriesForTeam(teamId: string, timeEntryIds: string[]) {
     return timeEntryIds
       .map((timeEntryId) => this.timeEntries.get(timeEntryId))
-      .filter((entry): entry is TimeEntry => Boolean(entry) && entry.teamId === teamId);
+      .filter((entry): entry is TimeEntry => entry !== undefined && entry.teamId === teamId);
   }
 
   async createProject(input: {
@@ -2216,7 +2258,13 @@ const testDocumentUrlSigner: DocumentUrlSigner = {
   },
 };
 
-async function createTestRouter(repository: DawnRepository) {
+async function createTestRouter(
+  repository: DawnRepository,
+  options: {
+    emailInboxConnectors?: readonly InboxConnector[];
+    googleAuthAccountTokensForUser?: (userId: string) => Promise<GoogleAuthAccountTokens | null>;
+  } = {},
+) {
   process.env.DATABASE_URL ??= "postgres://test";
   process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";
   process.env.BETTER_AUTH_URL ??= "http://localhost:3000";
@@ -2235,7 +2283,7 @@ async function createTestRouter(repository: DawnRepository) {
       }),
     ],
     integrationProviders: createMockIntegrationProviders(),
-    emailInboxConnectors: [
+    emailInboxConnectors: options.emailInboxConnectors ?? [
       new InboxConnector({
         provider: createMockEmailInboxProvider(),
         tokenCodec: createEmailInboxTokenCodec({
@@ -2244,9 +2292,35 @@ async function createTestRouter(repository: DawnRepository) {
         }),
       }),
     ],
+    googleAuthAccountTokensForUser: options.googleAuthAccountTokensForUser,
+    emailInboxOAuthStateCodec: createEmailInboxOAuthStateCodec({
+      secret: "test_oauth_state_secret_that_is_long_enough",
+      allowedRedirectOrigins: ["http://localhost:3001"],
+      now: () => new Date("2026-06-15T10:00:00.000Z"),
+    }),
     documentUrlSigner: testDocumentUrlSigner,
     invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
     invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
+  });
+}
+
+function createGmailMockInboxConnector() {
+  return new InboxConnector({
+    provider: {
+      ...createMockEmailInboxProvider(),
+      provider: "gmail" as const,
+      displayName: "Gmail",
+      defaultScopes: [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/gmail.readonly",
+      ],
+    },
+    tokenCodec: createEmailInboxTokenCodec({
+      secret: "test_secret_that_is_long_enough_for_aes",
+      keyId: "test-gmail-token",
+    }),
   });
 }
 
@@ -4036,10 +4110,23 @@ describe("appRouter", () => {
         teamId: "team_1",
         provider: "mock-email-inbox",
         redirectUrl: "http://localhost:3001/inbox?emailInboxProvider=mock-email-inbox",
-        state: "state_1",
       },
       context,
     );
+    await expect(
+      call(
+        router.emailInbox.completeOAuth,
+        // @ts-expect-error Missing state is intentional validation coverage.
+        {
+          teamId: "team_1",
+          provider: "mock-email-inbox",
+          code: "oauth_code_1",
+          redirectUrl: "http://localhost:3001/inbox?emailInboxProvider=mock-email-inbox",
+          idempotencyKey: "email_inbox_oauth_missing_state",
+        },
+        context,
+      ),
+    ).rejects.toThrow();
     const connected = await call(
       router.emailInbox.completeOAuth,
       {
@@ -4047,6 +4134,7 @@ describe("appRouter", () => {
         provider: "mock-email-inbox",
         code: "oauth_code_1",
         redirectUrl: "http://localhost:3001/inbox?emailInboxProvider=mock-email-inbox",
+        state: authUrl.state,
         idempotencyKey: "email_inbox_oauth_1",
       },
       context,
@@ -4077,7 +4165,7 @@ describe("appRouter", () => {
     const workspace = await call(router.emailInbox.list, { teamId: "team_1" }, context);
 
     expect(catalog.providers.map((provider) => provider.provider)).toContain("mock-email-inbox");
-    expect(authUrl.authorizationUrl).toContain("state=state_1");
+    expect(authUrl.authorizationUrl).toContain(`state=${encodeURIComponent(authUrl.state)}`);
     expect(connected.connection).toMatchObject({
       category: "email",
       provider: "mock-email-inbox",
@@ -4096,6 +4184,7 @@ describe("appRouter", () => {
     expect(requested.connection.id).toBe(connected.connection.id);
     expect(workspace.connections[0]).toMatchObject({
       accountEmail: "receipts@example.com",
+      grantedScopes: ["email.inbox.readonly"],
       settings: {
         senderBlocklist: ["blocked@example.com"],
         domainBlocklist: ["noise.example"],
@@ -4105,6 +4194,165 @@ describe("appRouter", () => {
       type: "inbox.provider.sync_requested",
       payload: { connectionId: connected.connection.id, provider: "mock-email-inbox" },
     });
+  });
+
+  test("connects Gmail inbox from the signed-in Google account", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    const googleTokens: GoogleAuthAccountTokens = {
+      provider: "google",
+      providerAccountId: "google_user_1",
+      accessToken: "google_access_token",
+      refreshToken: "google_refresh_token",
+      expiresAt: "2026-06-15T16:00:00.000Z",
+      idToken: "google_id_token",
+      scopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/gmail.readonly"],
+      rawPayload: { providerId: "google", providerAccountId: "google_user_1" },
+    };
+    const router = await createTestRouter(repository, {
+      emailInboxConnectors: [createGmailMockInboxConnector()],
+      googleAuthAccountTokensForUser: async (userId) => (userId === "user_1" ? googleTokens : null),
+    });
+    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+
+    const connected = await call(
+      router.emailInbox.connectGoogleLogin,
+      {
+        teamId: "team_1",
+        idempotencyKey: "email_inbox_google_login_1",
+      },
+      context,
+    );
+
+    expect(connected.connection).toMatchObject({
+      category: "email",
+      provider: "gmail",
+      displayName: "receipts@example.com",
+      status: "connected",
+    });
+    expect(
+      repository.integrationConnections.get(connected.connection.id)?.tokenCiphertext,
+    ).not.toContain("google_refresh_token");
+    expect(connected.connection.rawPayload?.emailInbox).toMatchObject({
+      source: "google_login",
+      grantedScopes: [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/gmail.readonly",
+      ],
+    });
+    expect(connected.syncRequest.connection.id).toBe(connected.connection.id);
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "inbox.provider.sync_requested",
+      payload: {
+        connectionId: connected.connection.id,
+        provider: "gmail",
+        manual: true,
+      },
+    });
+
+    const replayed = await call(
+      router.emailInbox.connectGoogleLogin,
+      {
+        teamId: "team_1",
+        idempotencyKey: "email_inbox_google_login_1",
+      },
+      context,
+    );
+
+    expect(replayed.replayed).toBe(true);
+    expect(replayed.syncRequest.replayed).toBe(true);
+    expect(
+      repository.outboxEvents.filter((event) => event.type === "inbox.provider.sync_requested"),
+    ).toHaveLength(1);
+  });
+
+  test("connects Gmail inbox from Google login access token without a refresh token", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    const googleTokens: GoogleAuthAccountTokens = {
+      provider: "google",
+      providerAccountId: "google_user_1",
+      accessToken: "google_access_token",
+      refreshToken: null,
+      expiresAt: "2026-06-15T16:00:00.000Z",
+      idToken: "google_id_token",
+      scopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/gmail.readonly"],
+      rawPayload: { providerId: "google", providerAccountId: "google_user_1" },
+    };
+    const router = await createTestRouter(repository, {
+      emailInboxConnectors: [createGmailMockInboxConnector()],
+      googleAuthAccountTokensForUser: async (userId) => (userId === "user_1" ? googleTokens : null),
+    });
+    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+
+    const connected = await call(
+      router.emailInbox.connectGoogleLogin,
+      {
+        teamId: "team_1",
+        idempotencyKey: "email_inbox_google_login_access_token_only",
+      },
+      context,
+    );
+
+    expect(connected.connection).toMatchObject({
+      category: "email",
+      provider: "gmail",
+      displayName: "receipts@example.com",
+      status: "connected",
+    });
+    expect(connected.connection.rawPayload?.emailInbox).toMatchObject({
+      source: "google_login",
+      grantedScopes: [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/gmail.readonly",
+      ],
+    });
+    expect(connected.syncRequest.connection.id).toBe(connected.connection.id);
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "inbox.provider.sync_requested",
+      payload: {
+        connectionId: connected.connection.id,
+        provider: "gmail",
+        manual: true,
+      },
+    });
+  });
+
+  test("rejects Google login inbox connection without Gmail readonly scope", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    const router = await createTestRouter(repository, {
+      emailInboxConnectors: [createGmailMockInboxConnector()],
+      googleAuthAccountTokensForUser: async () => ({
+        provider: "google",
+        providerAccountId: "google_user_1",
+        accessToken: "google_access_token",
+        refreshToken: "google_refresh_token",
+        expiresAt: "2026-06-15T16:00:00.000Z",
+        scopes: ["openid", "email", "profile"],
+        rawPayload: {},
+      }),
+    });
+    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+
+    await expect(
+      call(
+        router.emailInbox.connectGoogleLogin,
+        {
+          teamId: "team_1",
+          idempotencyKey: "email_inbox_google_login_missing_scope",
+        },
+        context,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(repository.integrationConnections).toHaveLength(0);
   });
 
   test("returns operations workspace with redacted failure and audit records", async () => {

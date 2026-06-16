@@ -10,6 +10,7 @@
     }
   },
   "scripts": {
+    "check-types": "tsgo --noEmit",
     "db:push": "drizzle-kit push",
     "db:pull": "drizzle-kit introspect",
     "db:introspect": "drizzle-kit introspect",

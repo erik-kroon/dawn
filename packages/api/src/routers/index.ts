@@ -9,9 +9,11 @@ import {
   commitCsvTransactionImport,
   completeBankConnection,
   completeEmailInboxOAuth,
+  connectEmailInboxFromProviderToken,
   createLedgerCounterparty,
   connectIntegration,
   createDeterministicInvoicePdfRenderer,
+  createEmailInboxOAuthStateCodec,
   createBankConnectionSession,
   createBankingProviderRegistry,
   connectMockBankConnection,
@@ -88,6 +90,7 @@ import {
   type AccountantPacketAttachmentResolver,
   type DocumentExtractionFields,
   type DocumentUrlSigner,
+  type EmailInboxOAuthStateCodec,
   type InvoicePdfRenderer,
   type TransactionImportPayloadStorage,
   updateEmailInboxSettings,
@@ -95,21 +98,21 @@ import {
   updateTeamMemberRole,
 } from "@dawn/app";
 import { RateLimitError } from "@dawn/app/rate-limit";
+import { getGoogleAuthAccountTokensForUser, type GoogleAuthAccountTokens } from "@dawn/auth";
 import { DrizzleDawnRepository } from "@dawn/db/dawn-repository";
 import { publicApiScopes } from "@dawn/domain";
+import { googleGmailReadonlyScope } from "@dawn/env/google-oauth";
 import { env } from "@dawn/env/server";
 import {
   createMockBankingProvider,
   createSandboxBankingProvider,
   createMockIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
-  createEmailInboxTokenCodec,
-  createGmailEmailInboxProvider,
-  createMockEmailInboxProvider,
-  InboxConnector,
   type AccountantPacketEmailDeliveryProvider,
   type BankingProvider,
   type EmailInboxProviderName,
+  type EmailInboxTokenBundle,
+  type InboxConnector,
   type IntegrationProvider,
   type InvoiceEmailDeliveryProvider,
 } from "@dawn/integrations";
@@ -118,6 +121,7 @@ import { z } from "zod";
 import { protectedProcedure, publicProcedure } from "../index";
 import { appRequestFromSession } from "../context";
 import { createDocumentUrlSigner } from "../document-url";
+import { createDefaultEmailInboxConnectors } from "../email-inbox-connectors";
 import { enforceAssistantRateLimit } from "../rate-limit";
 
 export type AppRouterDependencies = {
@@ -125,6 +129,8 @@ export type AppRouterDependencies = {
   bankingProviders: readonly BankingProvider[];
   integrationProviders: readonly IntegrationProvider[];
   emailInboxConnectors: readonly InboxConnector[];
+  emailInboxOAuthStateCodec?: EmailInboxOAuthStateCodec;
+  googleAuthAccountTokensForUser?: (userId: string) => Promise<GoogleAuthAccountTokens | null>;
   documentUrlSigner: DocumentUrlSigner;
   accountantPacketAttachmentResolver?: AccountantPacketAttachmentResolver;
   accountantPacketEmailDeliveryProvider?: AccountantPacketEmailDeliveryProvider;
@@ -445,7 +451,6 @@ const createEmailInboxAuthorizationUrlInput = z.object({
   teamId: z.string().min(1),
   provider: emailInboxProviderInput,
   redirectUrl: z.url(),
-  state: z.string().min(1).nullable().optional(),
   loginHint: z.email().nullable().optional(),
 });
 
@@ -454,6 +459,12 @@ const completeEmailInboxOAuthInput = z.object({
   provider: emailInboxProviderInput,
   code: z.string().min(1),
   redirectUrl: z.url(),
+  state: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const connectGoogleEmailInboxInput = z.object({
+  teamId: z.string().min(1),
   idempotencyKey: z.string().min(1),
 });
 
@@ -779,7 +790,12 @@ function createDefaultDependencies(): AppRouterDependencies {
       }),
     ],
     integrationProviders: createMockIntegrationProviders(),
-    emailInboxConnectors: createDefaultEmailInboxConnectors(),
+    emailInboxConnectors: createDefaultEmailInboxConnectors(env),
+    emailInboxOAuthStateCodec: createEmailInboxOAuthStateCodec({
+      secret: env.BETTER_AUTH_SECRET,
+      allowedRedirectOrigins: [env.CORS_ORIGIN],
+    }),
+    googleAuthAccountTokensForUser: getGoogleAuthAccountTokensForUser,
     documentUrlSigner: createDocumentUrlSigner({
       baseUrl: env.BETTER_AUTH_URL,
       secret: env.BETTER_AUTH_SECRET,
@@ -789,24 +805,30 @@ function createDefaultDependencies(): AppRouterDependencies {
   };
 }
 
-function createDefaultEmailInboxConnectors() {
-  const tokenCodec = createEmailInboxTokenCodec({
-    secret: env.BETTER_AUTH_SECRET,
-    keyId: "server-email-inbox-token-v1",
-  });
-  const providers = [
-    createMockEmailInboxProvider(),
-    ...(env.GMAIL_CLIENT_ID && env.GMAIL_CLIENT_SECRET
-      ? [
-          createGmailEmailInboxProvider({
-            clientId: env.GMAIL_CLIENT_ID,
-            clientSecret: env.GMAIL_CLIENT_SECRET,
-          }),
-        ]
-      : []),
-  ];
+function googleAuthTokensToEmailInboxBundle(
+  tokens: GoogleAuthAccountTokens,
+): EmailInboxTokenBundle {
+  const scopes = tokens.scopes;
 
-  return providers.map((provider) => new InboxConnector({ provider, tokenCodec }));
+  if (!scopes.includes(googleGmailReadonlyScope)) {
+    throw new AppError(
+      "CONFLICT",
+      "Google login is missing Gmail read-only access; sign in with Google again and grant Gmail access",
+    );
+  }
+
+  return {
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
+    expiresAt: tokens.expiresAt,
+    tokenType: "Bearer",
+    scopes,
+    rawPayload: {
+      ...tokens.rawPayload,
+      source: "better-auth-google-login",
+      providerAccountId: tokens.providerAccountId,
+    },
+  };
 }
 
 export function createAppRouter(dependencies: AppRouterDependencies = createDefaultDependencies()) {
@@ -815,11 +837,16 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     documentUrlSigner,
     integrationProviders,
     emailInboxConnectors,
+    emailInboxOAuthStateCodec = createEmailInboxOAuthStateCodec({
+      secret: env.BETTER_AUTH_SECRET,
+      allowedRedirectOrigins: [env.CORS_ORIGIN],
+    }),
+    googleAuthAccountTokensForUser = getGoogleAuthAccountTokensForUser,
     invoiceEmailDeliveryProvider,
     invoicePdfRenderer,
     dawnRepository,
     accountantPacketAttachmentResolver,
-    accountantPacketEmailDeliveryProvider = createMockInvoiceEmailDeliveryProvider(),
+    accountantPacketEmailDeliveryProvider,
     transactionImportPayloadStorage,
   } = dependencies;
   const bankingProviderRegistry = createBankingProviderRegistry(bankingProviders);
@@ -993,6 +1020,10 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .input(sendAccountantPacketEmailInput)
         .handler(async ({ context, input }) => {
           try {
+            if (!accountantPacketEmailDeliveryProvider) {
+              throw new AppError("CONFLICT", "Accountant packet email delivery is not configured");
+            }
+
             return await sendAccountantPacketEmail(
               dawnRepository,
               documentUrlSigner,
@@ -1600,6 +1631,7 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             return await createEmailInboxAuthorizationUrl(
               dawnRepository,
               emailInboxConnectors,
+              emailInboxOAuthStateCodec,
               appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
@@ -1617,12 +1649,53 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             return await completeEmailInboxOAuth(
               dawnRepository,
               emailInboxConnectors,
+              emailInboxOAuthStateCodec,
               appRequestFromSession(context, { teamId: input.teamId }),
               {
                 ...input,
                 provider: input.provider as EmailInboxProviderName,
               },
             );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      connectGoogleLogin: protectedProcedure
+        .input(connectGoogleEmailInboxInput)
+        .handler(async ({ context, input }) => {
+          try {
+            const googleTokens = await googleAuthAccountTokensForUser(context.session.user.id);
+
+            if (!googleTokens) {
+              throw new AppError(
+                "CONFLICT",
+                "Sign in with Google again and grant Gmail access before connecting Gmail",
+              );
+            }
+
+            const connected = await connectEmailInboxFromProviderToken(
+              dawnRepository,
+              emailInboxConnectors,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              {
+                teamId: input.teamId,
+                provider: "gmail",
+                tokens: googleAuthTokensToEmailInboxBundle(googleTokens),
+                idempotencyKey: input.idempotencyKey,
+                source: "google_login",
+              },
+            );
+            const syncRequest = await requestEmailInboxSync(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              {
+                teamId: input.teamId,
+                connectionId: connected.connection.id,
+                idempotencyKey: `${input.idempotencyKey}:initial-sync`,
+              },
+            );
+
+            return { ...connected, syncRequest };
           } catch (error) {
             mapAppError(error);
           }

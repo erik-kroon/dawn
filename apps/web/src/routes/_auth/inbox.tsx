@@ -9,6 +9,7 @@ import {
 } from "@dawn/ui/components/dropdown-menu";
 import { Input } from "@dawn/ui/components/input";
 import { Label } from "@dawn/ui/components/label";
+import { toastManager } from "@dawn/ui/components/toast";
 import { formatMoney } from "@dawn/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -31,6 +32,12 @@ import {
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import { useTransactionSync } from "@/sync/transactions";
+import { authClient } from "@/lib/auth-client";
+import {
+  gmailReadonlyScope,
+  googleInboxAuthScopes,
+  googleInboxCallbackUrl,
+} from "@/lib/google-inbox-auth";
 import { client, orpc } from "@/utils/orpc";
 
 import { ensureCurrentTeam, optionalStringSearchParam } from "../-team-routing";
@@ -39,6 +46,7 @@ type InboxTab = "all" | "review";
 
 type InboxSearch = {
   code?: string;
+  connectGoogleLogin?: "1";
   emailInboxProvider?: "gmail" | "mock-email-inbox";
   itemId?: string;
   q?: string;
@@ -50,6 +58,7 @@ export const Route = createFileRoute("/_auth/inbox")({
   component: InboxRoute,
   validateSearch: (search: Record<string, unknown>): InboxSearch => ({
     code: optionalStringSearchParam(search.code),
+    connectGoogleLogin: search.connectGoogleLogin === "1" ? "1" : undefined,
     emailInboxProvider:
       search.emailInboxProvider === "gmail" || search.emailInboxProvider === "mock-email-inbox"
         ? search.emailInboxProvider
@@ -101,10 +110,12 @@ function InboxRoute() {
   const navigate = useNavigate({ from: Route.fullPath });
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const googleLoginAutoConnectAttemptedRef = useRef(false);
   const query = search.q ?? "";
   const tab = search.tab ?? "all";
   const selectedInboxItemId = search.itemId ?? null;
   const [documentFile, setDocumentFile] = useState<File | null>(null);
+  const [googleLoginLinkPending, setGoogleLoginLinkPending] = useState(false);
   const [extractionCorrections, setExtractionCorrections] = useState<
     Record<string, ExtractionCorrectionState>
   >({});
@@ -131,6 +142,40 @@ function InboxRoute() {
         ...next,
       }),
     });
+  }
+
+  function clearGoogleLoginConnectSearch() {
+    return navigate({
+      replace: true,
+      search: (previous) => ({
+        ...previous,
+        connectGoogleLogin: undefined,
+      }),
+    });
+  }
+
+  async function linkGoogleLoginForInbox() {
+    if (!currentTeamId) {
+      return;
+    }
+
+    setGoogleLoginLinkPending(true);
+    await authClient.linkSocial(
+      {
+        provider: "google",
+        callbackURL: googleInboxCallbackUrl(currentTeamId),
+        scopes: googleInboxAuthScopes(),
+      },
+      {
+        onError: (error) => {
+          setGoogleLoginLinkPending(false);
+          toastManager.add({
+            title: error.error.message || error.error.statusText,
+            type: "error",
+          });
+        },
+      },
+    );
   }
 
   const documentUploadMutation = useMutation({
@@ -214,7 +259,6 @@ function InboxRoute() {
         teamId: input.teamId,
         provider: input.provider,
         redirectUrl: emailInboxRedirectUrl(input.teamId, input.provider),
-        state: crypto.randomUUID(),
       });
     },
     onSuccess: (result) => {
@@ -241,6 +285,19 @@ function InboxRoute() {
     orpc.emailInbox.requestSync.mutationOptions({
       onSuccess: async () => {
         await queryClient.invalidateQueries({ queryKey: orpc.emailInbox.list.queryKey() });
+        await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
+      },
+    }),
+  );
+  const connectGoogleLoginMutation = useMutation(
+    orpc.emailInbox.connectGoogleLogin.mutationOptions({
+      onError: async () => {
+        await clearGoogleLoginConnectSearch();
+      },
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.emailInbox.list.queryKey() });
+        await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
+        await clearGoogleLoginConnectSearch();
       },
     }),
   );
@@ -256,6 +313,7 @@ function InboxRoute() {
     if (
       !currentTeamId ||
       !search.code ||
+      !search.state ||
       !search.emailInboxProvider ||
       completeEmailInboxOAuthMutation.isPending ||
       completeEmailInboxOAuthMutation.isSuccess
@@ -268,9 +326,32 @@ function InboxRoute() {
       provider: search.emailInboxProvider,
       code: search.code,
       redirectUrl: emailInboxRedirectUrl(currentTeamId, search.emailInboxProvider),
+      state: search.state,
       idempotencyKey: `email-inbox-oauth:${search.emailInboxProvider}:${search.code}`,
     });
-  }, [currentTeamId, search.code, search.emailInboxProvider]);
+  }, [currentTeamId, search.code, search.emailInboxProvider, search.state]);
+
+  useEffect(() => {
+    if (search.connectGoogleLogin !== "1") {
+      googleLoginAutoConnectAttemptedRef.current = false;
+      return;
+    }
+
+    if (
+      !currentTeamId ||
+      googleLoginAutoConnectAttemptedRef.current ||
+      connectGoogleLoginMutation.isPending ||
+      connectGoogleLoginMutation.isSuccess
+    ) {
+      return;
+    }
+
+    googleLoginAutoConnectAttemptedRef.current = true;
+    connectGoogleLoginMutation.mutate({
+      teamId: currentTeamId,
+      idempotencyKey: crypto.randomUUID(),
+    });
+  }, [currentTeamId, search.connectGoogleLogin]);
 
   const inboxItems = inbox.data?.inboxItems ?? [];
   const filteredInboxItems = useMemo(() => {
@@ -321,6 +402,9 @@ function InboxRoute() {
     filteredInboxItems.find((item) => item.id === selectedInboxItemId) ??
     filteredInboxItems[0] ??
     null;
+  const missingEmailInboxOAuthState = Boolean(
+    search.code && search.emailInboxProvider && !search.state,
+  );
   const selectedCorrection = selectedItem
     ? (extractionCorrections[selectedItem.id] ??
       extractionFieldsToCorrectionState(selectedItem.latestExtraction?.fields))
@@ -359,6 +443,7 @@ function InboxRoute() {
 
       <EmailInboxConnectorStrip
         connections={emailInbox.data?.connections ?? []}
+        googleLoginConnectPending={googleLoginLinkPending || connectGoogleLoginMutation.isPending}
         connectPending={connectEmailInboxMutation.isPending}
         currentTeamId={currentTeamId}
         oauthPending={completeEmailInboxOAuthMutation.isPending}
@@ -368,6 +453,9 @@ function InboxRoute() {
           }
 
           connectEmailInboxMutation.mutate({ teamId: currentTeamId, provider });
+        }}
+        onConnectGoogleLogin={() => {
+          void linkGoogleLoginForInbox();
         }}
         onSaveSettings={(connectionId, settings) => {
           if (!currentTeamId) {
@@ -686,7 +774,9 @@ function InboxRoute() {
                               >
                                 {suggestion.status.replace("_", " ")}
                               </Badge>
-                              <Badge variant="muted">{formatMatchScore(suggestion.score)}</Badge>
+                              <Badge variant="secondary">
+                                {formatMatchScore(suggestion.score)}
+                              </Badge>
                             </div>
                             <p className="mt-1 text-xs text-muted-foreground">
                               {suggestion.transaction
@@ -812,8 +902,25 @@ function InboxRoute() {
         ) : null}
         {acceptInboxMatchMutation.error ? <p>{acceptInboxMatchMutation.error.message}</p> : null}
         {rejectInboxMatchMutation.error ? <p>{rejectInboxMatchMutation.error.message}</p> : null}
+        {connectEmailInboxMutation.error ? <p>{connectEmailInboxMutation.error.message}</p> : null}
+        {completeEmailInboxOAuthMutation.error ? (
+          <p>{completeEmailInboxOAuthMutation.error.message}</p>
+        ) : null}
+        {missingEmailInboxOAuthState ? (
+          <p>Email inbox OAuth callback is missing state. Restart the connection from Inbox.</p>
+        ) : null}
+        {connectGoogleLoginMutation.error ? (
+          <p>{connectGoogleLoginMutation.error.message}</p>
+        ) : null}
+        {requestEmailInboxSyncMutation.error ? (
+          <p>{requestEmailInboxSyncMutation.error.message}</p>
+        ) : null}
+        {updateEmailInboxSettingsMutation.error ? (
+          <p>{updateEmailInboxSettingsMutation.error.message}</p>
+        ) : null}
         {documents.error ? <p>{documents.error.message}</p> : null}
         {inbox.error ? <p>{inbox.error.message}</p> : null}
+        {emailInbox.error ? <p>{emailInbox.error.message}</p> : null}
       </div>
     </div>
   );
@@ -909,6 +1016,7 @@ type EmailInboxProviderOption = {
 
 type EmailInboxConnectionOption = {
   accountEmail: string | null;
+  grantedScopes: readonly string[];
   reauthorizationRequired: boolean;
   settings: {
     senderBlocklist: string[];
@@ -919,8 +1027,11 @@ type EmailInboxConnectionOption = {
   };
   latestSyncRun?: {
     status: string;
+    startedAt?: string | null;
+    completedAt?: string | null;
     recordsSynced: number;
     error?: string | null;
+    rawPayload?: Record<string, unknown> | null;
   } | null;
   connection: {
     id: string;
@@ -935,8 +1046,10 @@ function EmailInboxConnectorStrip({
   connections,
   connectPending,
   currentTeamId,
+  googleLoginConnectPending,
   oauthPending,
   onConnect,
+  onConnectGoogleLogin,
   onSaveSettings,
   onSync,
   providers,
@@ -946,8 +1059,10 @@ function EmailInboxConnectorStrip({
   connections: EmailInboxConnectionOption[];
   connectPending: boolean;
   currentTeamId?: string;
+  googleLoginConnectPending: boolean;
   oauthPending: boolean;
   onConnect: (provider: "gmail" | "mock-email-inbox") => void;
+  onConnectGoogleLogin: () => void;
   onSaveSettings: (
     connectionId: string,
     settings: {
@@ -969,6 +1084,9 @@ function EmailInboxConnectorStrip({
     connections.find((connection) => connection.connection.provider === "gmail") ??
     connections[0] ??
     null;
+  const scopeSummary = primaryConnection
+    ? emailInboxGrantedScopeSummary(primaryConnection)
+    : (primaryProvider?.defaultScopes.join(" ") ?? "gmail.readonly");
   const [blockedSenders, setBlockedSenders] = useState(
     primaryConnection?.settings.senderBlocklist.join(", ") ?? "",
   );
@@ -999,6 +1117,7 @@ function EmailInboxConnectorStrip({
               ? `${primaryConnection.connection.provider} · ${formatEmailInboxSyncStatus(primaryConnection)}`
               : "Connect Gmail to import receipt attachments and email-body receipts."}
           </p>
+          <p className="mt-1 truncate text-xs text-muted-foreground">{scopeSummary}</p>
         </div>
       </div>
 
@@ -1026,9 +1145,7 @@ function EmailInboxConnectorStrip({
       ) : (
         <div className="grid gap-1 text-xs text-muted-foreground">
           <span>Scopes</span>
-          <span className="truncate font-mono">
-            {primaryProvider?.defaultScopes.join(" ") ?? "gmail.readonly"}
-          </span>
+          <span className="truncate font-mono">{scopeSummary}</span>
         </div>
       )}
 
@@ -1064,14 +1181,27 @@ function EmailInboxConnectorStrip({
             </Button>
           </>
         ) : (
-          <Button
-            disabled={connectPending || !currentTeamId || !primaryProvider}
-            onClick={() => (primaryProvider ? onConnect(primaryProvider.provider) : undefined)}
-            size="sm"
-          >
-            <MailIcon aria-hidden="true" className="size-3.5" />
-            Connect {primaryProvider?.displayName ?? "Gmail"}
-          </Button>
+          <>
+            <Button
+              disabled={connectPending || !currentTeamId || primaryProvider?.provider !== "gmail"}
+              loading={googleLoginConnectPending}
+              onClick={onConnectGoogleLogin}
+              size="sm"
+            >
+              <MailIcon aria-hidden="true" className="size-3.5" />
+              Use Google login
+            </Button>
+            <Button
+              disabled={
+                connectPending || googleLoginConnectPending || !currentTeamId || !primaryProvider
+              }
+              onClick={() => (primaryProvider ? onConnect(primaryProvider.provider) : undefined)}
+              size="sm"
+              variant="outline"
+            >
+              Connect {primaryProvider?.displayName ?? "Gmail"}
+            </Button>
+          </>
         )}
       </div>
     </section>
@@ -1159,7 +1289,7 @@ function InboxStatusBadge({
   }
 
   if (extractionStatus === "pending") {
-    return <Badge variant="muted">Pending</Badge>;
+    return <Badge variant="secondary">Pending</Badge>;
   }
 
   return <Badge variant="outline">{status.replace("_", " ")}</Badge>;
@@ -1267,8 +1397,24 @@ function formatMatchScore(score: number) {
 }
 
 function formatEmailInboxSyncStatus(connection: EmailInboxConnectionOption) {
-  if (connection.latestSyncRun?.status === "failed") {
-    return connection.latestSyncRun.error ?? "Last sync failed";
+  const latestSyncRun = connection.latestSyncRun;
+
+  if (latestSyncRun?.status === "running") {
+    return `Sync running since ${formatSyncDate(latestSyncRun.startedAt)}`;
+  }
+
+  if (latestSyncRun?.status === "failed") {
+    return `${latestSyncRun.error ?? "Last sync failed"} · ${formatSyncDate(
+      latestSyncRun.completedAt ?? latestSyncRun.startedAt,
+    )}`;
+  }
+
+  if (latestSyncRun?.status === "completed") {
+    const counts = emailInboxSyncRunCounts(latestSyncRun);
+
+    return `Last synced ${formatSyncDate(
+      latestSyncRun.completedAt ?? connection.connection.lastSyncAt,
+    )} · ${counts.imported} imported · ${counts.skipped} skipped`;
   }
 
   if (connection.connection.lastSyncAt) {
@@ -1276,6 +1422,43 @@ function formatEmailInboxSyncStatus(connection: EmailInboxConnectionOption) {
   }
 
   return "Ready to sync";
+}
+
+function formatSyncDate(value?: string | null) {
+  return value ? formatDate(value) : "unknown time";
+}
+
+function emailInboxSyncRunCounts(
+  syncRun: NonNullable<EmailInboxConnectionOption["latestSyncRun"]>,
+) {
+  const rawPayload = syncRun.rawPayload ?? {};
+
+  return {
+    imported: numberPayloadValue(rawPayload.imported) ?? syncRun.recordsSynced,
+    skipped: numberPayloadValue(rawPayload.skipped) ?? 0,
+  };
+}
+
+function numberPayloadValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function emailInboxGrantedScopeSummary(connection: EmailInboxConnectionOption) {
+  const scopes = connection.grantedScopes;
+
+  if (!scopes.length) {
+    return "Granted scopes unavailable";
+  }
+
+  const hasGmailReadOnly = scopes.includes(gmailReadonlyScope);
+  const prefix =
+    connection.connection.provider === "gmail"
+      ? hasGmailReadOnly
+        ? "Gmail read-only granted"
+        : "Gmail read-only missing"
+      : "Granted scopes";
+
+  return `${prefix} · ${scopes.join(" ")}`;
 }
 
 function emailInboxRedirectUrl(teamId: string, provider: "gmail" | "mock-email-inbox") {
@@ -1315,7 +1498,7 @@ function statusBadgeVariant(status: string) {
     return "warning";
   }
 
-  return "muted";
+  return "secondary";
 }
 
 function relativeDueLabel(dueAt?: string | null, fallback?: string) {

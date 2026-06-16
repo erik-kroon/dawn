@@ -77,7 +77,6 @@ function AppSidebar() {
                 isActive && "border-border bg-card text-foreground",
               )}
               key={to}
-              nativeButton={false}
               render={<Link search={teamSearch} title={label} to={to} />}
               size="icon"
               variant="ghost"

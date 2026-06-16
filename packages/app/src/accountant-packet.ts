@@ -350,6 +350,8 @@ export async function requestAccountantPacketExport(
 
     const exportableRows = await listExportableAccountantPacketRows(packetRepository, command);
 
+    assertExplicitExportRowsResolved(command, exportableRows);
+
     if (exportableRows.length === 0) {
       throw new AppError("CONFLICT", "No ready-to-export transactions are available for export");
     }
@@ -895,6 +897,30 @@ async function listExportableAccountantPacketRows(
   return rows.filter((row) => isTransactionReadyForAccountantExport(row.transaction));
 }
 
+function assertExplicitExportRowsResolved(
+  command: ExportAccountantPacketCommand,
+  rows: readonly AccountantPacketTransactionRow[],
+) {
+  const requestedTransactionIds = normalizedTransactionIds(command.transactionIds);
+
+  if (requestedTransactionIds.length === 0) {
+    return;
+  }
+
+  const exportableTransactionIds = new Set(rows.map((row) => row.transaction.id));
+
+  if (
+    requestedTransactionIds.every((transactionId) => exportableTransactionIds.has(transactionId))
+  ) {
+    return;
+  }
+
+  throw new AppError(
+    "CONFLICT",
+    "Every selected transaction must be ready to export and inside the packet period",
+  );
+}
+
 async function buildExportableAccountantPacket(input: {
   repository: AccountantPacketRepository;
   actorId: string;
@@ -903,6 +929,8 @@ async function buildExportableAccountantPacket(input: {
   generatedAt?: string;
 }): Promise<ExportAccountantPacketResult> {
   const exportableRows = await listExportableAccountantPacketRows(input.repository, input.command);
+
+  assertExplicitExportRowsResolved(input.command, exportableRows);
 
   if (exportableRows.length === 0) {
     throw new AppError("CONFLICT", "No ready-to-export transactions are available for export");
@@ -947,9 +975,12 @@ async function recordSuccessfulAccountantPacketExport(
   const metadata = {
     from: input.result.manifest.filters.from,
     to: input.result.manifest.filters.to,
+    formats: input.result.manifest.settings.formats,
+    csvDelimiter: input.result.manifest.settings.csvDelimiter,
     transactionCount: input.result.manifest.transactionCount,
     attachmentCount: input.result.manifest.attachmentCount,
     skippedAttachmentCount: input.result.manifest.skippedAttachmentCount,
+    currencyTotals: input.result.manifest.currencyTotals,
     transactionIds: input.result.manifest.filters.transactionIds,
     ...storageMetadata,
   };
@@ -974,9 +1005,13 @@ async function recordSuccessfulAccountantPacketExport(
       packetId: input.result.packetId,
       from: input.result.manifest.filters.from,
       to: input.result.manifest.filters.to,
+      formats: input.result.manifest.settings.formats,
+      csvDelimiter: input.result.manifest.settings.csvDelimiter,
       transactionIds: input.result.manifest.filters.transactionIds,
       transactionCount: input.result.manifest.transactionCount,
       attachmentCount: input.result.manifest.attachmentCount,
+      skippedAttachmentCount: input.result.manifest.skippedAttachmentCount,
+      currencyTotals: input.result.manifest.currencyTotals,
       ...storageMetadata,
     },
   });
@@ -1066,19 +1101,17 @@ async function buildAccountantPacket(input: {
     files: [],
   };
   const filesBeforeManifest = [...transactionFiles, ...attachmentFiles];
+  manifest.files = manifestFiles(filesBeforeManifest);
 
   const manifestFile = {
     path: "manifest.json",
     contentType: "application/json; charset=utf-8",
-    bytes: textBytes(
-      JSON.stringify({ ...manifest, files: manifestFiles(filesBeforeManifest) }, null, 2),
-    ),
+    bytes: textBytes(JSON.stringify(manifest, null, 2)),
     kind: "manifest_json" as const,
   };
   const finalFiles = [...transactionFiles, manifestFile, ...attachmentFiles].filter(
     (file): file is PacketFile => Boolean(file),
   );
-  manifest.files = manifestFiles(finalFiles);
 
   const zipBytes = createStoredZip(finalFiles);
 
@@ -1170,7 +1203,7 @@ function normalizeExportSettings(command: ExportAccountantPacketCommand) {
 
 function normalizedFormats(formats: readonly AccountantPacketFormat[] | undefined) {
   const normalized: AccountantPacketFormat[] = [
-    ...new Set<AccountantPacketFormat>(formats ?? ["csv"]),
+    ...new Set<AccountantPacketFormat>(formats ?? ["csv", "xlsx"]),
   ];
 
   if (normalized.length === 0) {

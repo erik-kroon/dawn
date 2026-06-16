@@ -4,8 +4,12 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./google-oauth": "./src/google-oauth.ts",
     "./server": "./src/server.ts",
     "./web": "./src/web.ts"
+  },
+  "scripts": {
+    "check-types": "tsgo --noEmit"
   },
   "dependencies": {
     "@t3-oss/env-core": "^0.13.1",

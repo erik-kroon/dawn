@@ -2,6 +2,8 @@ import "dotenv/config";
 import { createEnv } from "@t3-oss/env-core";
 import { z } from "zod";
 
+import { assertGoogleOAuthCredentialConfig } from "./google-oauth";
+
 export const serverEnvSchema = {
   DATABASE_URL: z.string().min(1),
   DATABASE_HOST: z.string().min(1).optional(),
@@ -18,6 +20,10 @@ export const serverEnvSchema = {
 };
 
 export function createServerEnv(runtimeEnv: Record<string, string | undefined> = process.env) {
+  if (!runtimeEnv.SKIP_ENV_VALIDATION) {
+    assertGoogleOAuthCredentialConfig(runtimeEnv);
+  }
+
   return createEnv({
     server: serverEnvSchema,
     runtimeEnv,

@@ -60,9 +60,14 @@ Set both values to expose Gmail in the email inbox provider catalog for the API
 Worker and background Worker. Gmail sync also depends on the existing
 `BETTER_AUTH_SECRET` token encryption key, `DAWN_JOBS` queue, cron-triggered
 Worker runtime, and `DAWN_DOCUMENTS` R2 bucket. The web app sends the OAuth
-redirect URL for the inbox route, so the Google OAuth client must allow the
-deployed web origin's `/inbox` callback URL. Dawn requests Gmail read-only
-access through `https://www.googleapis.com/auth/gmail.readonly`.
+redirect URL for the inbox route, and Google sign-in uses Better Auth's Google
+callback, so the Google OAuth client must allow both:
+
+- `<api origin>/api/auth/callback/google`
+- `<web origin>/inbox`
+
+Dawn requests Gmail read-only access through
+`https://www.googleapis.com/auth/gmail.readonly`.
 
 ## Commands
 

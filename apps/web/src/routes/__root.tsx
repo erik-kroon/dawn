@@ -1,5 +1,5 @@
-import { Toaster } from "@dawn/ui/components/sonner";
 import { Button } from "@dawn/ui/components/button";
+import { AnchoredToastProvider, ToastProvider } from "@dawn/ui/components/toast";
 import type { QueryClient } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { HeadContent, Link, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
@@ -64,10 +64,13 @@ function RootComponent() {
         disableTransitionOnChange
         storageKey="vite-ui-theme"
       >
-        <div className="min-h-svh">
-          <Outlet />
-        </div>
-        <Toaster richColors />
+        <ToastProvider>
+          <AnchoredToastProvider>
+            <div className="isolate min-h-svh">
+              <Outlet />
+            </div>
+          </AnchoredToastProvider>
+        </ToastProvider>
       </ThemeProvider>
       <TanStackRouterDevtools position="bottom-left" />
       <ReactQueryDevtools position="bottom" buttonPosition="bottom-right" />

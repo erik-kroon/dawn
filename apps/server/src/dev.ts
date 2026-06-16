@@ -1,11 +1,14 @@
+import { resolveGoogleOAuthCredentials } from "@dawn/env/google-oauth";
 import { env } from "@dawn/env/server";
 import type { DawnCloudflareBindings } from "@dawn/infra/cloudflare";
 import type { DawnQueueMessage } from "@dawn/jobs";
 import type { SyncCollectionContract } from "@dawn/sync";
 import { upgradeWebSocket, websocket, type BunWebSocketData } from "hono/bun";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import dawnServer, { configureLocalSyncSubscriptionHandler } from "./index";
-import { createMemoryDocumentObjectStorage } from "./document-storage";
+import { createFileDocumentObjectStorage } from "./document-storage";
 import { TenantRealtimeHub } from "./tenant-coordinator";
 import { configureLocalTenantSyncRuntime } from "./tenant-sync";
 import { createDawnWorkerRuntime } from "./worker-runtime";
@@ -23,7 +26,9 @@ type LocalR2PutOptions = {
 };
 
 const localSyncHub = new TenantRealtimeHub();
-const localDocumentObjectStorage = createMemoryDocumentObjectStorage();
+const localDocumentObjectStorage = createFileDocumentObjectStorage(
+  resolveLocalDocumentStoragePath(),
+);
 const localDocumentBucket = createLocalDocumentBucket();
 
 configureLocalTenantSyncRuntime({
@@ -55,8 +60,10 @@ const server = Bun.serve({
 });
 
 console.log(`Started development server: ${server.url}`);
+console.log(`Local document storage: ${resolveLocalDocumentStoragePath()}`);
 
 function localBindings(server: Bun.Server<BunWebSocketData>): LocalBindings {
+  const googleOAuthCredentials = resolveGoogleOAuthCredentials(env);
   const bindings: LocalBindings = {
     server,
     ENVIRONMENT: "preview",
@@ -66,6 +73,12 @@ function localBindings(server: Bun.Server<BunWebSocketData>): LocalBindings {
     BETTER_AUTH_SECRET: env.BETTER_AUTH_SECRET,
     POLAR_ACCESS_TOKEN: env.POLAR_ACCESS_TOKEN ?? "",
     POLAR_SUCCESS_URL: env.POLAR_SUCCESS_URL ?? "",
+    ...(googleOAuthCredentials
+      ? {
+          GMAIL_CLIENT_ID: googleOAuthCredentials.clientId,
+          GMAIL_CLIENT_SECRET: googleOAuthCredentials.clientSecret,
+        }
+      : {}),
     DATABASE_URL: env.DATABASE_URL,
     DAWN_DOCUMENTS: localDocumentBucket,
     DAWN_JOBS: createLocalQueue(() => bindings as DawnCloudflareBindings),
@@ -111,6 +124,12 @@ function resolvePort() {
   }
 
   return port;
+}
+
+function resolveLocalDocumentStoragePath() {
+  return process.env.DAWN_LOCAL_DOCUMENTS_DIR
+    ? resolve(process.env.DAWN_LOCAL_DOCUMENTS_DIR)
+    : fileURLToPath(new URL("../../../.dawn/documents", import.meta.url));
 }
 
 function createLocalDocumentBucket(): R2Bucket {

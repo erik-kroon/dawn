@@ -32,7 +32,7 @@ import {
   SlidersHorizontalIcon,
   XIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useTransactionSync } from "@/sync/transactions";
 import { orpc } from "@/utils/orpc";
@@ -62,13 +62,29 @@ type QueueBadgeVariant =
   | "outline"
   | "success"
   | "warning"
-  | "destructive"
-  | "muted";
+  | "destructive";
 
 type TransactionsSearch = {
   q?: string;
   tab?: TransactionTab;
   status?: TransactionQueueFilter;
+};
+
+type AccountantPacketExportSummary = {
+  fileName: string;
+  transactionCount: number;
+  attachmentCount: number;
+  skippedAttachmentCount: number;
+  formats: string[];
+  csvDelimiter: string;
+  from: string | null;
+  to: string | null;
+};
+
+type AccountantPacketPeriodDraft = {
+  selectionKey: string;
+  from: string;
+  to: string;
 };
 
 const transactionQueueFilters = [
@@ -152,6 +168,14 @@ function TransactionsRoute() {
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [packetPeriodDraft, setPacketPeriodDraft] = useState<AccountantPacketPeriodDraft>({
+    selectionKey: "",
+    from: "",
+    to: "",
+  });
+  const [lastExportSummary, setLastExportSummary] = useState<AccountantPacketExportSummary | null>(
+    null,
+  );
 
   const teams = useQuery(orpc.teams.list.queryOptions({ input: { teamId: currentTeamId } }));
   const transactionSync = useTransactionSync(currentTeamId);
@@ -250,12 +274,67 @@ function TransactionsRoute() {
       ),
     [selectedTransactions],
   );
+  const selectedReadyTransactionKey = useMemo(
+    () =>
+      selectedReadyTransactions
+        .map((transaction) => transaction.id)
+        .sort()
+        .join("|"),
+    [selectedReadyTransactions],
+  );
+  const selectedReadyPeriodDefaults = useMemo(
+    () => dateInputRangeForTransactions(selectedReadyTransactions),
+    [selectedReadyTransactions],
+  );
+  const selectedNonReadyTransactionCount =
+    selectedTransactionIds.size - selectedReadyTransactions.length;
+  const selectedReadyDateRange = useMemo(
+    () => dateRangeLabelForTransactions(selectedReadyTransactions),
+    [selectedReadyTransactions],
+  );
+  const packetPeriodFromIso = dateInputToUtcStart(packetPeriodDraft.from);
+  const packetPeriodToIso = dateInputToUtcEnd(packetPeriodDraft.to);
+  const hasValidPacketPeriod =
+    packetPeriodFromIso !== null &&
+    packetPeriodToIso !== null &&
+    Date.parse(packetPeriodFromIso) <= Date.parse(packetPeriodToIso);
+  const selectedReadyTransactionsWithinPacketPeriod =
+    packetPeriodFromIso !== null &&
+    packetPeriodToIso !== null &&
+    transactionsAreWithinDateRange(
+      selectedReadyTransactions,
+      packetPeriodFromIso,
+      packetPeriodToIso,
+    );
+  const canExportSelectedTransactions =
+    selectedReadyTransactions.length > 0 &&
+    selectedReadyTransactions.length === selectedTransactionIds.size &&
+    hasValidPacketPeriod &&
+    selectedReadyTransactionsWithinPacketPeriod;
 
   const allVisibleSelected =
     visibleTransactions.length > 0 &&
     visibleTransactions.every((transaction) => selectedTransactionIds.has(transaction.id));
   const activeTeamName =
     transactionReview.data?.teamName ?? teams.data?.teams[0]?.name ?? "Workspace";
+
+  useEffect(() => {
+    setPacketPeriodDraft((current) => {
+      if (current.selectionKey === selectedReadyTransactionKey) {
+        return current;
+      }
+
+      return {
+        selectionKey: selectedReadyTransactionKey,
+        from: selectedReadyPeriodDefaults.from,
+        to: selectedReadyPeriodDefaults.to,
+      };
+    });
+  }, [
+    selectedReadyPeriodDefaults.from,
+    selectedReadyPeriodDefaults.to,
+    selectedReadyTransactionKey,
+  ]);
 
   async function reviewTransaction(transaction: Transaction | TransactionSyncRecord) {
     if (!transactionReview.data) {
@@ -306,25 +385,49 @@ function TransactionsRoute() {
   }
 
   async function exportSelectedTransactions() {
-    if (!transactionReview.data || selectedReadyTransactions.length === 0) {
+    if (!transactionReview.data || selectedTransactionIds.size === 0) {
+      return;
+    }
+
+    if (selectedReadyTransactions.length !== selectedTransactionIds.size) {
+      setExportError("Only ready-to-export transactions can be exported.");
+      return;
+    }
+
+    if (!packetPeriodFromIso || !packetPeriodToIso || !hasValidPacketPeriod) {
+      setExportError("Choose a valid packet period before exporting.");
+      return;
+    }
+
+    if (!selectedReadyTransactionsWithinPacketPeriod) {
+      setExportError("Packet period must include every selected ready transaction.");
       return;
     }
 
     setExportError(null);
+    setLastExportSummary(null);
 
     try {
-      const postedTimes = selectedReadyTransactions.map((transaction) =>
-        new Date(transaction.postedAt).getTime(),
-      );
       const result = await exportMutation.mutateAsync({
         teamId: transactionReview.data.teamId,
-        from: new Date(Math.min(...postedTimes)).toISOString(),
-        to: new Date(Math.max(...postedTimes)).toISOString(),
+        from: packetPeriodFromIso,
+        to: packetPeriodToIso,
         transactionIds: selectedReadyTransactions.map((transaction) => transaction.id),
+        formats: ["csv", "xlsx"],
         idempotencyKey: crypto.randomUUID(),
       });
 
       downloadBase64File(result.bodyBase64, result.contentType, result.fileName);
+      setLastExportSummary({
+        fileName: result.fileName,
+        transactionCount: result.manifest.transactionCount,
+        attachmentCount: result.manifest.attachmentCount,
+        skippedAttachmentCount: result.manifest.skippedAttachmentCount,
+        formats: result.manifest.settings.formats,
+        csvDelimiter: result.manifest.settings.csvDelimiter,
+        from: result.manifest.filters.from,
+        to: result.manifest.filters.to,
+      });
       await queryClient.invalidateQueries({
         queryKey: orpc.transactionReview.list.queryKey(),
       });
@@ -741,6 +844,25 @@ function TransactionsRoute() {
       </div>
       {reviewError ? <p className="text-xs text-destructive">{reviewError}</p> : null}
       {exportError ? <p className="text-xs text-destructive">{exportError}</p> : null}
+      {lastExportSummary ? (
+        <div className="grid gap-2 border border-border bg-card/40 p-3 text-xs text-muted-foreground sm:grid-cols-[minmax(0,1fr)_auto]">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-foreground">
+              Downloaded {lastExportSummary.fileName}
+            </p>
+            <p className="mt-1">
+              {formatNullableDateRange(lastExportSummary.from, lastExportSummary.to)} ·{" "}
+              {lastExportSummary.formats.join(" + ").toUpperCase()} · delimiter{" "}
+              {lastExportSummary.csvDelimiter === "\t" ? "tab" : lastExportSummary.csvDelimiter}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-3 font-mono text-foreground sm:justify-end">
+            <span>{lastExportSummary.transactionCount} tx</span>
+            <span>{lastExportSummary.attachmentCount} attachments</span>
+            <span>{lastExportSummary.skippedAttachmentCount} skipped</span>
+          </div>
+        </div>
+      ) : null}
       {reviewMutation.error ? (
         <p className="text-xs text-destructive">{reviewMutation.error.message}</p>
       ) : null}
@@ -754,12 +876,50 @@ function TransactionsRoute() {
         <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 flex justify-center bg-gradient-to-t from-background via-background/85 to-transparent px-4 py-7">
           <div
             aria-live="polite"
-            className="pointer-events-auto flex min-h-11 w-full max-w-lg items-center justify-between border border-border bg-card px-3 text-sm shadow-[0_-16px_48px_rgba(0,0,0,0.45)]"
+            className="pointer-events-auto flex min-h-11 w-full max-w-3xl flex-col gap-3 border border-border bg-card px-3 py-3 text-sm shadow-[0_-16px_48px_rgba(0,0,0,0.45)] sm:flex-row sm:items-center sm:justify-between"
           >
-            <span className="truncate text-muted-foreground">
-              {selectedTransactionIds.size} selected · {selectedReadyTransactions.length} ready
+            <span className="min-w-0 text-muted-foreground">
+              <span className="block truncate">
+                {selectedTransactionIds.size} selected · {selectedReadyTransactions.length} ready
+                {selectedReadyDateRange ? ` · ${selectedReadyDateRange}` : ""}
+              </span>
+              {selectedNonReadyTransactionCount > 0 ? (
+                <span className="block truncate text-[11px] text-destructive">
+                  {selectedNonReadyTransactionCount} non-ready selected
+                </span>
+              ) : null}
             </span>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="grid gap-1 text-[11px] text-muted-foreground">
+                <span>From</span>
+                <Input
+                  className="h-8 w-36 px-2 text-xs"
+                  disabled={selectedReadyTransactions.length === 0}
+                  onChange={(event) =>
+                    setPacketPeriodDraft((current) => ({
+                      ...current,
+                      from: event.target.value,
+                    }))
+                  }
+                  type="date"
+                  value={packetPeriodDraft.from}
+                />
+              </label>
+              <label className="grid gap-1 text-[11px] text-muted-foreground">
+                <span>To</span>
+                <Input
+                  className="h-8 w-36 px-2 text-xs"
+                  disabled={selectedReadyTransactions.length === 0}
+                  onChange={(event) =>
+                    setPacketPeriodDraft((current) => ({
+                      ...current,
+                      to: event.target.value,
+                    }))
+                  }
+                  type="date"
+                  value={packetPeriodDraft.to}
+                />
+              </label>
               <Button
                 className="gap-2 border-border px-3 text-muted-foreground"
                 onClick={() => setSelectedTransactionIds(new Set())}
@@ -772,7 +932,7 @@ function TransactionsRoute() {
               </Button>
               <Button
                 className="gap-2 px-3"
-                disabled={exportMutation.isPending || selectedReadyTransactions.length === 0}
+                disabled={exportMutation.isPending || !canExportSelectedTransactions}
                 onClick={() => void exportSelectedTransactions()}
                 size="sm"
                 type="button"
@@ -881,7 +1041,7 @@ function accountantStatusMeta(status: TransactionAccountantStatus): {
   }
 
   if (status === "exported") {
-    return { label: "Exported", variant: "muted" };
+    return { label: "Exported", variant: "secondary" };
   }
 
   if (status === "export_failed") {
@@ -904,6 +1064,97 @@ function formatDate(value: string) {
     month: "short",
     day: "numeric",
   }).format(new Date(value));
+}
+
+function formatNullableDateRange(from: string | null, to: string | null) {
+  if (from && to) {
+    return `${formatDate(from)} - ${formatDate(to)}`;
+  }
+
+  if (from) {
+    return `From ${formatDate(from)}`;
+  }
+
+  if (to) {
+    return `Through ${formatDate(to)}`;
+  }
+
+  return "Selected transactions";
+}
+
+function dateRangeLabelForTransactions(transactions: readonly Pick<Transaction, "postedAt">[]) {
+  if (transactions.length === 0) {
+    return null;
+  }
+
+  const postedTimes = transactions.map((transaction) => new Date(transaction.postedAt).getTime());
+  return formatNullableDateRange(
+    new Date(Math.min(...postedTimes)).toISOString(),
+    new Date(Math.max(...postedTimes)).toISOString(),
+  );
+}
+
+function dateInputRangeForTransactions(transactions: readonly Pick<Transaction, "postedAt">[]) {
+  if (transactions.length === 0) {
+    return { from: "", to: "" };
+  }
+
+  const postedTimes = transactions.map((transaction) => new Date(transaction.postedAt).getTime());
+
+  return {
+    from: dateInputValueFromIso(new Date(Math.min(...postedTimes)).toISOString()),
+    to: dateInputValueFromIso(new Date(Math.max(...postedTimes)).toISOString()),
+  };
+}
+
+function dateInputValueFromIso(value: string) {
+  const date = new Date(value);
+
+  if (!Number.isFinite(date.getTime())) {
+    return "";
+  }
+
+  return date.toISOString().slice(0, 10);
+}
+
+function dateInputToUtcStart(value: string) {
+  return dateInputToUtcIso(value, "T00:00:00.000Z");
+}
+
+function dateInputToUtcEnd(value: string) {
+  return dateInputToUtcIso(value, "T23:59:59.999Z");
+}
+
+function dateInputToUtcIso(value: string, suffix: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+
+  const date = new Date(`${value}${suffix}`);
+
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+    return null;
+  }
+
+  return date.toISOString();
+}
+
+function transactionsAreWithinDateRange(
+  transactions: readonly Pick<Transaction, "postedAt">[],
+  from: string,
+  to: string,
+) {
+  const fromTime = Date.parse(from);
+  const toTime = Date.parse(to);
+
+  if (!Number.isFinite(fromTime) || !Number.isFinite(toTime)) {
+    return false;
+  }
+
+  return transactions.every((transaction) => {
+    const postedTime = Date.parse(transaction.postedAt);
+    return Number.isFinite(postedTime) && postedTime >= fromTime && postedTime <= toTime;
+  });
 }
 
 function monthChip(value?: string) {

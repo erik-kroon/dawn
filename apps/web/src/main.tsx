@@ -10,6 +10,8 @@ const router = createRouter({
   routeTree,
   defaultPreload: "intent",
   defaultPreloadStaleTime: 0,
+  defaultPendingMs: 1500,
+  defaultPendingMinMs: 0,
   scrollRestoration: true,
   defaultPendingComponent: () => <Loader />,
   context: { orpc, queryClient },

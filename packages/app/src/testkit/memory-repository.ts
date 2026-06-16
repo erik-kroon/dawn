@@ -481,35 +481,52 @@ export class MemoryAppRepository implements LedgerRepository {
     });
   }
 
-  async createTeamInvite(): Promise<TeamInvite> {
+  async createTeamInvite(_input: {
+    teamId: string;
+    email: string;
+    role: TeamRole;
+    invitedByActorId: string;
+    expiresAt: Date;
+  }): Promise<TeamInvite> {
     throw new Error("Unexpected invite creation");
   }
 
-  async listTeamMembers(): Promise<TeamMember[]> {
+  async listTeamMembers(_teamId: string): Promise<TeamMember[]> {
     throw new Error("Unexpected team member list");
   }
 
-  async listPendingTeamInvites(): Promise<TeamInvite[]> {
+  async listPendingTeamInvites(_teamId: string): Promise<TeamInvite[]> {
     throw new Error("Unexpected invite list");
   }
 
-  async getTeamInvite(): Promise<TeamInvite | null> {
+  async getTeamInvite(_inviteId: string): Promise<TeamInvite | null> {
     throw new Error("Unexpected invite lookup");
   }
 
-  async addTeamMembership(): Promise<TeamMembership> {
+  async addTeamMembership(_input: {
+    teamId: string;
+    userId: string;
+    role: TeamRole;
+  }): Promise<TeamMembership> {
     throw new Error("Unexpected membership creation");
   }
 
-  async markTeamInviteAccepted(): Promise<TeamInvite> {
+  async markTeamInviteAccepted(_input: {
+    inviteId: string;
+    acceptedAt: Date;
+  }): Promise<TeamInvite> {
     throw new Error("Unexpected invite acceptance");
   }
 
-  async getTeamMemberByUserId(): Promise<TeamMember | null> {
+  async getTeamMemberByUserId(_teamId: string, _userId: string): Promise<TeamMember | null> {
     throw new Error("Unexpected team member lookup");
   }
 
-  async updateTeamMemberRole(): Promise<TeamMember> {
+  async updateTeamMemberRole(_input: {
+    teamId: string;
+    userId: string;
+    role: TeamRole;
+  }): Promise<TeamMember> {
     throw new Error("Unexpected team member role update");
   }
 

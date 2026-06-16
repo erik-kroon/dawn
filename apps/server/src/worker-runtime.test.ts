@@ -62,8 +62,8 @@ describe("Dawn worker runtime", () => {
   test("reports Gmail worker configuration when both OAuth values are present", () => {
     const runtime = createDawnWorkerRuntime(
       createWorkerTestEnv(async () => Response.json({}), {
-        GMAIL_CLIENT_ID: "gmail-client-id",
-        GMAIL_CLIENT_SECRET: "gmail-client-secret",
+        GMAIL_CLIENT_ID: "dawn-test.apps.googleusercontent.com",
+        GMAIL_CLIENT_SECRET: "GOCSPX-abcdefghijklmnopqrstuvwxyz",
       }),
     );
 
