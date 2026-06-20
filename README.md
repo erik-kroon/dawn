@@ -22,6 +22,7 @@ runtime behavior.
 Start with:
 
 - [Product requirements](docs/PRD.md)
+- [CRM backend/data model deep dive](docs/product/CRM-BACKEND-DATA-MODEL-PRD.md)
 - [Domain language](CONTEXT.md)
 - [Codebase map](CONTEXT-MAP.md)
 - [Architecture decisions](docs/adr/README.md)
@@ -42,6 +43,9 @@ Dawn is built around the daily operating loop of a small business:
 - **Invoicing and billing**: create invoices, send them to customers, track
   payment status, handle recurring billing, and connect billing activity back to
   revenue.
+- **CRM and customer graph**: distinguish real organizations, people,
+  commercial account relationships, opportunities, contracts, activities,
+  external system data, and derived projections.
 - **Customers, projects, and time**: understand customer performance, track
   billable work, and turn project hours into invoice lines without re-entering
   data.

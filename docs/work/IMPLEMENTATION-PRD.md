@@ -2,7 +2,7 @@
 
 Triage: ready-for-agent
 Publication: Local repo artifact. No project issue tracker or remote is configured yet.
-Source material: `docs/PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, current repo structure, and the Midday reference clone in `ref/midday`.
+Source material: `docs/PRD.md`, `docs/product/CRM-BACKEND-DATA-MODEL-PRD.md`, `CONTEXT.md`, `CONTEXT-MAP.md`, current repo structure, and the Midday reference clone in `ref/midday`.
 Status: Draft for implementation planning
 Date: 2026-06-14
 
@@ -20,7 +20,7 @@ Build Dawn as a Cloudflare-first business operating system with Postgres as the 
 
 The solution is an end-state architecture with these properties:
 
-- One canonical domain model for teams, actors, permissions, money, ledger, documents, inbox, matching, invoices, customers, projects, integrations, jobs, sync, and AI tools.
+- One canonical domain model for teams, actors, permissions, money, ledger, documents, inbox, matching, CRM customer graph, invoices, customers, projects, integrations, jobs, sync, and AI tools.
 - One application layer that owns use cases, authorization, transactions, idempotency, audit logs, outbox events, and provider port calls.
 - Thin transports for oRPC, REST, webhooks, worker jobs, automations, and assistant tools.
 - Postgres as the system of record for financial and operational state.

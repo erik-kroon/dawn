@@ -4,7 +4,7 @@ Status: Draft
 Owner: Product/Engineering
 Reference product: Midday, cloned read-only in `ref/midday`
 Target posture: End-state architecture, not MVP
-Last updated: 2026-06-14
+Last updated: 2026-06-20
 
 ## 1. Executive Summary
 
@@ -23,6 +23,8 @@ The desired end-state is not a clone. It is a sharper system:
 - Provider adapters isolated behind ports, so banking, accounting, document AI, messaging, payments, and storage can be swapped without rewriting domain logic.
 - An event/outbox backbone so every state change can reliably trigger downstream side effects, analytics, audit records, notifications, sync invalidation, and assistant context updates.
 
+The detailed B2B CRM backend and data-model expansion is maintained in [CRM-BACKEND-DATA-MODEL-PRD.md](product/CRM-BACKEND-DATA-MODEL-PRD.md). Use it as the source of truth for CRM-specific object modeling, sales pipelines, commercial documents, contracts, activities, metadata extensibility, integration provenance, automation idempotency, reporting facts, AI recommendations, and GDPR lifecycle behavior.
+
 ## 2. Product Vision
 
 Dawn should be the command center for a business's operational truth.
@@ -38,6 +40,7 @@ The product should be optimized for:
 - Document capture and extraction.
 - Invoice creation, sending, payment tracking, and recurring billing.
 - Customer and vendor understanding.
+- B2B CRM modeling for organizations, people, accounts, opportunities, contracts, activities, and external system data.
 - Work/time tracking connected to billing.
 - Weekly and monthly operating insight.
 - Secure multi-tenant collaboration.
@@ -99,6 +102,10 @@ AI should also be constrained by:
 ### 3.6 Local-First Feeling Without Local-First Risk
 
 The app should feel instant and collaborative, but authoritative business state remains server-owned. TanStack DB should provide reactive local collections, optimistic interactions, and sync ergonomics while preserving server-side authorization, validation, and auditability.
+
+### 3.7 Typed Core With Metadata Extensions
+
+Core objects such as organizations, people, accounts, opportunities, invoices, contracts, activities, and payments should have strongly typed records, constraints, and domain rules. Customer-specific fields, objects, and relationships should use a metadata extension model without turning the core product into a generic EAV database or unstructured document store.
 
 ## 4. Target Users
 
@@ -383,6 +390,7 @@ New package. Responsibilities:
 - Financial math primitives.
 - Deterministic matching rules.
 - Time and currency rules.
+- CRM record identity, metadata extension rules, customer graph invariants, pipeline state machines, commercial document rules, and integration provenance rules.
 
 Examples:
 
@@ -393,6 +401,10 @@ Examples:
 - Document
 - InboxItem
 - Customer
+- Party
+- Account
+- Opportunity
+- Contract
 - Invoice
 - InvoiceLine
 - RecurringSchedule
@@ -720,6 +732,18 @@ Core tables should be grouped by domain:
 
 #### Sales And Billing
 
+- records
+- object_types
+- field_definitions
+- record_field_values
+- parties
+- organizations
+- people
+- accounts
+- person_affiliations
+- contact_points
+- opportunities
+- opportunity_stage_history
 - customers
 - customer_contacts
 - products
@@ -731,6 +755,12 @@ Core tables should be grouped by domain:
 - invoice_events
 - payment_links
 - credit_notes
+- commercial_documents
+- commercial_document_lines
+- contracts
+- contract_versions
+- payments
+- payment_allocations
 
 #### Work Management
 
@@ -1112,12 +1142,14 @@ Requirements:
 
 - Users can create and belong to multiple teams.
 - Teams own business data.
+- Better Auth can own authentication, sessions, base organizations, invitations, and membership, but Dawn maps those records into its own tenant, principal, membership, and authorization model.
 - Users have roles per team.
 - Roles grant permissions by resource and action.
 - API keys are scoped to teams and permissions.
 - OAuth apps can request scoped permissions.
 - Assistant tools resolve permissions exactly like user/API requests.
 - Sensitive actions require recent auth or MFA once MFA exists.
+- Record access, field security, workflow permissions, integration actor permissions, export permissions, and AI-agent permissions are application authorization concerns, not Better Auth role checks alone.
 
 Default roles:
 
@@ -1287,10 +1319,11 @@ Invoice states:
 
 Requirements:
 
-- Customers belong to teams.
-- Customers can have multiple contacts.
-- Customers can have billing details.
-- Customers can be linked to invoices, documents, projects, and transactions.
+- Customer-facing records belong to teams.
+- End-state CRM modeling distinguishes parties, organizations, people, accounts, and contacts instead of putting one `customer_status` on an organization.
+- A single external organization can be a prospect, customer, partner, supplier, or former customer across different legal entities or account relationships.
+- Contacts can be tied to person affiliations so the same person can have different roles and work contact points across organizations.
+- Accounts can be linked to opportunities, contracts, commercial documents, invoices, documents, projects, transactions, activities, and timeline projections.
 - AI can summarize customer history and payment behavior.
 
 ### 12.8 Projects And Time Tracking
@@ -1337,6 +1370,8 @@ Requirements:
 - Sync state is visible.
 - Sync failures are actionable.
 - Integrations can be disabled without data loss.
+- Registry providers such as TIC.io are modeled as external data sources for company/person search, enrichment, observations, monitoring, and prospecting; their IDs and payloads are not canonical CRM records.
+- External registry data can promote selected fields into CRM only through authority rules and provenance.
 
 Categories:
 
@@ -1345,6 +1380,7 @@ Categories:
 - Payments.
 - Email.
 - Messaging.
+- Registry/enrichment.
 - Storage.
 - AI providers.
 - Calendar/time.
@@ -1735,7 +1771,7 @@ This PRD does not require:
 - Tax filing as a regulated filing service.
 - Bank account custody.
 - Payment processing as a payment facilitator.
-- General-purpose CRM beyond business/customer operating needs.
+- A generic CRM/database builder detached from Dawn's business, billing, document, integration, and operating workflows.
 - Offline-first financial mutation support.
 - Separate native desktop implementation.
 - Reimplementing provider SDKs when official SDKs are reliable.

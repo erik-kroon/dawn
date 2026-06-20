@@ -2,6 +2,10 @@
 
 Use this file to route quickly through the repo. The current codebase is a starter; the target package layout is described in `docs/PRD.md`.
 
+For the detailed B2B CRM backend and data-model end-state, use `docs/product/CRM-BACKEND-DATA-MODEL-PRD.md`. It is the source of truth for CRM-specific records, metadata extensions, customer graph modeling, sales pipelines, contracts, integrations, audit/history, workflows, reporting, AI recommendations, and GDPR lifecycle rules.
+
+For executable CRM implementation slices, use `docs/work/CRM-BACKEND-VERTICAL-SLICES.md`.
+
 ## Current Repo Map
 
 ### `apps/web`
@@ -59,7 +63,7 @@ Look here for:
 - Auth configuration: `packages/auth/src/index.ts`
 - Polar client setup: `packages/auth/src/lib/payments.ts`
 
-Target direction: session identity remains here, while team permissions and authorization decisions live in application/domain code.
+Target direction: Better Auth session, organization, invitation, and membership plumbing remains here. Mapping those auth records into Dawn tenants, principals, memberships, and authorization context belongs in app/domain/db code; CRM permissions do not live in Better Auth roles alone.
 
 ### `packages/db`
 
@@ -113,7 +117,7 @@ UI component direction:
 - `packages/domain`: pure entities, value objects, financial math, domain events, invariants, state machines.
 - `packages/app`: use cases, authorization, transactions, idempotency, audit, outbox writes, provider port calls.
 - `packages/jobs`: job names, queue names, payload schemas, retry/idempotency policy.
-- `packages/integrations`: provider adapter contracts and implementations.
+- `packages/integrations`: provider adapter contracts and implementations, including registry/enrichment providers such as TIC.io behind app-owned import/prospecting use cases.
 - `packages/sync`: TanStack DB collection definitions, sync protocol, cursor/conflict policies.
 - `packages/ai`: TanStack AI runtime, tools, prompts, permissions, retrieval, evals.
 - `apps/worker`: queue/workflow consumers and scheduled job execution.
@@ -139,6 +143,8 @@ Use Midday to understand product surface and provider workflows. Do not copy its
 ## When To Inspect Next
 
 - For product requirements: start with `docs/PRD.md`.
+- For CRM backend/data-model requirements: use `docs/product/CRM-BACKEND-DATA-MODEL-PRD.md`.
+- For CRM backend execution slices: use `docs/work/CRM-BACKEND-VERTICAL-SLICES.md`.
 - For terminology: start with `CONTEXT.md`.
 - For implementation location: start with this file.
 - For decisions: check `docs/adr/`.
