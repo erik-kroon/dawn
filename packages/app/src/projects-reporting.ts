@@ -721,11 +721,7 @@ export async function loadBusinessReport(
     repository.listInboxItems(teamId),
     repository.listProjects(teamId),
   ]);
-  const currency =
-    transactions[0]?.money.currency ??
-    invoices[0]?.currency ??
-    projects[0]?.billableRate.currency ??
-    "USD";
+  const currency = selectReportCurrency({ transactions, invoices, projects });
 
   return buildBusinessReport({
     teamId,
@@ -750,7 +746,14 @@ function buildBusinessReport(input: {
   inboxItems: InboxItem[];
 }): BusinessReport {
   const customerById = new Map(input.customers.map((customer) => [customer.id, customer]));
-  const totals = createReportTotals(input.transactions, input.currency);
+  const transactions = input.transactions.filter(
+    (transaction) => transaction.money.currency === input.currency,
+  );
+  const invoices = input.invoices.filter((invoice) => invoice.currency === input.currency);
+  const timeEntries = input.timeEntries.filter(
+    (entry) => !entry.billableRate || entry.billableRate.currency === input.currency,
+  );
+  const totals = createReportTotals(transactions, input.currency);
 
   return {
     teamId: input.teamId,
@@ -758,13 +761,43 @@ function buildBusinessReport(input: {
     range: input.range,
     totals,
     cashflow: totals.balance,
-    revenueByCustomer: revenueByCustomer(input.invoices, customerById, input.currency),
-    expensesByCategory: expensesByCategory(input.transactions, input.currency),
-    unpaidInvoices: unpaidInvoices(input.invoices, customerById, input.currency),
-    taxSummary: taxSummary(input.invoices, input.currency),
-    timeUtilization: summarizeTimeEntries(input.timeEntries, input.currency),
+    revenueByCustomer: revenueByCustomer(invoices, customerById, input.currency),
+    expensesByCategory: expensesByCategory(transactions, input.currency),
+    unpaidInvoices: unpaidInvoices(invoices, customerById, input.currency),
+    taxSummary: taxSummary(invoices, input.currency),
+    timeUtilization: summarizeTimeEntries(timeEntries, input.currency),
     inboxBacklog: inboxBacklog(input.inboxItems),
   };
+}
+
+function selectReportCurrency(input: {
+  transactions: readonly Transaction[];
+  invoices: readonly InvoiceDraft[];
+  projects: readonly Project[];
+}) {
+  const transactionCurrency = mostFrequentCurrency(
+    input.transactions.map((transaction) => transaction.money.currency),
+  );
+
+  return (
+    transactionCurrency ??
+    input.invoices[0]?.currency ??
+    input.projects[0]?.billableRate.currency ??
+    "USD"
+  );
+}
+
+function mostFrequentCurrency(currencies: readonly string[]) {
+  const counts = new Map<string, number>();
+
+  for (const currency of currencies) {
+    counts.set(currency, (counts.get(currency) ?? 0) + 1);
+  }
+
+  return [...counts.entries()].sort(
+    ([leftCurrency, leftCount], [rightCurrency, rightCount]) =>
+      rightCount - leftCount || leftCurrency.localeCompare(rightCurrency),
+  )[0]?.[0];
 }
 
 function normalizeReportRange(input: ListBusinessReportCommand): BusinessReport["range"] {

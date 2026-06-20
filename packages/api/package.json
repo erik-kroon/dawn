@@ -13,6 +13,7 @@
     "check-types": "tsgo --noEmit"
   },
   "dependencies": {
+    "@dawn/ai": "workspace:*",
     "@dawn/app": "workspace:*",
     "@dawn/auth": "workspace:*",
     "@dawn/db": "workspace:*",

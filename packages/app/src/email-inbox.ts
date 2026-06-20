@@ -7,6 +7,7 @@ import type {
   EmailInboxProviderName,
   EmailInboxSettings,
   EmailInboxSyncCursor,
+  EmailInboxSyncRange,
   EmailInboxTokenBundle,
   InboxConnector,
   InboxConnectorConnectionResult,
@@ -47,6 +48,7 @@ export type EmailInboxWorkspaceConnection = {
   accountEmail: string | null;
   grantedScopes: readonly string[];
   syncCursor: EmailInboxSyncCursor | null;
+  syncRange: EmailInboxSyncRange | null;
   settings: EmailInboxSettings;
   reauthorizationRequired: boolean;
   latestSyncRun?: IntegrationSyncRun | null;
@@ -105,6 +107,7 @@ export type SyncEmailInboxCommand = {
   maxResults?: number;
   fullSync?: boolean;
   enforceCallerPermission?: boolean;
+  now?: Date;
 };
 
 export type SyncEmailInboxResult = {
@@ -305,6 +308,16 @@ const requestEmailInboxSyncOperation = "email_inbox.sync.request";
 const requestDueEmailInboxSyncsOperation = "email_inbox.sync.request_due";
 const emailInboxCategory: IntegrationCategory = "email";
 const emailInboxSyncIntervalMs = 6 * 60 * 60 * 1_000;
+const emailInboxAccountantBackfillReceivedFrom = "2025-01-01T00:00:00.000Z";
+const supportedEmailAttachmentContentTypes = new Set([
+  "application/pdf",
+  "application/octet-stream",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+]);
 
 export async function listEmailInboxWorkspace(
   repository: EmailInboxUseCaseRepository,
@@ -330,6 +343,7 @@ export async function listEmailInboxWorkspace(
         accountEmail: emailInboxAccountEmail(summary.connection),
         grantedScopes: emailInboxMetadata(summary.connection.rawPayload).grantedScopes,
         syncCursor: emailInboxSyncCursor(summary.connection.rawPayload),
+        syncRange: emailInboxSyncRange(summary.connection.rawPayload),
         settings: emailInboxSettings(summary.connection.rawPayload),
         reauthorizationRequired:
           summary.connection.status === "error" && isReauthError(summary.connection),
@@ -608,11 +622,24 @@ export async function syncEmailInbox(
 
     try {
       const rawPayload = { ...secrets.rawPayload };
+      const previousRange = emailInboxSyncRange(rawPayload);
+      const syncRange = await resolveEmailInboxSyncRange({
+        repository: emailRepository,
+        teamId: command.teamId,
+        now: command.now ?? new Date(),
+      });
+      const storedSyncCursor = command.fullSync ? null : emailInboxSyncCursor(rawPayload);
+      const syncCursor = usableEmailInboxSyncCursor({
+        cursor: storedSyncCursor,
+        previousRange,
+        desiredRange: syncRange,
+      });
       const connectorResult = await connector.syncEvidence({
         teamId: command.teamId,
         connection: emailInboxProviderConnection(connection, rawPayload),
         token: secrets.token,
-        cursor: command.fullSync ? null : emailInboxSyncCursor(rawPayload),
+        cursor: syncCursor,
+        syncRange,
         settings: emailInboxSettings(rawPayload),
         maxResults: command.maxResults,
       });
@@ -652,7 +679,8 @@ export async function syncEmailInbox(
       }
 
       const nextRawPayload = mergeEmailInboxRawPayload(rawPayload, {
-        syncCursor: connectorResult.nextCursor ?? emailInboxSyncCursor(rawPayload),
+        syncCursor: connectorResult.nextCursor ?? syncCursor,
+        syncRange,
         syncedAt: new Date().toISOString(),
       });
       const completedSyncRun = await emailRepository.finishIntegrationSyncRun({
@@ -662,6 +690,7 @@ export async function syncEmailInbox(
         error: null,
         rawPayload: {
           ...connectorResult.rawPayload,
+          syncRange,
           imported: imported.length,
           skipped: skipped.length,
           skipReasons: skipped.reduce<Record<string, number>>((counts, item) => {
@@ -1015,6 +1044,7 @@ async function upsertEmailInboxProviderConnection(input: {
       grantedScopes: [...input.providerConnection.connection.grantedScopes],
       expiresAt: input.providerConnection.connection.expiresAt ?? null,
       syncCursor: null,
+      syncRange: null,
       settings: defaultEmailInboxSettings(),
       connectedAt: new Date().toISOString(),
       source: input.source,
@@ -1148,8 +1178,15 @@ async function importEmailInboxEvidence(input: {
 
   if (input.normalized.rawText) {
     const extracted = await createDeterministicDocumentExtractor().extract({
+      teamId: input.teamId,
+      inboxItemId: inboxItem.id,
+      documentId: document.id,
+      versionId: version.id,
+      objectKey: version.objectKey,
       fileName: input.normalized.fileName,
       contentType: input.normalized.contentType,
+      byteSize: input.normalized.body.byteLength,
+      body: input.normalized.body,
       rawText: input.normalized.rawText,
     });
     const extractedResult = await input.repository.createDocumentExtraction({
@@ -1279,8 +1316,9 @@ function normalizeEvidenceForImport(
 
   if (evidence.artifact.kind === "attachment") {
     if (
-      evidence.artifact.contentType !== "application/pdf" &&
-      evidence.artifact.contentType !== "application/octet-stream"
+      !supportedEmailAttachmentContentTypes.has(
+        normalizedContentType(evidence.artifact.contentType),
+      )
     ) {
       return skippedEvidence(evidence, "unsupported_mime", empty);
     }
@@ -1323,6 +1361,10 @@ function normalizeEvidenceForImport(
     checksumSha256: evidence.artifact.checksumSha256 ?? sha256Hex(bytes),
     rawText,
   };
+}
+
+function normalizedContentType(contentType: string) {
+  return contentType.split(";")[0]?.trim().toLowerCase() ?? "";
 }
 
 function skippedEvidence(
@@ -1424,6 +1466,12 @@ function emailInboxSyncCursor(
   return cursor && Object.keys(cursor).length > 0 ? cursor : null;
 }
 
+function emailInboxSyncRange(
+  rawPayload: Record<string, unknown> | undefined,
+): EmailInboxSyncRange | null {
+  return emailInboxMetadata(rawPayload).syncRange;
+}
+
 function emailInboxSettings(rawPayload: Record<string, unknown> | undefined): EmailInboxSettings {
   return {
     ...defaultEmailInboxSettings(),
@@ -1462,6 +1510,7 @@ function mergeEmailInboxRawPayload(
   rawPayload: Record<string, unknown>,
   patch: Partial<{
     syncCursor: EmailInboxSyncCursor | null;
+    syncRange: EmailInboxSyncRange | null;
     syncedAt: string;
     settings: EmailInboxSettings;
     lastError: string | null;
@@ -1484,6 +1533,7 @@ function emailInboxMetadata(rawPayload: Record<string, unknown> | undefined) {
   const metadata = isRecord(rawPayload?.emailInbox) ? rawPayload.emailInbox : {};
   const settings = isRecord(metadata.settings) ? metadata.settings : {};
   const cursor = isRecord(metadata.syncCursor) ? metadata.syncCursor : null;
+  const syncRange = parseEmailInboxSyncRange(metadata.syncRange);
 
   return {
     provider: typeof metadata.provider === "string" ? metadata.provider : null,
@@ -1495,6 +1545,7 @@ function emailInboxMetadata(rawPayload: Record<string, unknown> | undefined) {
       : [],
     expiresAt: typeof metadata.expiresAt === "string" ? metadata.expiresAt : null,
     syncCursor: cursor as EmailInboxSyncCursor | null,
+    syncRange,
     settings: {
       senderBlocklist: normalizeEmailList(readStringArray(settings.senderBlocklist)),
       domainBlocklist: normalizeDomainList(readStringArray(settings.domainBlocklist)),
@@ -1507,6 +1558,135 @@ function emailInboxMetadata(rawPayload: Record<string, unknown> | undefined) {
     },
     reauthorizationRequired: metadata.reauthorizationRequired === true,
   };
+}
+
+async function resolveEmailInboxSyncRange(input: {
+  repository: EmailInboxUseCaseRepository;
+  teamId: string;
+  now: Date;
+}): Promise<EmailInboxSyncRange | null> {
+  return accountantBackfillEmailInboxSyncRange(
+    input.now,
+    await transactionActivityEmailInboxSyncRange(input.repository, input.teamId),
+  );
+}
+
+function usableEmailInboxSyncCursor(input: {
+  cursor: EmailInboxSyncCursor | null;
+  previousRange: EmailInboxSyncRange | null;
+  desiredRange: EmailInboxSyncRange | null;
+}) {
+  if (!input.cursor) {
+    return null;
+  }
+
+  if (!input.desiredRange) {
+    return input.cursor;
+  }
+
+  if (emailInboxSyncRangeCoversBackfill(input.previousRange, input.desiredRange)) {
+    return input.cursor;
+  }
+
+  return null;
+}
+
+function emailInboxSyncRangeCoversBackfill(
+  previousRange: EmailInboxSyncRange | null,
+  desiredRange: EmailInboxSyncRange,
+) {
+  if (!previousRange) {
+    return false;
+  }
+
+  return (
+    validDateString(previousRange.receivedFrom) &&
+    new Date(previousRange.receivedFrom).getTime() <= new Date(desiredRange.receivedFrom).getTime()
+  );
+}
+
+function accountantBackfillEmailInboxSyncRange(
+  now: Date,
+  transactionRange: EmailInboxSyncRange | null,
+): EmailInboxSyncRange {
+  const transactionReceivedTo =
+    transactionRange?.receivedTo && validDateString(transactionRange.receivedTo)
+      ? new Date(transactionRange.receivedTo).getTime()
+      : Number.NaN;
+  const receivedTo = new Date(
+    Math.max(now.getTime(), Number.isFinite(transactionReceivedTo) ? transactionReceivedTo : 0),
+  );
+
+  return {
+    receivedFrom: emailInboxAccountantBackfillReceivedFrom,
+    receivedTo: receivedTo.toISOString(),
+    source: "accountant_backfill",
+  };
+}
+
+async function transactionActivityEmailInboxSyncRange(
+  repository: EmailInboxUseCaseRepository,
+  teamId: string,
+): Promise<EmailInboxSyncRange | null> {
+  const transactions = await repository.listTransactionsForReport({ teamId });
+  const postedTimes = transactions
+    .map((transaction) => new Date(transaction.postedAt).getTime())
+    .filter(Number.isFinite);
+
+  if (postedTimes.length === 0) {
+    return null;
+  }
+
+  const firstPostedAt = new Date(Math.min(...postedTimes));
+  const lastPostedAt = new Date(Math.max(...postedTimes));
+
+  return {
+    receivedFrom: startOfUtcDay(addUtcDays(firstPostedAt, -7)).toISOString(),
+    receivedTo: endOfUtcDay(addUtcDays(lastPostedAt, 7)).toISOString(),
+    source: "transaction_activity",
+  };
+}
+
+function parseEmailInboxSyncRange(value: unknown): EmailInboxSyncRange | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const source =
+    value.source === "accountant_backfill" ||
+    value.source === "current_calendar_year" ||
+    value.source === "transaction_activity"
+      ? value.source
+      : null;
+  const receivedFrom = typeof value.receivedFrom === "string" ? value.receivedFrom : null;
+  const receivedTo =
+    typeof value.receivedTo === "string" && validDateString(value.receivedTo)
+      ? value.receivedTo
+      : null;
+
+  if (!source || !receivedFrom || !validDateString(receivedFrom)) {
+    return null;
+  }
+
+  return { receivedFrom, receivedTo, source };
+}
+
+function addUtcDays(date: Date, days: number) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + days));
+}
+
+function startOfUtcDay(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function endOfUtcDay(date: Date) {
+  return new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999),
+  );
+}
+
+function validDateString(value: string) {
+  return Number.isFinite(new Date(value).getTime());
 }
 
 function isReauthError(connection: IntegrationConnection) {

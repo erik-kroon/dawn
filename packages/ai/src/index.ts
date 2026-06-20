@@ -2,6 +2,7 @@ import type {
   AssistantToolRisk,
   BusinessInsightSeverity,
   BusinessReport,
+  CsvTransactionColumnMapping,
   Permission,
   ReportSourceRef,
 } from "@dawn/domain";
@@ -326,6 +327,123 @@ export function createMockAssistantResponseProvider(): AssistantResponseProvider
       };
     },
   };
+}
+
+export type CsvTransactionMappingSuggestionInput = {
+  headers: string[];
+  sampleRows: Record<string, string>[];
+  detectedMapping: CsvTransactionColumnMapping;
+  prompt: string;
+};
+
+export type CsvTransactionMappingSuggestionProvider = {
+  provider: string;
+  suggestCsvTransactionMapping(
+    input: CsvTransactionMappingSuggestionInput,
+  ): Promise<Partial<CsvTransactionColumnMapping> | null>;
+};
+
+const csvTransactionMappingFields = [
+  "postedAt",
+  "description",
+  "amount",
+  "debit",
+  "credit",
+  "currency",
+  "balance",
+] as const;
+
+export function buildCsvTransactionMappingPrompt(input: {
+  headers: readonly string[];
+  sampleRows: readonly Record<string, string>[];
+  detectedMapping: CsvTransactionColumnMapping;
+}) {
+  const headers = normalizeCsvMappingHeaders(input.headers);
+  const sampleRows = compactCsvMappingSampleRows(input.sampleRows, headers);
+  const columnList = headers.map((header) => `<column>${header}</column>`).join("\n");
+  const sampleRowList = sampleRows.map((row) => JSON.stringify(row)).join("\n") || "(none)";
+
+  return [
+    "<role>",
+    "You map bank transaction CSV columns to Dawn's canonical import schema.",
+    "</role>",
+    "",
+    "<task>",
+    `Map CSV columns to: ${csvTransactionMappingFields.join(", ")}.`,
+    "</task>",
+    "",
+    "<rules>",
+    "1) Return only exact CSV column names for mapped fields.",
+    "2) If no matching column exists, omit that field.",
+    "3) Never invent column names.",
+    "4) postedAt is the booked, posted, transaction, or value date used for ledger ordering.",
+    "5) description is the transaction memo, merchant, reference, counterparty text, or narrative used as the transaction label.",
+    "6) Use amount only when one column already contains signed transaction amounts.",
+    "7) Use debit and credit when money movement is split across two amount columns.",
+    "8) debit is money leaving the account; credit is money entering the account.",
+    "9) balance is a running account balance column, not the transaction amount.",
+    "10) currency is a currency-code column only; omit it when currency comes from the selected account.",
+    "</rules>",
+    "",
+    "<deterministic_guess>",
+    JSON.stringify(input.detectedMapping),
+    "</deterministic_guess>",
+    "",
+    "<csv_columns>",
+    columnList,
+    "</csv_columns>",
+    "",
+    "<sample_rows>",
+    sampleRowList,
+    "</sample_rows>",
+    "",
+    "<output_contract>",
+    "Return only a JSON object with canonical field names and exact CSV column names.",
+    "</output_contract>",
+  ].join("\n");
+}
+
+export function normalizeCsvMappingHeaders(headers: readonly string[]) {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+
+  for (const header of headers) {
+    const trimmed = header.trim();
+
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+
+  return normalized;
+}
+
+export function compactCsvMappingSampleRows(
+  rows: readonly Record<string, string>[],
+  headers: readonly string[],
+) {
+  const allowedHeaders = new Set(headers);
+
+  return rows.slice(0, 5).map((row) => {
+    const compact: Record<string, string> = {};
+
+    for (const [key, value] of Object.entries(row)) {
+      const trimmedKey = key.trim();
+      const trimmedValue = value.trim();
+
+      if (!trimmedKey || !trimmedValue || !allowedHeaders.has(trimmedKey)) {
+        continue;
+      }
+
+      compact[trimmedKey] =
+        trimmedValue.length > 80 ? `${trimmedValue.slice(0, 80)}...` : trimmedValue;
+    }
+
+    return compact;
+  });
 }
 
 export type InsightDraft = {

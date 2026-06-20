@@ -4,7 +4,7 @@ type Journal = {
 
 const migrationDir = "packages/db/src/migrations";
 const journal = (await Bun.file(`${migrationDir}/meta/_journal.json`).json()) as Journal;
-const sqlFiles = gitLsFiles()
+const sqlFiles = gitMigrationFiles()
   .filter((file) => file.startsWith(`${migrationDir}/`) && file.endsWith(".sql"))
   .map((file) => file.slice(`${migrationDir}/`.length, -".sql".length))
   .sort();
@@ -40,11 +40,14 @@ if (failures.length > 0) {
 
 console.log(`Migration journal validated for ${journalTags.length} migrations.`);
 
-function gitLsFiles() {
-  const result = Bun.spawnSync(["git", "ls-files"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+function gitMigrationFiles() {
+  const result = Bun.spawnSync(
+    ["git", "ls-files", "--cached", "--others", "--exclude-standard", migrationDir],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
 
   if (!result.success) {
     throw new Error(`git ls-files failed: ${result.stderr.toString()}`);

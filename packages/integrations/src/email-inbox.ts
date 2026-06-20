@@ -47,6 +47,17 @@ export type EmailInboxSyncCursor = {
   rawPayload?: EmailInboxRawPayload;
 };
 
+export type EmailInboxSyncRangeSource =
+  | "accountant_backfill"
+  | "current_calendar_year"
+  | "transaction_activity";
+
+export type EmailInboxSyncRange = {
+  receivedFrom: string;
+  receivedTo?: string | null;
+  source: EmailInboxSyncRangeSource;
+};
+
 export type EmailInboxAddress = {
   email: string;
   name?: string | null;
@@ -141,6 +152,7 @@ export type EmailInboxProvider = {
     connection: EmailInboxProviderConnection;
     tokens: EmailInboxTokenBundle;
     cursor?: EmailInboxSyncCursor | null;
+    syncRange?: EmailInboxSyncRange | null;
     settings?: EmailInboxSettings | null;
     maxResults?: number;
   }): Promise<EmailInboxSyncResult>;
@@ -302,6 +314,7 @@ export class InboxConnector {
     connection: EmailInboxProviderConnection;
     token: EmailInboxEncryptedToken;
     cursor?: EmailInboxSyncCursor | null;
+    syncRange?: EmailInboxSyncRange | null;
     settings?: EmailInboxSettings | null;
     maxResults?: number;
   }): Promise<InboxConnectorSyncResult> {
@@ -320,6 +333,7 @@ export class InboxConnector {
         connection: input.connection,
         tokens,
         cursor: input.cursor,
+        syncRange: input.syncRange,
         settings: input.settings,
         maxResults: input.maxResults,
       });
@@ -337,6 +351,7 @@ export class InboxConnector {
           connection: input.connection,
           tokens: refreshed.tokens,
           cursor: input.cursor,
+          syncRange: input.syncRange,
           settings: input.settings,
           maxResults: input.maxResults,
         });
@@ -538,6 +553,7 @@ export function createMockEmailInboxProvider(): EmailInboxProvider {
           provider: "mock-email-inbox",
           providerConnectionId: input.connection.providerConnectionId,
           cursor: input.cursor ?? null,
+          syncRange: input.syncRange ?? null,
         },
       };
     },
@@ -615,7 +631,8 @@ export function createGmailEmailInboxProvider(input: {
       };
     },
     async syncEvidence(command) {
-      const messageIds = await listGmailMessageIds(command);
+      const listed = await listGmailMessageIds(command);
+      const messageIds = listed.messageIds;
       const evidence: EmailInboxEvidence[] = [];
 
       for (const messageId of messageIds) {
@@ -630,9 +647,11 @@ export function createGmailEmailInboxProvider(input: {
       return {
         status: "completed",
         evidence: evidence.slice(0, command.maxResults ?? evidence.length),
-        nextCursor: gmailNextCursor(messageIds, evidence),
+        nextCursor: gmailNextCursor(messageIds, evidence, command.syncRange),
         rawPayload: {
           provider: "gmail",
+          query: listed.query,
+          syncRange: command.syncRange ?? null,
           messagesScanned: messageIds.length,
           evidenceFound: evidence.length,
         },
@@ -818,6 +837,7 @@ async function listGmailMessageIds(input: {
   connection: EmailInboxProviderConnection;
   tokens: EmailInboxTokenBundle;
   cursor?: EmailInboxSyncCursor | null;
+  syncRange?: EmailInboxSyncRange | null;
   settings?: EmailInboxSettings | null;
   maxResults?: number;
 }) {
@@ -834,22 +854,30 @@ async function listGmailMessageIds(input: {
     messages?: Array<{ id?: string }>;
   }>(url.toString(), input.tokens.accessToken, input.connection.providerConnectionId);
 
-  return (payload.messages ?? []).map((message) => message.id).filter((id): id is string => !!id);
+  return {
+    query,
+    messageIds: (payload.messages ?? [])
+      .map((message) => message.id)
+      .filter((id): id is string => !!id),
+  };
 }
 
 function gmailSearchQuery(input: {
   connection: EmailInboxProviderConnection;
   cursor?: EmailInboxSyncCursor | null;
+  syncRange?: EmailInboxSyncRange | null;
   settings?: EmailInboxSettings | null;
 }) {
-  const parts = [
-    "-from:me",
-    `-from:${input.connection.accountEmail}`,
-    "(has:attachment OR receipt OR invoice OR order OR payment)",
-  ];
+  const parts = ["-from:me", "has:attachment", "filename:pdf"];
 
   if (input.cursor?.receivedAfter) {
     parts.push(`after:${gmailDate(input.cursor.receivedAfter)}`);
+  } else if (input.syncRange?.receivedFrom) {
+    parts.push(`after:${gmailDate(input.syncRange.receivedFrom)}`);
+
+    if (input.syncRange.receivedTo) {
+      parts.push(`before:${gmailExclusiveBeforeDate(input.syncRange.receivedTo)}`);
+    }
   } else {
     parts.push("newer_than:30d");
   }
@@ -940,75 +968,42 @@ async function gmailMessageToEvidence(
     ? new Date(Number(message.internalDate)).toISOString()
     : (headerValue(headers, "date") ?? new Date().toISOString());
   const parts = flattenGmailParts(payload);
+  const attachmentParts = parts.filter((part) => isSupportedGmailAttachment(part, input.settings));
   const attachmentEvidence = await Promise.all(
-    parts
-      .filter((part) => isSupportedGmailAttachment(part, input.settings))
-      .map(async (part) => {
-        const body = await getGmailPartBody({
-          accessToken: input.tokens.accessToken,
-          messageId: providerMessageId,
-          part,
-        });
+    attachmentParts.map(async (part) => {
+      const body = await getGmailPartBody({
+        accessToken: input.tokens.accessToken,
+        messageId: providerMessageId,
+        part,
+      });
 
-        return baseEvidence(input.connection, {
-          message,
-          providerMessageId,
-          subject,
-          from,
-          to,
-          receivedAt,
-          artifact: {
-            kind: "attachment",
-            artifactId: part.partId ?? part.body?.attachmentId ?? part.filename ?? "attachment",
-            providerPartId: part.partId ?? part.body?.attachmentId ?? "attachment",
-            fileName: part.filename || "gmail-attachment.pdf",
-            contentType: normalizedContentType(part.mimeType ?? "application/octet-stream"),
-            byteSize: body.byteLength,
-            checksumSha256: sha256Hex(body),
-            contentBase64: body.toString("base64"),
-          },
-          rawPayload: {
-            headers: compactHeaders(headers),
-            partId: part.partId ?? null,
-            attachmentId: part.body?.attachmentId ?? null,
-          },
-        });
-      }),
+      return baseEvidence(input.connection, {
+        message,
+        providerMessageId,
+        subject,
+        from,
+        to,
+        receivedAt,
+        artifact: {
+          kind: "attachment",
+          artifactId: part.partId ?? part.body?.attachmentId ?? part.filename ?? "attachment",
+          providerPartId: part.partId ?? part.body?.attachmentId ?? "attachment",
+          fileName: part.filename || "gmail-attachment.pdf",
+          contentType: normalizedContentType(part.mimeType ?? "application/octet-stream"),
+          byteSize: body.byteLength,
+          checksumSha256: sha256Hex(body),
+          contentBase64: body.toString("base64"),
+        },
+        rawPayload: {
+          headers: compactHeaders(headers),
+          partId: part.partId ?? null,
+          attachmentId: part.body?.attachmentId ?? null,
+        },
+      });
+    }),
   );
 
-  if (attachmentEvidence.length > 0) {
-    return attachmentEvidence;
-  }
-
-  const body = bestGmailBodyPart(parts);
-
-  if (!body || !looksLikeReceiptBody(body.text)) {
-    return [];
-  }
-
-  return [
-    baseEvidence(input.connection, {
-      message,
-      providerMessageId,
-      subject,
-      from,
-      to,
-      receivedAt,
-      artifact: {
-        kind: "body",
-        artifactId: body.partId ?? "body",
-        contentType: body.contentType,
-        text: body.contentType === "text/plain" ? body.text : stripHtml(body.text),
-        html: body.contentType === "text/html" ? body.text : null,
-        byteSize: Buffer.byteLength(body.text),
-        checksumSha256: sha256Hex(Buffer.from(body.text, "utf8")),
-      },
-      rawPayload: {
-        headers: compactHeaders(headers),
-        partId: body.partId ?? null,
-      },
-    }),
-  ];
+  return attachmentEvidence;
 }
 
 function baseEvidence(
@@ -1087,39 +1082,22 @@ function isSupportedGmailAttachment(part: GmailMessagePart, settings?: EmailInbo
   return (part.body.size ?? 0) <= (settings?.maxAttachmentBytes ?? 10 * 1024 * 1024);
 }
 
-function bestGmailBodyPart(parts: GmailMessagePart[]) {
-  for (const contentType of ["text/plain", "text/html"] as const) {
-    const part = parts.find(
-      (candidate) => normalizedContentType(candidate.mimeType ?? "") === contentType,
-    );
-
-    if (part?.body?.data) {
-      const text = Buffer.from(part.body.data, "base64url").toString("utf8").trim();
-
-      if (text) {
-        return {
-          partId: part.partId,
-          contentType,
-          text,
-        };
-      }
-    }
-  }
-
-  return null;
-}
-
-function gmailNextCursor(messageIds: readonly string[], evidence: readonly EmailInboxEvidence[]) {
+function gmailNextCursor(
+  messageIds: readonly string[],
+  evidence: readonly EmailInboxEvidence[],
+  syncRange?: EmailInboxSyncRange | null,
+) {
   const receivedAfter = evidence
     .map((item) => item.receivedAt)
     .sort()
     .at(-1);
 
   return {
-    receivedAfter: receivedAfter ?? null,
+    receivedAfter: receivedAfter ?? syncRange?.receivedTo ?? null,
     providerCursor: null,
     rawPayload: {
       lastMessageId: messageIds.at(-1) ?? null,
+      syncRange: syncRange ?? null,
     },
   };
 }
@@ -1203,19 +1181,6 @@ function normalizedContentType(value: string) {
   return value.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
 }
 
-function looksLikeReceiptBody(text: string) {
-  return /\b(receipt|invoice|order|payment|paid|total|amount)\b/i.test(stripHtml(text));
-}
-
-function stripHtml(value: string) {
-  return value
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function safeFileSegment(value: string) {
   const normalized = value
     .trim()
@@ -1234,6 +1199,13 @@ function gmailDate(value: string) {
   const day = String(date.getUTCDate()).padStart(2, "0");
 
   return `${year}/${month}/${day}`;
+}
+
+function gmailExclusiveBeforeDate(value: string) {
+  const date = new Date(value);
+  const nextDay = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1);
+
+  return gmailDate(new Date(nextDay).toISOString());
 }
 
 function sha256Hex(body: Buffer) {

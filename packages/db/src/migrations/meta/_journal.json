@@ -190,6 +190,13 @@
       "when": 1781548200000,
       "tag": "0026_accountant_packet_revocation",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1781599600000,
+      "tag": "0027_document_extraction_attempts",
+      "breakpoints": true
     }
   ]
 }

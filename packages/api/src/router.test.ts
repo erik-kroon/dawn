@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { call } from "@orpc/server";
-import { createDeterministicInvoicePdfRenderer, createEmailInboxOAuthStateCodec } from "@dawn/app";
+import {
+  completeDocumentUpload,
+  createDeterministicDocumentExtractor,
+  createDeterministicInvoicePdfRenderer,
+  createEmailInboxOAuthStateCodec,
+  runStoredDocumentExtraction,
+} from "@dawn/app";
 import { MemoryAppRepository } from "@dawn/app/testkit/memory-repository";
 import type { GoogleAuthAccountTokens } from "@dawn/auth";
 import type {
@@ -657,6 +663,43 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     return updated;
   }
 
+  async markDocumentExtractionPending(input: {
+    teamId: string;
+    inboxItemId: string;
+    requestedAt: Date;
+  }) {
+    const inboxItem = this.inboxItems.get(input.inboxItemId);
+
+    if (!inboxItem || inboxItem.teamId !== input.teamId) {
+      throw new Error("Inbox item not found");
+    }
+
+    const updated = {
+      ...inboxItem,
+      status: "pending_extraction" as const,
+      extractionStatus: "pending" as const,
+      updatedAt: input.requestedAt.toISOString(),
+    };
+    this.inboxItems.set(updated.id, updated);
+    return updated;
+  }
+
+  async dismissInboxItem(input: { teamId: string; inboxItemId: string; dismissedAt: Date }) {
+    const inboxItem = this.inboxItems.get(input.inboxItemId);
+
+    if (!inboxItem || inboxItem.teamId !== input.teamId) {
+      throw new Error("Inbox item not found");
+    }
+
+    const updated = {
+      ...inboxItem,
+      status: "dismissed" as const,
+      updatedAt: input.dismissedAt.toISOString(),
+    };
+    this.inboxItems.set(updated.id, updated);
+    return updated;
+  }
+
   async listTeamAliases(teamId: string) {
     return this.aliases.filter((alias) => alias.teamId === teamId);
   }
@@ -862,6 +905,25 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
 
     const rejected = { ...suggestion, status: "rejected" as const };
     this.matchSuggestions.set(rejected.id, rejected);
+
+    if (suggestion.status === "accepted") {
+      const item = this.inboxItems.get(suggestion.inboxItemId);
+      this.attachments = this.attachments.filter(
+        (attachment) =>
+          attachment.documentId !== item?.documentId ||
+          attachment.transactionId !== suggestion.transactionId,
+      );
+
+      if (item) {
+        this.inboxItems.set(item.id, {
+          ...item,
+          status: "needs_review",
+          matchSuggestions: [rejected],
+          updatedAt: "2026-06-15T10:04:00.000Z",
+        });
+      }
+    }
+
     this.hardNegatives.push({
       id: `negative_${this.hardNegatives.length + 1}`,
       teamId: input.teamId,
@@ -2887,6 +2949,60 @@ describe("appRouter", () => {
     ]);
   });
 
+  test("suggests CSV import mappings through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    repository.accounts.set("acct_1", {
+      id: "acct_1",
+      teamId: "team_1",
+      name: "Operating",
+      currency: "SEK",
+      type: "bank",
+    });
+    const router = await createTestRouter(repository);
+    const csvText = [
+      "A,B,C,D,E,F,G",
+      "2026-06-16,2026-06-16,ERIK KROON C,Transfer,360.00,,130.00",
+      "2026-06-16,2026-06-16,AVI OVERDRAFT,Other,,-100.00,-230.00",
+      "2026-06-02,2026-06-02,100003843496,Other,,-130.00,-130.00",
+      "2026-05-12,2026-05-12,ERIK KROON C,Transfer,127.00,,0.00",
+    ].join("\n");
+
+    const suggestion = await call(
+      router.csvImport.suggestMapping,
+      { teamId: "team_1", csvText },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+    const preview = await call(
+      router.csvImport.preview,
+      {
+        teamId: "team_1",
+        accountId: "acct_1",
+        csvText,
+        mapping: suggestion.mapping,
+      },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(suggestion.mapping).toMatchObject({
+      postedAt: "A",
+      description: "C",
+      amount: null,
+      credit: "E",
+      debit: "F",
+      balance: "G",
+    });
+    expect(preview.readyCount).toBe(4);
+    expect(preview.summary.readyCurrencyTotals).toEqual({
+      SEK: { amountMinor: 25700, currency: "SEK" },
+    });
+  });
+
   test("creates customers, products, and draft invoices through protected billing routes", async () => {
     const repository = new MemoryTransactionReviewRepository();
     repository.teams.set("team_1", "Test Team");
@@ -3650,6 +3766,65 @@ describe("appRouter", () => {
     expect(repository.outboxEvents.at(-1)).toMatchObject({
       type: "document_extraction.corrected",
     });
+
+    await repository.markDocumentExtractionFailed({
+      teamId: "team_1",
+      inboxItemId: "inbox_1",
+      error: "OCR provider timed out",
+      failedAt: new Date("2026-06-15T10:05:00.000Z"),
+    });
+    const retry = await call(
+      router.inbox.retryExtraction,
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        idempotencyKey: "retry_extraction_1",
+      },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(retry.inboxItem).toMatchObject({
+      status: "pending_extraction",
+      extractionStatus: "pending",
+    });
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "document_extraction.retry_requested",
+      payload: {
+        inboxItemId: "inbox_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        actorId: "user_1",
+      },
+    });
+
+    const dismissed = await call(
+      router.inbox.dismissItem,
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        idempotencyKey: "dismiss_inbox_1",
+      },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(dismissed.inboxItem.status).toBe("dismissed");
+    expect(repository.auditEvents.at(-1)).toMatchObject({
+      action: "inbox_item.dismissed",
+    });
+
+    const afterDismissal = await call(
+      router.inbox.list,
+      { teamId: "team_1" },
+      {
+        context: testContext({ id: "user_1", email: "member@example.com" }),
+      },
+    );
+
+    expect(afterDismissal.inboxItems).toHaveLength(0);
   });
 
   test("suggests, accepts, and rejects inbox transaction matches through protected routes", async () => {
@@ -3756,6 +3931,170 @@ describe("appRouter", () => {
     expect(repository.hardNegatives).toMatchObject([
       { inboxItemId: "inbox_1", transactionId: "txn_2", reason: "wrong duplicate" },
     ]);
+  });
+
+  test("traces uploaded receipt extraction through match accept reject and re-suggest", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    repository.transactions.set("txn_1", {
+      id: "txn_1",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Acme Supplies receipt R-100",
+      postedAt: "2026-06-14T10:20:00.000Z",
+      money: { amountMinor: -4250, currency: "USD" },
+      type: "expense",
+      source: "bank_sync",
+      providerTransactionId: "provider_txn_1",
+      categoryId: null,
+      reviewState: "needs_review",
+    });
+    repository.transactions.set("txn_2", {
+      id: "txn_2",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Acme Supplies duplicate card payment",
+      postedAt: "2026-06-14T10:20:00.000Z",
+      money: { amountMinor: -4250, currency: "USD" },
+      type: "expense",
+      source: "bank_sync",
+      providerTransactionId: "provider_txn_2",
+      categoryId: null,
+      reviewState: "needs_review",
+    });
+    const router = await createTestRouter(repository);
+    const callerContext = {
+      context: testContext({ id: "user_1", email: "member@example.com" }),
+    };
+
+    const prepared = await call(
+      router.documents.createUpload,
+      {
+        teamId: "team_1",
+        fileName: "acme-receipt.txt",
+        contentType: "text/plain",
+        byteSize: 57,
+        idempotencyKey: "manual_tracer_upload_1",
+      },
+      callerContext,
+    );
+    const completed = await completeDocumentUpload(
+      repository,
+      {
+        actor: { id: "user_1", type: "user" },
+        requestId: "manual_tracer_complete",
+        teamId: "team_1",
+      },
+      {
+        teamId: "team_1",
+        documentId: prepared.document.id,
+        versionId: prepared.version.id,
+        byteSize: 57,
+      },
+    );
+    const extracted = await runStoredDocumentExtraction(
+      repository,
+      {
+        async readDocument() {
+          const body = new TextEncoder().encode(
+            "Acme Supplies\nReceipt R-100\nDate 2026-06-14\nTotal USD 42.50",
+          ).buffer;
+
+          return {
+            body,
+            contentType: "text/plain",
+            byteSize: body.byteLength,
+          };
+        },
+      },
+      {
+        source: "local_deterministic",
+        async extract(input) {
+          return createDeterministicDocumentExtractor().extract({
+            ...input,
+            rawText: new TextDecoder("utf-8").decode(input.body ?? new ArrayBuffer(0)),
+          });
+        },
+      },
+      {
+        actor: { id: "user_1", type: "user" },
+        requestId: "manual_tracer_extract",
+        teamId: "team_1",
+      },
+      {
+        teamId: "team_1",
+        inboxItemId: completed.inboxItem.id,
+        documentId: prepared.document.id,
+        versionId: prepared.version.id,
+        idempotencyKey: "manual_tracer_extract_1",
+      },
+    );
+
+    const generated = await call(
+      router.inbox.suggestMatches,
+      { teamId: "team_1", inboxItemId: completed.inboxItem.id, limit: 2 },
+      callerContext,
+    );
+    const accepted = await call(
+      router.inbox.acceptMatch,
+      {
+        teamId: "team_1",
+        suggestionId: generated.suggestions[0]?.id ?? "",
+        idempotencyKey: "manual_tracer_accept_1",
+      },
+      callerContext,
+    );
+
+    expect(repository.attachments).toEqual([
+      { transactionId: "txn_1", documentId: prepared.document.id },
+    ]);
+
+    const rejectedAccepted = await call(
+      router.inbox.rejectMatch,
+      {
+        teamId: "team_1",
+        suggestionId: accepted.suggestion.id,
+        reason: "wrong receipt",
+        idempotencyKey: "manual_tracer_reject_accepted_1",
+      },
+      callerContext,
+    );
+    const regenerated = await call(
+      router.inbox.suggestMatches,
+      { teamId: "team_1", inboxItemId: completed.inboxItem.id, limit: 2 },
+      callerContext,
+    );
+
+    expect(completed.inboxItem).toMatchObject({
+      status: "pending_extraction",
+      extractionStatus: "pending",
+    });
+    expect(extracted.extraction.fields).toMatchObject({
+      documentType: "receipt",
+      merchantName: "Acme Supplies",
+      issuedAt: "2026-06-14",
+      totalAmountMinor: 4250,
+      currency: "USD",
+    });
+    expect(generated.suggestions.map((suggestion) => suggestion.transactionId)).toEqual([
+      "txn_1",
+      "txn_2",
+    ]);
+    expect(accepted).toMatchObject({
+      suggestion: { status: "accepted", transactionId: "txn_1" },
+      inboxItem: { status: "resolved" },
+    });
+    expect(rejectedAccepted).toMatchObject({
+      suggestion: { status: "rejected", transactionId: "txn_1" },
+    });
+    expect(repository.attachments).toEqual([]);
+    expect(repository.inboxItems.get(completed.inboxItem.id)?.status).toBe("needs_review");
+    expect(regenerated.suggestions).toHaveLength(1);
+    expect(regenerated.suggestions[0]).toMatchObject({
+      transactionId: "txn_2",
+      status: "suggested",
+    });
   });
 
   test("connects and syncs a mock bank provider through protected routes", async () => {
@@ -4101,7 +4440,13 @@ describe("appRouter", () => {
     repository.teams.set("team_1", "Test Team");
     repository.memberships.set("user_1:team_1", "admin");
     const router = await createTestRouter(repository);
-    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+    const dispatchCalls: unknown[] = [];
+    const apiContext = testContext({ id: "user_1", email: "admin@example.com" });
+    apiContext.outboxDispatcher = async (command) => {
+      dispatchCalls.push(command);
+      return { scanned: 1, dispatched: 1, failed: 0, skipped: 0, queuedMessages: 2 };
+    };
+    const context = { context: apiContext };
 
     const catalog = await call(router.emailInbox.list, { teamId: "team_1" }, context);
     const authUrl = await call(
@@ -4182,6 +4527,11 @@ describe("appRouter", () => {
       },
     });
     expect(requested.connection.id).toBe(connected.connection.id);
+    expect(requested.outboxDispatch).toMatchObject({
+      dispatched: 1,
+      queuedMessages: 2,
+    });
+    expect(dispatchCalls).toEqual([{ limit: 25 }]);
     expect(workspace.connections[0]).toMatchObject({
       accountEmail: "receipts@example.com",
       grantedScopes: ["email.inbox.readonly"],
@@ -4214,7 +4564,13 @@ describe("appRouter", () => {
       emailInboxConnectors: [createGmailMockInboxConnector()],
       googleAuthAccountTokensForUser: async (userId) => (userId === "user_1" ? googleTokens : null),
     });
-    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+    const dispatchCalls: unknown[] = [];
+    const apiContext = testContext({ id: "user_1", email: "admin@example.com" });
+    apiContext.outboxDispatcher = async (command) => {
+      dispatchCalls.push(command);
+      return { scanned: 1, dispatched: 1, failed: 0, skipped: 0, queuedMessages: 2 };
+    };
+    const context = { context: apiContext };
 
     const connected = await call(
       router.emailInbox.connectGoogleLogin,
@@ -4244,6 +4600,11 @@ describe("appRouter", () => {
       ],
     });
     expect(connected.syncRequest.connection.id).toBe(connected.connection.id);
+    expect(connected.outboxDispatch).toMatchObject({
+      dispatched: 1,
+      queuedMessages: 2,
+    });
+    expect(dispatchCalls).toEqual([{ limit: 25 }]);
     expect(repository.outboxEvents.at(-1)).toMatchObject({
       type: "inbox.provider.sync_requested",
       payload: {

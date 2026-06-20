@@ -285,6 +285,200 @@ describe("DrizzleDawnRepository PGlite contracts", () => {
       await kit.dispose();
     }
   });
+
+  test("persists document extraction attempts separately from latest extraction", async () => {
+    const kit = await createPgliteDawnRepository();
+
+    try {
+      const workspace = await createWorkspace(kit, {
+        actorId: "user_pglite_attempt_1",
+        email: "pglite-attempt-owner@example.com",
+        name: "PGlite Attempt Owner",
+        teamName: "PGlite Attempt Team",
+      });
+      const seeded = await seedDocumentInboxItem(kit, workspace);
+
+      await kit.repository.createDocumentExtractionAttempt({
+        attemptId: "attempt_failed_1",
+        teamId: workspace.team.id,
+        inboxItemId: seeded.inboxItemId,
+        documentId: seeded.documentId,
+        documentVersionId: seeded.versionId,
+        extractionId: null,
+        attemptNumber: 1,
+        source: "tanstack_ai",
+        provider: "gemini",
+        model: "gemini-3.1-pro-preview",
+        status: "failed",
+        durationMs: 250,
+        qualityScore: null,
+        errorClass: "DocumentExtractionTimeoutError",
+        errorMessage: "Document extraction timed out after 250ms",
+        rawTextPresent: false,
+        metadata: { retryable: true },
+      });
+      const created = await kit.repository.createDocumentExtraction({
+        extractionId: "extraction_completed_1",
+        teamId: workspace.team.id,
+        inboxItemId: seeded.inboxItemId,
+        documentId: seeded.documentId,
+        documentVersionId: seeded.versionId,
+        source: "tanstack_ai",
+        fields: {
+          documentType: "receipt",
+          merchantName: "Acme Supplies",
+          issuedAt: "2026-06-14",
+          totalAmountMinor: 4250,
+          currency: "USD",
+        },
+        confidence: {
+          merchantName: 0.92,
+          totalAmountMinor: 0.93,
+          currency: 0.88,
+          overall: 0.88,
+        },
+        rawText: "Acme Supplies\nTotal USD 42.50",
+        createdByActorId: workspace.actor.id,
+      });
+
+      await kit.repository.createDocumentExtractionAttempt({
+        attemptId: "attempt_completed_1",
+        teamId: workspace.team.id,
+        inboxItemId: seeded.inboxItemId,
+        documentId: seeded.documentId,
+        documentVersionId: seeded.versionId,
+        extractionId: created.extraction.id,
+        attemptNumber: 2,
+        source: "tanstack_ai",
+        provider: "gemini",
+        model: "gemini-3.1-pro-preview",
+        status: "completed",
+        durationMs: 80,
+        qualityScore: 0.88,
+        errorClass: null,
+        errorMessage: null,
+        rawTextPresent: true,
+        metadata: { promptTokens: 120 },
+      });
+
+      const attempts = await kit.repository.listDocumentExtractionAttemptsForInboxItem(
+        workspace.team.id,
+        seeded.inboxItemId,
+      );
+      const inboxItem = await kit.repository.getInboxItemForTeam(
+        workspace.team.id,
+        seeded.inboxItemId,
+      );
+
+      expect(attempts).toMatchObject([
+        {
+          id: "attempt_failed_1",
+          extractionId: null,
+          attemptNumber: 1,
+          status: "failed",
+          errorClass: "DocumentExtractionTimeoutError",
+          metadata: { retryable: true },
+        },
+        {
+          id: "attempt_completed_1",
+          extractionId: created.extraction.id,
+          attemptNumber: 2,
+          status: "completed",
+          qualityScore: 0.88,
+          rawTextPresent: true,
+          metadata: { promptTokens: 120 },
+        },
+      ]);
+      expect(inboxItem?.latestExtraction?.id).toBe(created.extraction.id);
+    } finally {
+      await kit.dispose();
+    }
+  });
+
+  test("lists cross-currency inbox match candidates by plausible amount ratio and date", async () => {
+    const kit = await createPgliteDawnRepository();
+
+    try {
+      const workspace = await createWorkspace(kit, {
+        actorId: "user_pglite_cross_currency_match",
+        email: "pglite-cross-currency@example.com",
+        name: "PGlite Cross Currency",
+        teamName: "PGlite Cross Currency Team",
+      });
+      const cardAccount = await createLedgerAccount(kit, workspace.team.id, {
+        name: "Card",
+        currency: "SEK",
+      });
+      const transactionResult = await createLedgerTransaction(kit.repository, workspace.context, {
+        teamId: workspace.team.id,
+        accountId: cardAccount.id,
+        description: "Text 100003655822",
+        postedAt: "2026-05-05T00:00:00.000Z",
+        money: { amountMinor: -13_000, currency: "SEK" },
+        type: "expense",
+        source: "bank_sync",
+        idempotencyKey: "pglite_cross_currency_txn_1",
+      });
+      const seeded = await seedDocumentInboxItem(kit, workspace);
+
+      await kit.repository.createDocumentExtraction({
+        extractionId: "extraction_cross_currency_1",
+        teamId: workspace.team.id,
+        inboxItemId: seeded.inboxItemId,
+        documentId: seeded.documentId,
+        documentVersionId: seeded.versionId,
+        source: "tanstack_ai",
+        fields: {
+          documentType: "invoice_received",
+          merchantName: "Hetzner Online GmbH",
+          issuedAt: "2026-05-02",
+          invoiceNumber: "083000801875",
+          totalAmountMinor: 1099,
+          currency: "EUR",
+        },
+        confidence: {
+          documentType: 0.95,
+          merchantName: 0.95,
+          issuedAt: 0.95,
+          invoiceNumber: 0.95,
+          totalAmountMinor: 0.95,
+          currency: 0.95,
+          overall: 0.95,
+        },
+        rawText: "Hetzner Online GmbH\nInvoice 083000801875\nTotal EUR 10.99",
+        createdByActorId: workspace.actor.id,
+      });
+
+      const inboxItem = await kit.repository.getInboxItemForTeam(
+        workspace.team.id,
+        seeded.inboxItemId,
+      );
+
+      if (!inboxItem) {
+        throw new Error("Expected seeded inbox item");
+      }
+
+      const transactionCandidates = await kit.repository.listTransactionMatchCandidatesForInboxItem(
+        {
+          teamId: workspace.team.id,
+          inboxItem,
+          limit: 10,
+        },
+      );
+      const inboxCandidates = await kit.repository.listInboxMatchCandidatesForTransaction({
+        teamId: workspace.team.id,
+        transaction: transactionResult.transaction,
+        limit: 10,
+      });
+
+      expect(transactionCandidates.map((candidate) => candidate.transaction.id)).toContain(
+        transactionResult.transaction.id,
+      );
+      expect(inboxCandidates.map((candidate) => candidate.id)).toContain(seeded.inboxItemId);
+    } finally {
+      await kit.dispose();
+    }
+  });
 });
 
 async function createWorkspace(
@@ -343,4 +537,55 @@ async function createLedgerAccount(
   await kit.db.insert(schema.ledgerAccount).values(account);
 
   return account;
+}
+
+async function seedDocumentInboxItem(
+  kit: PgliteKit,
+  workspace: Awaited<ReturnType<typeof createWorkspace>>,
+) {
+  const documentId = "doc_attempt_1";
+  const versionId = "version_attempt_1";
+  const sourceId = "source_attempt_1";
+  const inboxItemId = "inbox_attempt_1";
+
+  await kit.db.insert(schema.businessDocument).values({
+    id: documentId,
+    teamId: workspace.team.id,
+    title: "Receipt",
+    status: "uploaded",
+    currentVersionId: versionId,
+    createdByActorId: workspace.actor.id,
+  });
+  await kit.db.insert(schema.documentVersion).values({
+    id: versionId,
+    documentId,
+    teamId: workspace.team.id,
+    versionNumber: 1,
+    objectKey: "teams/team_1/documents/doc_attempt_1/versions/version_attempt_1/receipt.pdf",
+    fileName: "receipt.pdf",
+    contentType: "application/pdf",
+    byteSize: 128,
+    status: "uploaded",
+    uploadedByActorId: workspace.actor.id,
+    uploadedAt: new Date("2026-06-15T10:00:00.000Z"),
+  });
+  await kit.db.insert(schema.inboxSource).values({
+    id: sourceId,
+    teamId: workspace.team.id,
+    type: "document_upload",
+    name: "Document uploads",
+  });
+  await kit.db.insert(schema.inboxItem).values({
+    id: inboxItemId,
+    teamId: workspace.team.id,
+    sourceId,
+    sourceType: "document_upload",
+    documentId,
+    documentVersionId: versionId,
+    status: "pending_extraction",
+    extractionStatus: "pending",
+    createdByActorId: workspace.actor.id,
+  });
+
+  return { documentId, versionId, inboxItemId };
 }

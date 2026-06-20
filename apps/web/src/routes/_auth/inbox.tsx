@@ -9,6 +9,7 @@ import {
 } from "@dawn/ui/components/dropdown-menu";
 import { Input } from "@dawn/ui/components/input";
 import { Label } from "@dawn/ui/components/label";
+import { ScrollArea } from "@dawn/ui/components/scroll-area";
 import { toastManager } from "@dawn/ui/components/toast";
 import { formatMoney } from "@dawn/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -20,7 +21,6 @@ import {
   ListFilterIcon,
   MailIcon,
   MoreVerticalIcon,
-  PlusIcon,
   RefreshCwIcon,
   SearchIcon,
   Settings2Icon,
@@ -29,20 +29,31 @@ import {
   UploadIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type Ref,
+  type SetStateAction,
+} from "react";
 
 import { useTransactionSync } from "@/sync/transactions";
 import { authClient } from "@/lib/auth-client";
 import {
+  clearGoogleInboxConnectIntent,
+  consumeGoogleInboxConnectIntent,
   gmailReadonlyScope,
   googleInboxAuthScopes,
   googleInboxCallbackUrl,
+  rememberGoogleInboxConnectIntent,
 } from "@/lib/google-inbox-auth";
 import { client, orpc } from "@/utils/orpc";
 
 import { ensureCurrentTeam, optionalStringSearchParam } from "../-team-routing";
 
-type InboxTab = "all" | "review";
+type InboxTab = "invoices" | "all";
 
 type InboxSearch = {
   code?: string;
@@ -66,7 +77,7 @@ export const Route = createFileRoute("/_auth/inbox")({
     itemId: optionalStringSearchParam(search.itemId),
     q: optionalStringSearchParam(search.q),
     state: optionalStringSearchParam(search.state),
-    tab: search.tab === "review" ? "review" : undefined,
+    tab: search.tab === "all" ? "all" : undefined,
   }),
   loaderDeps: ({ search }) => ({ teamId: search.teamId }),
   loader: async ({ context, deps }) => {
@@ -96,13 +107,43 @@ export const Route = createFileRoute("/_auth/inbox")({
 });
 
 type ExtractionCorrectionState = {
+  documentType: string;
   merchantName: string;
+  customerName: string;
   issuedAt: string;
+  dueAt: string;
+  invoiceNumber: string;
   totalAmount: string;
   currency: string;
 };
 
 type ExtractionCorrectionField = keyof ExtractionCorrectionState;
+
+type InboxListItem = NonNullable<
+  Awaited<ReturnType<typeof client.inbox.list>>["inboxItems"][number]
+>;
+
+type ExtractionConfidenceField =
+  | "documentType"
+  | "merchantName"
+  | "customerName"
+  | "issuedAt"
+  | "dueAt"
+  | "invoiceNumber"
+  | "totalAmountMinor"
+  | "currency";
+
+const correctionDocumentTypes = [
+  "receipt",
+  "invoice_received",
+  "invoice_sent",
+  "bank_statement",
+  "contract",
+  "tax_document",
+  "other",
+] as const;
+
+type CorrectionDocumentType = (typeof correctionDocumentTypes)[number];
 
 function InboxRoute() {
   const { currentTeamId } = Route.useLoaderData();
@@ -110,12 +151,19 @@ function InboxRoute() {
   const navigate = useNavigate({ from: Route.fullPath });
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const reviewToolsRef = useRef<HTMLDetailsElement | null>(null);
+  const extractionReviewFirstInputRef = useRef<HTMLInputElement | null>(null);
   const googleLoginAutoConnectAttemptedRef = useRef(false);
   const query = search.q ?? "";
-  const tab = search.tab ?? "all";
+  const tab = search.tab ?? "invoices";
   const selectedInboxItemId = search.itemId ?? null;
   const [documentFile, setDocumentFile] = useState<File | null>(null);
   const [googleLoginLinkPending, setGoogleLoginLinkPending] = useState(false);
+  const [queuedEmailInboxSync, setQueuedEmailInboxSync] = useState<{
+    connectionId: string;
+    requestedAt: number;
+  } | null>(null);
+  const [hiddenInboxItemIds, setHiddenInboxItemIds] = useState<Set<string>>(() => new Set());
   const [extractionCorrections, setExtractionCorrections] = useState<
     Record<string, ExtractionCorrectionState>
   >({});
@@ -160,6 +208,7 @@ function InboxRoute() {
     }
 
     setGoogleLoginLinkPending(true);
+    rememberGoogleInboxConnectIntent(currentTeamId);
     await authClient.linkSocial(
       {
         provider: "google",
@@ -169,6 +218,7 @@ function InboxRoute() {
       {
         onError: (error) => {
           setGoogleLoginLinkPending(false);
+          clearGoogleInboxConnectIntent();
           toastManager.add({
             title: error.error.message || error.error.statusText,
             type: "error",
@@ -230,6 +280,34 @@ function InboxRoute() {
       },
     }),
   );
+  const retryExtractionMutation = useMutation(
+    orpc.inbox.retryExtraction.mutationOptions({
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
+      },
+    }),
+  );
+  const dismissInboxItemMutation = useMutation(
+    orpc.inbox.dismissItem.mutationOptions({
+      onError: (_error, input) => {
+        setHiddenInboxItemIds((hiddenIds) => {
+          const next = new Set(hiddenIds);
+          next.delete(input.inboxItemId);
+          return next;
+        });
+      },
+      onMutate: (input) => {
+        setHiddenInboxItemIds((hiddenIds) => {
+          const next = new Set(hiddenIds);
+          next.add(input.inboxItemId);
+          return next;
+        });
+      },
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
+      },
+    }),
+  );
   const suggestInboxMatchesMutation = useMutation(
     orpc.inbox.suggestMatches.mutationOptions({
       onSuccess: async () => {
@@ -283,6 +361,12 @@ function InboxRoute() {
   );
   const requestEmailInboxSyncMutation = useMutation(
     orpc.emailInbox.requestSync.mutationOptions({
+      onError: () => {
+        setQueuedEmailInboxSync(null);
+      },
+      onMutate: (input) => {
+        setQueuedEmailInboxSync({ connectionId: input.connectionId, requestedAt: Date.now() });
+      },
       onSuccess: async () => {
         await queryClient.invalidateQueries({ queryKey: orpc.emailInbox.list.queryKey() });
         await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
@@ -292,11 +376,19 @@ function InboxRoute() {
   const connectGoogleLoginMutation = useMutation(
     orpc.emailInbox.connectGoogleLogin.mutationOptions({
       onError: async () => {
+        clearGoogleInboxConnectIntent();
         await clearGoogleLoginConnectSearch();
       },
-      onSuccess: async () => {
+      onSuccess: async (data) => {
         await queryClient.invalidateQueries({ queryKey: orpc.emailInbox.list.queryKey() });
         await queryClient.invalidateQueries({ queryKey: orpc.inbox.list.queryKey() });
+        if (data.syncRequest.connection.id) {
+          setQueuedEmailInboxSync({
+            connectionId: data.syncRequest.connection.id,
+            requestedAt: Date.now(),
+          });
+        }
+        clearGoogleInboxConnectIntent();
         await clearGoogleLoginConnectSearch();
       },
     }),
@@ -332,17 +424,28 @@ function InboxRoute() {
   }, [currentTeamId, search.code, search.emailInboxProvider, search.state]);
 
   useEffect(() => {
-    if (search.connectGoogleLogin !== "1") {
-      googleLoginAutoConnectAttemptedRef.current = false;
+    const hasCallbackIntent = search.connectGoogleLogin === "1";
+
+    if (!hasCallbackIntent && !currentTeamId) {
       return;
     }
 
     if (
-      !currentTeamId ||
       googleLoginAutoConnectAttemptedRef.current ||
       connectGoogleLoginMutation.isPending ||
       connectGoogleLoginMutation.isSuccess
     ) {
+      return;
+    }
+
+    const hasStoredIntent = consumeGoogleInboxConnectIntent(currentTeamId);
+
+    if (!hasCallbackIntent && !hasStoredIntent) {
+      googleLoginAutoConnectAttemptedRef.current = false;
+      return;
+    }
+
+    if (!currentTeamId) {
       return;
     }
 
@@ -353,12 +456,12 @@ function InboxRoute() {
     });
   }, [currentTeamId, search.connectGoogleLogin]);
 
-  const inboxItems = inbox.data?.inboxItems ?? [];
+  const inboxItems = (inbox.data?.inboxItems ?? []).filter((item) => item.status !== "dismissed");
   const filteredInboxItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
-    return inboxItems.filter((item) => {
-      if (tab === "review" && item.status === "resolved") {
+    const matchingItems = inboxItems.filter((item) => {
+      if (hiddenInboxItemIds.has(item.id)) {
         return false;
       }
 
@@ -374,15 +477,25 @@ function InboxRoute() {
         item.sourceType,
         item.status,
         item.extractionStatus,
+        fields?.documentType,
         fields?.merchantName,
         fields?.customerName,
         fields?.invoiceNumber,
         fields?.currency,
+        item.latestExtraction?.rawText,
       ]
         .filter(Boolean)
         .some((value) => value!.toLowerCase().includes(normalizedQuery));
     });
-  }, [inboxItems, query, tab]);
+
+    if (tab === "all") {
+      return matchingItems;
+    }
+
+    const invoiceItems = matchingItems.filter(isInvoiceReviewItem);
+
+    return invoiceItems;
+  }, [hiddenInboxItemIds, inboxItems, query, tab]);
 
   useEffect(() => {
     if (selectedInboxItemId && filteredInboxItems.some((item) => item.id === selectedInboxItemId)) {
@@ -405,14 +518,51 @@ function InboxRoute() {
   const missingEmailInboxOAuthState = Boolean(
     search.code && search.emailInboxProvider && !search.state,
   );
+
+  useEffect(() => {
+    if (!queuedEmailInboxSync) {
+      return;
+    }
+
+    const connection = emailInbox.data?.connections.find(
+      (candidate) => candidate.connection.id === queuedEmailInboxSync.connectionId,
+    );
+    const syncRunTime = connection?.latestSyncRun?.startedAt
+      ? new Date(connection.latestSyncRun.startedAt).getTime()
+      : null;
+
+    if (syncRunTime && syncRunTime >= queuedEmailInboxSync.requestedAt - 5_000) {
+      setQueuedEmailInboxSync(null);
+    }
+  }, [emailInbox.data?.connections, queuedEmailInboxSync]);
   const selectedCorrection = selectedItem
     ? (extractionCorrections[selectedItem.id] ??
       extractionFieldsToCorrectionState(selectedItem.latestExtraction?.fields))
     : null;
-  const reviewCount = inboxItems.filter((item) => item.status !== "resolved").length;
+  const selectedActionableSuggestion = selectedItem ? bestActionableSuggestion(selectedItem) : null;
+  const invoiceCount = inboxItems.filter(
+    (item) => !hiddenInboxItemIds.has(item.id) && isInvoiceReviewItem(item),
+  ).length;
+
+  useEffect(() => {
+    if (!selectedItem || !reviewToolsRef.current) {
+      return;
+    }
+
+    reviewToolsRef.current.open = extractionNeedsFieldReview(selectedItem);
+  }, [selectedItem?.id, selectedItem?.extractionStatus, selectedItem?.latestExtraction?.id]);
+
+  function openExtractionReview() {
+    if (reviewToolsRef.current) {
+      reviewToolsRef.current.open = true;
+      reviewToolsRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    window.setTimeout(() => extractionReviewFirstInputRef.current?.focus(), 0);
+  }
 
   return (
-    <div className="mx-auto flex w-full max-w-[1728px] flex-col gap-5 py-8 md:py-10">
+    <div className="mx-auto box-border flex h-full min-h-0 w-full max-w-[1728px] flex-col gap-5 overflow-hidden py-4 md:py-6">
       <input
         className="sr-only"
         onChange={(event) => setDocumentFile(event.currentTarget.files?.[0] ?? null)}
@@ -481,12 +631,13 @@ function InboxRoute() {
           });
         }}
         providers={emailInbox.data?.providers ?? []}
+        queuedSyncConnectionId={queuedEmailInboxSync?.connectionId ?? null}
         settingsPending={updateEmailInboxSettingsMutation.isPending}
         syncPending={requestEmailInboxSyncMutation.isPending}
       />
 
-      <section className="grid min-h-[calc(100svh-150px)] gap-6 lg:grid-cols-[minmax(360px,0.95fr)_minmax(520px,1.35fr)]">
-        <div className="grid min-h-0 grid-rows-[auto_1fr] gap-6">
+      <section className="grid min-h-0 flex-1 gap-6 overflow-hidden lg:grid-cols-[minmax(360px,0.95fr)_minmax(520px,1.35fr)]">
+        <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-6">
           <div className="flex items-center gap-2">
             <label className="relative min-w-0 flex-1">
               <span className="sr-only">Search inbox</span>
@@ -505,13 +656,16 @@ function InboxRoute() {
               />
             </label>
             <Button
-              aria-label={
-                tab === "all" ? `Show ${reviewCount} inbox items in review` : "Show all inbox items"
-              }
+              aria-label={tab === "invoices" ? "Show all documents" : "Show invoice review queue"}
               className="border-border"
-              onClick={() => updateSearch({ tab: tab === "all" ? "review" : undefined })}
+              onClick={() => updateSearch({ tab: tab === "invoices" ? "all" : undefined })}
               size="icon-lg"
-              variant={tab === "review" ? "secondary" : "outline"}
+              title={
+                tab === "invoices"
+                  ? `Showing ${invoiceCount} invoice-like items`
+                  : "Showing all documents"
+              }
+              variant={tab === "invoices" ? "secondary" : "outline"}
             >
               <ListFilterIcon aria-hidden="true" className="size-4" />
             </Button>
@@ -524,19 +678,15 @@ function InboxRoute() {
             >
               <UploadIcon aria-hidden="true" className="size-4" />
             </Button>
-            <Button
-              aria-label="Add inbox item"
-              className="border-border"
-              onClick={() => fileInputRef.current?.click()}
-              size="icon-lg"
-              variant="outline"
-            >
-              <PlusIcon aria-hidden="true" className="size-4" />
-            </Button>
           </div>
 
           <div className="min-h-0 border border-border bg-background">
-            <div className="h-full overflow-y-auto">
+            <ScrollArea
+              className="h-full overflow-visible"
+              fill
+              thumbClassName="bg-gray-500/70"
+              verticalScrollbarStyle={{ insetInlineEnd: "-16px" }}
+            >
               {inbox.isLoading ? (
                 <div className="grid min-h-full place-items-center p-6 text-sm text-muted-foreground">
                   Loading inbox...
@@ -557,7 +707,7 @@ function InboxRoute() {
               ) : (
                 filteredInboxItems.map((item) => (
                   <button
-                    className="grid h-[106px] w-full gap-3 border-b border-border p-4 text-left transition-[background-color,border-color,transform] duration-150 ease-out hover:bg-muted/20 active:scale-[0.995] data-[selected=true]:bg-card"
+                    className="grid min-h-[106px] w-full gap-3 border-b border-border p-4 text-left transition-[background-color,border-color,transform] duration-150 ease-out last:border-b-0 hover:bg-muted/20 active:scale-[0.995] data-[selected=true]:bg-card"
                     data-desktop-record-id={item.id}
                     data-desktop-record-type="inbox_item"
                     data-selected={selectedItem?.id === item.id}
@@ -571,8 +721,7 @@ function InboxRoute() {
                           {displayInboxTitle(item)}
                         </p>
                         <p className="mt-1 truncate text-xs text-muted-foreground">
-                          {item.document?.currentVersion?.fileName ??
-                            item.sourceType.replace("_", " ")}
+                          {displayInboxSubtitle(item)}
                         </p>
                       </div>
                       <span className="shrink-0 text-xs text-muted-foreground">
@@ -580,25 +729,21 @@ function InboxRoute() {
                       </span>
                     </div>
                     <div className="flex min-w-0 items-center justify-between gap-3">
-                      <span className="font-mono text-xs text-muted-foreground">
+                      <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
                         {formatExtractionAmount(item.latestExtraction?.fields)}
                       </span>
-                      <InboxStatusBadge
-                        extractionStatus={item.extractionStatus}
-                        matchStatus={bestSuggestionStatus(item.matchSuggestions)}
-                        status={item.status}
-                      />
+                      <InboxStatusBadge item={item} />
                     </div>
                   </button>
                 ))
               )}
-            </div>
+            </ScrollArea>
           </div>
         </div>
 
-        <div className="min-h-0 border border-border bg-background">
+        <div className="min-h-0 overflow-hidden border border-border bg-background">
           {selectedItem && selectedCorrection ? (
-            <div className="grid min-h-full grid-rows-[auto_1fr_auto]">
+            <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
               <div className="flex h-16 items-center justify-between border-b border-border px-5">
                 <div className="flex min-w-0 items-center gap-3">
                   <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-card">
@@ -612,6 +757,9 @@ function InboxRoute() {
                       {selectedItem.document?.currentVersion?.fileName ?? selectedItem.documentId}
                     </p>
                   </div>
+                </div>
+                <div className="hidden shrink-0 md:block">
+                  <InboxStatusBadge item={selectedItem} />
                 </div>
                 <DropdownMenu>
                   <DropdownMenuTrigger
@@ -647,7 +795,21 @@ function InboxRoute() {
                       Download file
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem variant="destructive">
+                    <DropdownMenuItem
+                      disabled={!currentTeamId || dismissInboxItemMutation.isPending}
+                      onClick={() => {
+                        if (!currentTeamId) {
+                          return;
+                        }
+
+                        dismissInboxItemMutation.mutate({
+                          teamId: currentTeamId,
+                          inboxItemId: selectedItem.id,
+                          idempotencyKey: crypto.randomUUID(),
+                        });
+                      }}
+                      variant="destructive"
+                    >
                       <Trash2Icon aria-hidden="true" className="size-4" />
                       Remove from view
                     </DropdownMenuItem>
@@ -656,91 +818,310 @@ function InboxRoute() {
               </div>
 
               <div className="min-h-0 overflow-y-auto">
-                <DocumentPreview item={selectedItem} correction={selectedCorrection} />
+                <InvoiceReviewPreview item={selectedItem} correction={selectedCorrection} />
 
-                <div className="grid gap-5 border-t border-border p-5">
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <p className="text-sm font-medium">Extracted fields</p>
-                      <p className="text-xs text-muted-foreground">
-                        Confidence:{" "}
-                        {selectedItem.latestExtraction
-                          ? formatExtractionConfidence(selectedItem.latestExtraction.confidence)
-                          : "pending"}
-                      </p>
+                <details className="group border-t border-border" ref={reviewToolsRef}>
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5 marker:hidden">
+                    <span className="text-sm font-medium">Review tools</span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      Extraction and matching controls
+                    </span>
+                  </summary>
+                  <div className="grid gap-5 px-5 pb-5">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-medium">Extracted fields</p>
+                          <ExtractionReadinessBadge item={selectedItem} />
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {extractionReviewSummary(selectedItem)}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        {selectedItem.extractionStatus === "failed" ? (
+                          <Button
+                            disabled={retryExtractionMutation.isPending || !currentTeamId}
+                            onClick={() =>
+                              currentTeamId
+                                ? retryExtractionMutation.mutate({
+                                    teamId: currentTeamId,
+                                    inboxItemId: selectedItem.id,
+                                    idempotencyKey: crypto.randomUUID(),
+                                  })
+                                : undefined
+                            }
+                            size="sm"
+                            variant="outline"
+                          >
+                            <RefreshCwIcon aria-hidden="true" className="size-3.5" />
+                            Retry OCR
+                          </Button>
+                        ) : null}
+                        <Button
+                          disabled={
+                            extractionCorrectionMutation.isPending ||
+                            !currentTeamId ||
+                            selectedItem.extractionStatus === "pending"
+                          }
+                          onClick={() =>
+                            currentTeamId
+                              ? extractionCorrectionMutation.mutate({
+                                  teamId: currentTeamId,
+                                  inboxItemId: selectedItem.id,
+                                  fields: correctionStateToExtractionFields(selectedCorrection),
+                                  idempotencyKey: crypto.randomUUID(),
+                                })
+                              : undefined
+                          }
+                          size="sm"
+                          variant="outline"
+                        >
+                          Save corrections
+                        </Button>
+                      </div>
                     </div>
-                    <Button
-                      disabled={
-                        extractionCorrectionMutation.isPending ||
-                        !currentTeamId ||
-                        selectedItem.extractionStatus === "pending"
-                      }
-                      onClick={() =>
-                        currentTeamId
-                          ? extractionCorrectionMutation.mutate({
-                              teamId: currentTeamId,
-                              inboxItemId: selectedItem.id,
-                              fields: correctionStateToExtractionFields(selectedCorrection),
-                              idempotencyKey: crypto.randomUUID(),
-                            })
-                          : undefined
-                      }
-                      size="sm"
-                      variant="outline"
-                    >
-                      Save corrections
-                    </Button>
+                    <div className="grid gap-3 md:grid-cols-4">
+                      <CorrectionInput
+                        confidence={fieldConfidence(selectedItem, "documentType")}
+                        field="documentType"
+                        initial={selectedCorrection}
+                        inputRef={extractionReviewFirstInputRef}
+                        itemId={selectedItem.id}
+                        label="Type"
+                        onChange={setExtractionCorrections}
+                        value={selectedCorrection.documentType}
+                      />
+                      <CorrectionInput
+                        confidence={fieldConfidence(selectedItem, "merchantName")}
+                        field="merchantName"
+                        initial={selectedCorrection}
+                        itemId={selectedItem.id}
+                        label="Merchant"
+                        onChange={setExtractionCorrections}
+                        value={selectedCorrection.merchantName}
+                      />
+                      <CorrectionInput
+                        confidence={fieldConfidence(selectedItem, "customerName")}
+                        field="customerName"
+                        initial={selectedCorrection}
+                        itemId={selectedItem.id}
+                        label="Customer"
+                        onChange={setExtractionCorrections}
+                        value={selectedCorrection.customerName}
+                      />
+                      <CorrectionInput
+                        confidence={fieldConfidence(selectedItem, "invoiceNumber")}
+                        field="invoiceNumber"
+                        initial={selectedCorrection}
+                        itemId={selectedItem.id}
+                        label="Invoice #"
+                        onChange={setExtractionCorrections}
+                        value={selectedCorrection.invoiceNumber}
+                      />
+                      <CorrectionInput
+                        confidence={fieldConfidence(selectedItem, "issuedAt")}
+                        field="issuedAt"
+                        initial={selectedCorrection}
+                        itemId={selectedItem.id}
+                        label="Issue date"
+                        onChange={setExtractionCorrections}
+                        value={selectedCorrection.issuedAt}
+                      />
+                      <CorrectionInput
+                        confidence={fieldConfidence(selectedItem, "dueAt")}
+                        field="dueAt"
+                        initial={selectedCorrection}
+                        itemId={selectedItem.id}
+                        label="Due date"
+                        onChange={setExtractionCorrections}
+                        value={selectedCorrection.dueAt}
+                      />
+                      <CorrectionInput
+                        confidence={fieldConfidence(selectedItem, "totalAmountMinor")}
+                        field="totalAmount"
+                        initial={selectedCorrection}
+                        itemId={selectedItem.id}
+                        label="Amount"
+                        onChange={setExtractionCorrections}
+                        value={selectedCorrection.totalAmount}
+                      />
+                      <CorrectionInput
+                        confidence={fieldConfidence(selectedItem, "currency")}
+                        field="currency"
+                        initial={selectedCorrection}
+                        itemId={selectedItem.id}
+                        label="Currency"
+                        onChange={setExtractionCorrections}
+                        value={selectedCorrection.currency}
+                      />
+                    </div>
                   </div>
-                  <div className="grid gap-3 md:grid-cols-4">
-                    <CorrectionInput
-                      field="merchantName"
-                      initial={selectedCorrection}
-                      itemId={selectedItem.id}
-                      label="Merchant"
-                      onChange={setExtractionCorrections}
-                      value={selectedCorrection.merchantName}
-                    />
-                    <CorrectionInput
-                      field="issuedAt"
-                      initial={selectedCorrection}
-                      itemId={selectedItem.id}
-                      label="Issue date"
-                      onChange={setExtractionCorrections}
-                      value={selectedCorrection.issuedAt}
-                    />
-                    <CorrectionInput
-                      field="totalAmount"
-                      initial={selectedCorrection}
-                      itemId={selectedItem.id}
-                      label="Amount"
-                      onChange={setExtractionCorrections}
-                      value={selectedCorrection.totalAmount}
-                    />
-                    <CorrectionInput
-                      field="currency"
-                      initial={selectedCorrection}
-                      itemId={selectedItem.id}
-                      label="Currency"
-                      onChange={setExtractionCorrections}
-                      value={selectedCorrection.currency}
-                    />
-                  </div>
-                </div>
 
-                <div className="grid gap-4 border-t border-border p-5">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium">Match suggestions</p>
-                      <p className="text-xs text-muted-foreground">
-                        Confirm or decline the transaction match for this document.
-                      </p>
+                  <div className="grid gap-4 border-t border-border px-5 pb-5 pt-5">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-medium">Match suggestions</p>
+                          <MatchReadinessBadge item={selectedItem} />
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {matchReadinessSummary(selectedItem)}
+                        </p>
+                      </div>
+                      <Button
+                        disabled={
+                          suggestInboxMatchesMutation.isPending ||
+                          !currentTeamId ||
+                          !itemReadyToMatch(selectedItem)
+                        }
+                        onClick={() =>
+                          currentTeamId
+                            ? suggestInboxMatchesMutation.mutate({
+                                teamId: currentTeamId,
+                                inboxItemId: selectedItem.id,
+                              })
+                            : undefined
+                        }
+                        size="sm"
+                        variant="outline"
+                      >
+                        <SparklesIcon aria-hidden="true" className="size-3.5" />
+                        Find matches
+                      </Button>
                     </div>
+
+                    {selectedItem.matchSuggestions?.length ? (
+                      <div className="grid gap-2">
+                        {selectedItem.matchSuggestions.map((suggestion) => (
+                          <div
+                            className="grid gap-3 border border-border bg-card/30 p-3 md:grid-cols-[1fr_auto]"
+                            key={suggestion.id}
+                          >
+                            <div className="min-w-0">
+                              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                <p className="truncate text-sm font-medium">
+                                  {suggestion.transaction?.description ?? suggestion.transactionId}
+                                </p>
+                                <Badge
+                                  variant={suggestion.status === "accepted" ? "success" : "outline"}
+                                >
+                                  {suggestion.status.replace("_", " ")}
+                                </Badge>
+                                <Badge variant="secondary">
+                                  {formatMatchScore(suggestion.score)}
+                                </Badge>
+                              </div>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {suggestion.transaction
+                                  ? `${formatMoney(suggestion.transaction.money)} · ${formatDate(suggestion.transaction.postedAt)}`
+                                  : suggestion.confidence}
+                              </p>
+                              <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">
+                                {suggestion.explanation.join(" · ")}
+                              </p>
+                            </div>
+                            <div className="flex items-start justify-end gap-2">
+                              <Button
+                                disabled={
+                                  acceptInboxMatchMutation.isPending ||
+                                  !currentTeamId ||
+                                  suggestion.status !== "suggested"
+                                }
+                                onClick={() =>
+                                  currentTeamId
+                                    ? acceptInboxMatchMutation.mutate({
+                                        teamId: currentTeamId,
+                                        suggestionId: suggestion.id,
+                                        idempotencyKey: crypto.randomUUID(),
+                                      })
+                                    : undefined
+                                }
+                                size="sm"
+                              >
+                                Confirm
+                                <CheckIcon aria-hidden="true" className="size-3.5" />
+                              </Button>
+                              <Button
+                                disabled={
+                                  rejectInboxMatchMutation.isPending ||
+                                  !currentTeamId ||
+                                  suggestion.status !== "suggested"
+                                }
+                                onClick={() =>
+                                  currentTeamId
+                                    ? rejectInboxMatchMutation.mutate({
+                                        teamId: currentTeamId,
+                                        suggestionId: suggestion.id,
+                                        idempotencyKey: crypto.randomUUID(),
+                                      })
+                                    : undefined
+                                }
+                                size="sm"
+                                variant="outline"
+                              >
+                                Decline
+                                <XIcon aria-hidden="true" className="size-3.5" />
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="border border-border p-4 text-sm text-muted-foreground">
+                        {emptyMatchSuggestionMessage(selectedItem)}
+                      </div>
+                    )}
+                  </div>
+                </details>
+              </div>
+
+              <div className="flex flex-col gap-3 border-t border-border bg-background/95 p-4 sm:flex-row sm:items-center sm:justify-between">
+                <span className="min-w-0 truncate text-sm text-muted-foreground">
+                  {displayReviewBarSummary(selectedItem)}
+                </span>
+                <div className="flex items-center justify-end gap-2">
+                  {selectedActionableSuggestion ? (
+                    <>
+                      <Button
+                        disabled={rejectInboxMatchMutation.isPending || !currentTeamId}
+                        onClick={() => {
+                          if (!currentTeamId) {
+                            return;
+                          }
+
+                          rejectInboxMatchMutation.mutate({
+                            teamId: currentTeamId,
+                            suggestionId: selectedActionableSuggestion.id,
+                            idempotencyKey: crypto.randomUUID(),
+                          });
+                        }}
+                        variant="outline"
+                      >
+                        Decline
+                        <XIcon aria-hidden="true" className="size-4" />
+                      </Button>
+                      <Button
+                        disabled={acceptInboxMatchMutation.isPending || !currentTeamId}
+                        onClick={() => {
+                          if (!currentTeamId) {
+                            return;
+                          }
+
+                          acceptInboxMatchMutation.mutate({
+                            teamId: currentTeamId,
+                            suggestionId: selectedActionableSuggestion.id,
+                            idempotencyKey: crypto.randomUUID(),
+                          });
+                        }}
+                      >
+                        Confirm
+                        <CheckIcon aria-hidden="true" className="size-4" />
+                      </Button>
+                    </>
+                  ) : itemReadyToMatch(selectedItem) ? (
                     <Button
-                      disabled={
-                        suggestInboxMatchesMutation.isPending ||
-                        !currentTeamId ||
-                        selectedItem.extractionStatus !== "completed"
-                      }
+                      disabled={suggestInboxMatchesMutation.isPending || !currentTeamId}
                       onClick={() =>
                         currentTeamId
                           ? suggestInboxMatchesMutation.mutate({
@@ -749,130 +1130,15 @@ function InboxRoute() {
                             })
                           : undefined
                       }
-                      size="sm"
-                      variant="outline"
                     >
-                      <SparklesIcon aria-hidden="true" className="size-3.5" />
+                      <SparklesIcon aria-hidden="true" className="size-4" />
                       Find matches
                     </Button>
-                  </div>
-
-                  {selectedItem.matchSuggestions?.length ? (
-                    <div className="grid gap-2">
-                      {selectedItem.matchSuggestions.map((suggestion) => (
-                        <div
-                          className="grid gap-3 border border-border bg-card/30 p-3 md:grid-cols-[1fr_auto]"
-                          key={suggestion.id}
-                        >
-                          <div className="min-w-0">
-                            <div className="flex min-w-0 flex-wrap items-center gap-2">
-                              <p className="truncate text-sm font-medium">
-                                {suggestion.transaction?.description ?? suggestion.transactionId}
-                              </p>
-                              <Badge
-                                variant={suggestion.status === "accepted" ? "success" : "outline"}
-                              >
-                                {suggestion.status.replace("_", " ")}
-                              </Badge>
-                              <Badge variant="secondary">
-                                {formatMatchScore(suggestion.score)}
-                              </Badge>
-                            </div>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              {suggestion.transaction
-                                ? `${formatMoney(suggestion.transaction.money)} · ${formatDate(suggestion.transaction.postedAt)}`
-                                : suggestion.confidence}
-                            </p>
-                            <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">
-                              {suggestion.explanation.join(" · ")}
-                            </p>
-                          </div>
-                          <div className="flex items-start justify-end gap-2">
-                            <Button
-                              disabled={
-                                acceptInboxMatchMutation.isPending ||
-                                !currentTeamId ||
-                                suggestion.status !== "suggested"
-                              }
-                              onClick={() =>
-                                currentTeamId
-                                  ? acceptInboxMatchMutation.mutate({
-                                      teamId: currentTeamId,
-                                      suggestionId: suggestion.id,
-                                      idempotencyKey: crypto.randomUUID(),
-                                    })
-                                  : undefined
-                              }
-                              size="sm"
-                            >
-                              Confirm
-                              <CheckIcon aria-hidden="true" className="size-3.5" />
-                            </Button>
-                            <Button
-                              disabled={
-                                rejectInboxMatchMutation.isPending ||
-                                !currentTeamId ||
-                                suggestion.status !== "suggested"
-                              }
-                              onClick={() =>
-                                currentTeamId
-                                  ? rejectInboxMatchMutation.mutate({
-                                      teamId: currentTeamId,
-                                      suggestionId: suggestion.id,
-                                      idempotencyKey: crypto.randomUUID(),
-                                    })
-                                  : undefined
-                              }
-                              size="sm"
-                              variant="outline"
-                            >
-                              Decline
-                              <XIcon aria-hidden="true" className="size-3.5" />
-                            </Button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
                   ) : (
-                    <div className="border border-border p-4 text-sm text-muted-foreground">
-                      No suggestions generated for this item.
-                    </div>
+                    <Button onClick={openExtractionReview} variant="outline">
+                      Review extraction
+                    </Button>
                   )}
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-3 border-t border-border bg-background/95 p-4 sm:flex-row sm:items-center sm:justify-between">
-                <span className="truncate text-sm text-muted-foreground">
-                  {displayInboxTitle(selectedItem)} ·{" "}
-                  {formatExtractionAmount(selectedItem.latestExtraction?.fields)}
-                </span>
-                <div className="flex items-center justify-end gap-2">
-                  <Button variant="outline">Decline</Button>
-                  <Button
-                    disabled={
-                      !selectedItem.matchSuggestions?.some(
-                        (suggestion) => suggestion.status === "suggested",
-                      )
-                    }
-                    onClick={() => {
-                      const suggestion = selectedItem.matchSuggestions?.find(
-                        (candidate) => candidate.status === "suggested",
-                      );
-
-                      if (!suggestion || !currentTeamId) {
-                        return;
-                      }
-
-                      acceptInboxMatchMutation.mutate({
-                        teamId: currentTeamId,
-                        suggestionId: suggestion.id,
-                        idempotencyKey: crypto.randomUUID(),
-                      });
-                    }}
-                  >
-                    Confirm
-                    <CheckIcon aria-hidden="true" className="size-4" />
-                  </Button>
                 </div>
               </div>
             </div>
@@ -897,6 +1163,8 @@ function InboxRoute() {
         {extractionCorrectionMutation.error ? (
           <p>{extractionCorrectionMutation.error.message}</p>
         ) : null}
+        {retryExtractionMutation.error ? <p>{retryExtractionMutation.error.message}</p> : null}
+        {dismissInboxItemMutation.error ? <p>{dismissInboxItemMutation.error.message}</p> : null}
         {suggestInboxMatchesMutation.error ? (
           <p>{suggestInboxMatchesMutation.error.message}</p>
         ) : null}
@@ -926,17 +1194,23 @@ function InboxRoute() {
   );
 }
 
-function DocumentPreview({
+function InvoiceReviewPreview({
   correction,
   item,
 }: {
   correction: ExtractionCorrectionState;
-  item: NonNullable<Awaited<ReturnType<typeof client.inbox.list>>["inboxItems"][number]>;
+  item: InboxListItem;
 }) {
   const fields = item.latestExtraction?.fields;
   const fileName = item.document?.currentVersion?.fileName ?? "Document";
   const amount = correctionStateToExtractionFields(correction).totalAmountMinor;
   const currency = correction.currency.trim().toUpperCase() || fields?.currency || "USD";
+  const suggestion = bestVisibleSuggestion(item);
+  const amountLabel =
+    amount == null
+      ? formatExtractionAmount(fields)
+      : formatMoney({ amountMinor: amount, currency });
+  const dueLabel = correction.dueAt ? formatDate(correction.dueAt) : "on receipt";
 
   return (
     <div className="bg-card/40 p-6 md:p-10">
@@ -946,34 +1220,39 @@ function DocumentPreview({
             <div>
               <p className="text-2xl font-medium">Invoice</p>
               <div className="mt-6 grid gap-1 text-xs text-muted-foreground">
-                <span>Invoice number {fields?.invoiceNumber ?? "Pending"}</span>
+                <span>Invoice number {correction.invoiceNumber || "Pending"}</span>
                 <span>Date of issue {correction.issuedAt || "Pending"}</span>
-                <span>Date due {fields?.dueAt ?? "Pending"}</span>
+                <span>Date due {correction.dueAt || "Pending"}</span>
               </div>
             </div>
-            <Badge variant={statusBadgeVariant(item.status)}>{item.status.replace("_", " ")}</Badge>
           </div>
 
           <div className="grid gap-8 md:grid-cols-2">
             <div className="grid gap-1 text-xs text-muted-foreground">
-              <span className="text-sm text-foreground">{correction.merchantName || "Sender"}</span>
+              <span className="text-sm text-foreground">
+                {correction.merchantName || item.source?.name || "Sender pending"}
+              </span>
               <span>{item.source?.name ?? item.sourceType.replace("_", " ")}</span>
               <span>{fileName}</span>
             </div>
             <div className="grid gap-1 text-xs text-muted-foreground md:text-right">
               <span className="text-sm text-foreground">Bill to</span>
-              <span>{fields?.customerName ?? "Dawn workspace"}</span>
+              <span>{correction.customerName || "Dawn workspace"}</span>
               <span>{item.document?.title ?? item.documentId}</span>
             </div>
           </div>
 
           <div>
             <p className="text-lg font-medium">
-              {amount == null
-                ? `${correction.totalAmount || "0.00"} ${currency}`
-                : `${formatMoney({ amountMinor: amount, currency })}`}{" "}
-              due {fields?.dueAt ?? "on receipt"}
+              {amountLabel} due {dueLabel}
             </p>
+            {suggestion?.transaction ? (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Suggested transaction: {suggestion.transaction.description} ·{" "}
+                {formatMoney(suggestion.transaction.money)} ·{" "}
+                {formatDate(suggestion.transaction.postedAt)}
+              </p>
+            ) : null}
           </div>
 
           <div className="grid gap-2 text-xs">
@@ -985,21 +1264,19 @@ function DocumentPreview({
             <div className="grid grid-cols-[1fr_80px_100px] border-b border-border py-3">
               <span>{correction.merchantName || item.document?.title || "Extracted document"}</span>
               <span className="text-right text-muted-foreground">1</span>
-              <span className="text-right">
-                {amount == null
-                  ? correction.totalAmount || "-"
-                  : formatMoney({ amountMinor: amount, currency })}
-              </span>
+              <span className="text-right">{amountLabel}</span>
             </div>
           </div>
 
           {item.latestExtraction?.rawText ? (
-            <div className="mt-6 border-t border-border pt-4">
-              <p className="mb-2 text-xs font-medium text-muted-foreground">Extraction text</p>
-              <p className="line-clamp-6 whitespace-pre-wrap text-xs text-muted-foreground">
+            <details className="mt-6 border-t border-border pt-4">
+              <summary className="cursor-pointer list-none text-xs font-medium text-muted-foreground marker:hidden">
+                Extraction text
+              </summary>
+              <p className="mt-3 line-clamp-8 whitespace-pre-wrap text-xs text-muted-foreground">
                 {item.latestExtraction.rawText}
               </p>
-            </div>
+            </details>
           ) : null}
         </div>
       </div>
@@ -1053,6 +1330,7 @@ function EmailInboxConnectorStrip({
   onSaveSettings,
   onSync,
   providers,
+  queuedSyncConnectionId,
   settingsPending,
   syncPending,
 }: {
@@ -1075,6 +1353,7 @@ function EmailInboxConnectorStrip({
   ) => void;
   onSync: (connectionId: string) => void;
   providers: EmailInboxProviderOption[];
+  queuedSyncConnectionId?: string | null;
   settingsPending: boolean;
   syncPending: boolean;
 }) {
@@ -1087,6 +1366,16 @@ function EmailInboxConnectorStrip({
   const scopeSummary = primaryConnection
     ? emailInboxGrantedScopeSummary(primaryConnection)
     : (primaryProvider?.defaultScopes.join(" ") ?? "gmail.readonly");
+  const primarySyncQueued =
+    Boolean(primaryConnection) && primaryConnection?.connection.id === queuedSyncConnectionId;
+  const primarySyncRunning = primaryConnection?.latestSyncRun?.status === "running";
+  const syncDisabled =
+    syncPending ||
+    primarySyncQueued ||
+    primarySyncRunning ||
+    !currentTeamId ||
+    primaryConnection?.connection.status === "disabled";
+  const syncLabel = primarySyncRunning ? "Syncing" : primarySyncQueued ? "Queued" : "Sync";
   const [blockedSenders, setBlockedSenders] = useState(
     primaryConnection?.settings.senderBlocklist.join(", ") ?? "",
   );
@@ -1099,59 +1388,72 @@ function EmailInboxConnectorStrip({
     setBlockedDomains(primaryConnection?.settings.domainBlocklist.join(", ") ?? "");
   }, [primaryConnection?.connection.id]);
 
-  return (
-    <section className="grid gap-3 border border-border bg-background p-4 lg:grid-cols-[minmax(260px,0.8fr)_minmax(360px,1fr)_auto] lg:items-center">
-      <div className="flex min-w-0 items-center gap-3">
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-card">
-          <MailIcon aria-hidden="true" className="size-5 text-muted-foreground" />
-        </div>
-        <div className="min-w-0">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <p className="truncate text-sm font-medium">
-              {primaryConnection?.accountEmail ?? primaryProvider?.displayName ?? "Email inbox"}
-            </p>
-            <EmailInboxConnectionBadge connection={primaryConnection} oauthPending={oauthPending} />
+  if (primaryConnection) {
+    return (
+      <section className="border border-border bg-background">
+        <div className="grid gap-3 p-3 lg:grid-cols-[minmax(260px,1fr)_auto] lg:items-center">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-card">
+              <MailIcon aria-hidden="true" className="size-4 text-muted-foreground" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <p className="truncate text-sm font-medium">
+                  {primaryConnection.accountEmail ?? primaryProvider?.displayName ?? "Email inbox"}
+                </p>
+                <EmailInboxConnectionBadge
+                  connection={primaryConnection}
+                  oauthPending={oauthPending}
+                />
+              </div>
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {primaryConnection.connection.provider} ·{" "}
+                {formatEmailInboxSyncStatus(primaryConnection, primarySyncQueued)}
+              </p>
+            </div>
           </div>
-          <p className="mt-1 truncate text-xs text-muted-foreground">
-            {primaryConnection
-              ? `${primaryConnection.connection.provider} · ${formatEmailInboxSyncStatus(primaryConnection)}`
-              : "Connect Gmail to import receipt attachments and email-body receipts."}
-          </p>
-          <p className="mt-1 truncate text-xs text-muted-foreground">{scopeSummary}</p>
+          <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
+            <Button
+              disabled={syncDisabled}
+              onClick={(event) => {
+                event.preventDefault();
+                onSync(primaryConnection.connection.id);
+              }}
+              size="sm"
+            >
+              <RefreshCwIcon
+                aria-hidden="true"
+                className={primarySyncRunning || syncPending ? "size-3.5 animate-spin" : "size-3.5"}
+              />
+              {syncLabel}
+            </Button>
+          </div>
         </div>
-      </div>
-
-      {primaryConnection ? (
-        <div className="grid gap-2 sm:grid-cols-2">
-          <Label className="grid gap-1 text-xs text-muted-foreground">
-            Block senders
-            <Input
-              className="h-9 border-border text-foreground"
-              onChange={(event) => setBlockedSenders(event.target.value)}
-              placeholder="billing@example.com"
-              value={blockedSenders}
-            />
-          </Label>
-          <Label className="grid gap-1 text-xs text-muted-foreground">
-            Block domains
-            <Input
-              className="h-9 border-border text-foreground"
-              onChange={(event) => setBlockedDomains(event.target.value)}
-              placeholder="example.com"
-              value={blockedDomains}
-            />
-          </Label>
-        </div>
-      ) : (
-        <div className="grid gap-1 text-xs text-muted-foreground">
-          <span>Scopes</span>
-          <span className="truncate font-mono">{scopeSummary}</span>
-        </div>
-      )}
-
-      <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
-        {primaryConnection ? (
-          <>
+        <details className="border-t border-border">
+          <summary className="cursor-pointer list-none px-3 py-2 text-xs text-muted-foreground marker:hidden">
+            Filter settings
+          </summary>
+          <div className="grid gap-3 px-3 pb-3 lg:grid-cols-[1fr_auto] lg:items-end">
+            <div className="grid gap-2 sm:grid-cols-2">
+              <Label className="grid gap-1 text-xs text-muted-foreground">
+                Block senders
+                <Input
+                  className="h-9 border-border text-foreground"
+                  onChange={(event) => setBlockedSenders(event.target.value)}
+                  placeholder="billing@example.com"
+                  value={blockedSenders}
+                />
+              </Label>
+              <Label className="grid gap-1 text-xs text-muted-foreground">
+                Block domains
+                <Input
+                  className="h-9 border-border text-foreground"
+                  onChange={(event) => setBlockedDomains(event.target.value)}
+                  placeholder="example.com"
+                  value={blockedDomains}
+                />
+              </Label>
+            </div>
             <Button
               disabled={settingsPending || !currentTeamId}
               onClick={() =>
@@ -1169,40 +1471,57 @@ function EmailInboxConnectorStrip({
               <Settings2Icon aria-hidden="true" className="size-3.5" />
               Save filters
             </Button>
-            <Button
-              disabled={
-                syncPending || !currentTeamId || primaryConnection.connection.status === "disabled"
-              }
-              onClick={() => onSync(primaryConnection.connection.id)}
-              size="sm"
-            >
-              <RefreshCwIcon aria-hidden="true" className="size-3.5" />
-              Sync
-            </Button>
-          </>
-        ) : (
-          <>
-            <Button
-              disabled={connectPending || !currentTeamId || primaryProvider?.provider !== "gmail"}
-              loading={googleLoginConnectPending}
-              onClick={onConnectGoogleLogin}
-              size="sm"
-            >
-              <MailIcon aria-hidden="true" className="size-3.5" />
-              Use Google login
-            </Button>
-            <Button
-              disabled={
-                connectPending || googleLoginConnectPending || !currentTeamId || !primaryProvider
-              }
-              onClick={() => (primaryProvider ? onConnect(primaryProvider.provider) : undefined)}
-              size="sm"
-              variant="outline"
-            >
-              Connect {primaryProvider?.displayName ?? "Gmail"}
-            </Button>
-          </>
-        )}
+          </div>
+        </details>
+      </section>
+    );
+  }
+
+  return (
+    <section className="grid gap-3 border border-border bg-background p-4 lg:grid-cols-[minmax(260px,0.8fr)_minmax(360px,1fr)_auto] lg:items-center">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-card">
+          <MailIcon aria-hidden="true" className="size-5 text-muted-foreground" />
+        </div>
+        <div className="min-w-0">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <p className="truncate text-sm font-medium">
+              {primaryProvider?.displayName ?? "Email inbox"}
+            </p>
+            <EmailInboxConnectionBadge connection={null} oauthPending={oauthPending} />
+          </div>
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            Connect Gmail to import receipt attachments and email-body receipts.
+          </p>
+          <p className="mt-1 truncate text-xs text-muted-foreground">{scopeSummary}</p>
+        </div>
+      </div>
+
+      <div className="grid gap-1 text-xs text-muted-foreground">
+        <span>Scopes</span>
+        <span className="truncate font-mono">{scopeSummary}</span>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
+        <Button
+          disabled={connectPending || !currentTeamId || primaryProvider?.provider !== "gmail"}
+          loading={googleLoginConnectPending}
+          onClick={onConnectGoogleLogin}
+          size="sm"
+        >
+          <MailIcon aria-hidden="true" className="size-3.5" />
+          Use Google login
+        </Button>
+        <Button
+          disabled={
+            connectPending || googleLoginConnectPending || !currentTeamId || !primaryProvider
+          }
+          onClick={() => (primaryProvider ? onConnect(primaryProvider.provider) : undefined)}
+          size="sm"
+          variant="outline"
+        >
+          Connect {primaryProvider?.displayName ?? "Gmail"}
+        </Button>
       </div>
     </section>
   );
@@ -1231,15 +1550,19 @@ function EmailInboxConnectionBadge({
 }
 
 function CorrectionInput({
+  confidence,
   field,
   initial,
+  inputRef,
   itemId,
   label,
   onChange,
   value,
 }: {
+  confidence?: number | null;
   field: ExtractionCorrectionField;
   initial: ExtractionCorrectionState;
+  inputRef?: Ref<HTMLInputElement>;
   itemId: string;
   label: string;
   onChange: Dispatch<SetStateAction<Record<string, ExtractionCorrectionState>>>;
@@ -1247,7 +1570,10 @@ function CorrectionInput({
 }) {
   return (
     <Label className="grid gap-1 text-xs text-muted-foreground">
-      {label}
+      <span className="flex items-center justify-between gap-2">
+        <span>{label}</span>
+        <FieldConfidenceBadge confidence={confidence} />
+      </span>
       <Input
         className="h-9 border-border text-foreground"
         onChange={(event) =>
@@ -1260,22 +1586,17 @@ function CorrectionInput({
             },
           }))
         }
+        ref={inputRef}
         value={value}
       />
     </Label>
   );
 }
 
-function InboxStatusBadge({
-  extractionStatus,
-  matchStatus,
-  status,
-}: {
-  extractionStatus: string;
-  matchStatus?: string | null;
-  status: string;
-}) {
-  if (matchStatus === "accepted" || status === "resolved") {
+function InboxStatusBadge({ item }: { item: InboxListItem }) {
+  const matchStatus = bestSuggestionStatus(item.matchSuggestions);
+
+  if (matchStatus === "accepted" || item.status === "resolved") {
     return (
       <Badge variant="success">
         <CheckIcon aria-hidden="true" className="size-3" />
@@ -1288,24 +1609,322 @@ function InboxStatusBadge({
     return <Badge variant="warning">Suggested match</Badge>;
   }
 
-  if (extractionStatus === "pending") {
-    return <Badge variant="secondary">Pending</Badge>;
+  if (item.extractionStatus === "completed" && !isInvoiceReviewItem(item)) {
+    return <Badge variant="secondary">Document review</Badge>;
   }
 
-  return <Badge variant="outline">{status.replace("_", " ")}</Badge>;
+  return <ExtractionReadinessBadge item={item} />;
+}
+
+function isInvoiceReviewItem(item: InboxListItem) {
+  const fields = item.latestExtraction?.fields;
+  const documentType = fields?.documentType;
+  const title = `${item.document?.title ?? ""} ${item.document?.currentVersion?.fileName ?? ""}`;
+  const normalizedTitle = title.toLowerCase();
+
+  if (
+    documentType === "invoice_received" ||
+    documentType === "invoice_sent" ||
+    documentType === "receipt"
+  ) {
+    return true;
+  }
+
+  if (item.matchSuggestions?.some((suggestion) => suggestion.status !== "expired")) {
+    return true;
+  }
+
+  if (
+    /\b(payment warning|payment reminder|final payment warning|services blocked)\b/i.test(title)
+  ) {
+    return false;
+  }
+
+  return (
+    /\b(invoice|receipt)\b/i.test(title) ||
+    (/\bbill\b/i.test(title) && !/\bpayment\b/i.test(normalizedTitle)) ||
+    Boolean(fields?.merchantName && fields.currency && typeof fields.totalAmountMinor === "number")
+  );
+}
+
+function displayInboxSubtitle(item: InboxListItem) {
+  const fields = item.latestExtraction?.fields;
+  const documentType = fields?.documentType?.replace("_", " ");
+  const source = item.source?.name ?? item.sourceType.replace("_", " ");
+  const fileName = item.document?.currentVersion?.fileName;
+
+  return [documentType, fileName ?? source].filter(Boolean).join(" · ");
+}
+
+function bestVisibleSuggestion(item: InboxListItem) {
+  return (
+    item.matchSuggestions?.find((suggestion) => suggestion.status === "accepted") ??
+    bestActionableSuggestion(item) ??
+    item.matchSuggestions?.find((suggestion) => suggestion.status === "rejected") ??
+    null
+  );
+}
+
+function bestActionableSuggestion(item: InboxListItem) {
+  return item.matchSuggestions?.find((suggestion) => suggestion.status === "suggested") ?? null;
+}
+
+function displayReviewBarSummary(item: InboxListItem) {
+  const suggestion = bestVisibleSuggestion(item);
+  const amount = formatExtractionAmount(item.latestExtraction?.fields);
+  const parts = [displayInboxTitle(item), amount];
+
+  if (suggestion?.transaction) {
+    parts.push(suggestion.transaction.description);
+  }
+
+  return parts.join(" · ");
+}
+
+function ExtractionReadinessBadge({ item }: { item: InboxListItem }) {
+  const state = extractionReviewState(item);
+
+  return <Badge variant={state.variant}>{state.label}</Badge>;
+}
+
+function MatchReadinessBadge({ item }: { item: InboxListItem }) {
+  const state = matchReadinessState(item);
+
+  return <Badge variant={state.variant}>{state.label}</Badge>;
+}
+
+function FieldConfidenceBadge({ confidence }: { confidence?: number | null }) {
+  if (typeof confidence !== "number") {
+    return <span className="text-[11px] text-muted-foreground">Not scored</span>;
+  }
+
+  const low = confidence < 0.75;
+
+  return (
+    <Badge size="sm" variant={low ? "warning" : "success"}>
+      {low ? "Low" : "OK"} {Math.round(confidence * 100)}%
+    </Badge>
+  );
+}
+
+function extractionReviewState(item: InboxListItem): {
+  label: string;
+  summary: string;
+  variant: "destructive" | "outline" | "secondary" | "success" | "warning";
+} {
+  if (item.extractionStatus === "pending") {
+    return {
+      label: "Extracting",
+      summary: "Extraction is queued or running.",
+      variant: "secondary",
+    };
+  }
+
+  if (item.extractionStatus === "failed") {
+    return {
+      label: "Needs extraction review",
+      summary: "OCR failed. Retry extraction or save corrected fields manually.",
+      variant: "destructive",
+    };
+  }
+
+  if (!item.latestExtraction) {
+    return {
+      label: "Needs extraction review",
+      summary: "No extraction has been saved for this item.",
+      variant: "warning",
+    };
+  }
+
+  if (extractionNeedsFieldReview(item)) {
+    return {
+      label: "Needs extraction review",
+      summary: extractionReviewReason(item),
+      variant: "warning",
+    };
+  }
+
+  return {
+    label: "Ready to match",
+    summary: "Extraction has the required fields for matching.",
+    variant: "success",
+  };
+}
+
+function matchReadinessState(item: InboxListItem): {
+  label: string;
+  summary: string;
+  variant: "outline" | "secondary" | "success" | "warning";
+} {
+  const matchStatus = bestSuggestionStatus(item.matchSuggestions);
+
+  if (matchStatus === "accepted" || item.status === "resolved") {
+    return {
+      label: "Matched",
+      summary: "This document is already linked to a transaction.",
+      variant: "success",
+    };
+  }
+
+  if (matchStatus === "suggested") {
+    return {
+      label: "Match suggested",
+      summary: "Review the suggested transaction separately from extraction corrections.",
+      variant: "warning",
+    };
+  }
+
+  if (!itemReadyToMatch(item)) {
+    return {
+      label: "Not ready to match",
+      summary: "Finish extraction review before generating transaction matches.",
+      variant: "secondary",
+    };
+  }
+
+  return {
+    label: "Ready to match",
+    summary: "Generate transaction suggestions when the extracted fields look right.",
+    variant: "outline",
+  };
+}
+
+function extractionReviewSummary(item: InboxListItem) {
+  const state = extractionReviewState(item);
+
+  return state.summary;
+}
+
+function matchReadinessSummary(item: InboxListItem) {
+  return matchReadinessState(item).summary;
+}
+
+function emptyMatchSuggestionMessage(item: InboxListItem) {
+  if (!itemReadyToMatch(item)) {
+    return "Extraction review must be resolved before matching.";
+  }
+
+  return "No suggestions generated for this item.";
+}
+
+function itemReadyToMatch(item: InboxListItem) {
+  const fields = item.latestExtraction?.fields;
+
+  return (
+    item.extractionStatus === "completed" &&
+    Boolean(fields?.merchantName) &&
+    Boolean(fields?.currency) &&
+    typeof fields?.totalAmountMinor === "number"
+  );
+}
+
+function extractionNeedsFieldReview(item: InboxListItem) {
+  const extraction = item.latestExtraction;
+
+  if (!extraction) {
+    return true;
+  }
+
+  const missingFields = missingExtractionFieldLabels(item);
+  const overall = extraction.confidence.overall;
+
+  return (
+    missingFields.length > 0 ||
+    (typeof overall === "number" && overall < 0.45) ||
+    (["merchantName", "totalAmountMinor", "currency"] as const).some((field) => {
+      const confidence = extraction.confidence[field];
+      return typeof confidence === "number" && confidence < 0.45;
+    })
+  );
+}
+
+function extractionReviewReason(item: InboxListItem) {
+  const missingFields = missingExtractionFieldLabels(item);
+
+  if (missingFields.length) {
+    return `Missing ${formatHumanList(missingFields)}. Fill the fields below and save corrections.`;
+  }
+
+  const lowConfidenceFields = lowConfidenceExtractionFieldLabels(item);
+
+  if (lowConfidenceFields.length) {
+    return `Low confidence for ${formatHumanList(
+      lowConfidenceFields,
+    )}. Confirm or correct the fields below.`;
+  }
+
+  return "Review extracted fields before matching.";
+}
+
+function missingExtractionFieldLabels(item: InboxListItem) {
+  const fields = item.latestExtraction?.fields;
+
+  if (!fields) {
+    return ["merchant", "amount", "currency"];
+  }
+
+  return [
+    fields.merchantName ? null : "merchant",
+    typeof fields.totalAmountMinor === "number" ? null : "amount",
+    fields.currency ? null : "currency",
+  ].filter(Boolean) as string[];
+}
+
+function lowConfidenceExtractionFieldLabels(item: InboxListItem) {
+  const confidence = item.latestExtraction?.confidence;
+
+  if (!confidence) {
+    return [];
+  }
+
+  return [
+    typeof confidence.merchantName === "number" && confidence.merchantName < 0.45
+      ? "merchant"
+      : null,
+    typeof confidence.totalAmountMinor === "number" && confidence.totalAmountMinor < 0.45
+      ? "amount"
+      : null,
+    typeof confidence.currency === "number" && confidence.currency < 0.45 ? "currency" : null,
+  ].filter(Boolean) as string[];
+}
+
+function formatHumanList(items: string[]) {
+  if (items.length <= 1) {
+    return items[0] ?? "";
+  }
+
+  if (items.length === 2) {
+    return `${items[0]} and ${items[1]}`;
+  }
+
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+function fieldConfidence(item: InboxListItem, field: ExtractionConfidenceField) {
+  const value = item.latestExtraction?.confidence[field];
+
+  return typeof value === "number" ? value : null;
 }
 
 function extractionFieldsToCorrectionState(
   fields?: {
+    documentType?: string | null;
     merchantName?: string | null;
+    customerName?: string | null;
     issuedAt?: string | null;
+    dueAt?: string | null;
+    invoiceNumber?: string | null;
     totalAmountMinor?: number | null;
     currency?: string | null;
   } | null,
 ): ExtractionCorrectionState {
   return {
+    documentType: fields?.documentType ?? "",
     merchantName: fields?.merchantName ?? "",
+    customerName: fields?.customerName ?? "",
     issuedAt: fields?.issuedAt ?? "",
+    dueAt: fields?.dueAt ?? "",
+    invoiceNumber: fields?.invoiceNumber ?? "",
     totalAmount:
       typeof fields?.totalAmountMinor === "number"
         ? (fields.totalAmountMinor / 100).toFixed(2)
@@ -1316,11 +1935,35 @@ function extractionFieldsToCorrectionState(
 
 function correctionStateToExtractionFields(state: ExtractionCorrectionState) {
   return {
+    documentType: normalizeDocumentTypeInput(state.documentType),
     merchantName: state.merchantName.trim() || null,
+    customerName: state.customerName.trim() || null,
     issuedAt: state.issuedAt.trim() || null,
+    dueAt: state.dueAt.trim() || null,
+    invoiceNumber: state.invoiceNumber.trim() || null,
     totalAmountMinor: decimalInputToMinor(state.totalAmount),
     currency: state.currency.trim().toUpperCase() || null,
   };
+}
+
+function normalizeDocumentTypeInput(value: string): CorrectionDocumentType | null {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  const aliases: Record<string, CorrectionDocumentType> = {
+    bill: "invoice_received",
+    invoice: "invoice_received",
+    received_invoice: "invoice_received",
+    sent_invoice: "invoice_sent",
+    statement: "bank_statement",
+    tax: "tax_document",
+  };
+  const documentType = aliases[normalized] ?? normalized;
+
+  return correctionDocumentTypes.includes(documentType as CorrectionDocumentType)
+    ? (documentType as CorrectionDocumentType)
+    : null;
 }
 
 function decimalInputToMinor(value: string) {
@@ -1376,28 +2019,25 @@ function formatExtractionAmount(
   } | null,
 ) {
   if (typeof fields?.totalAmountMinor !== "number" || !fields.currency) {
-    return "$0.00";
+    return "Missing amount";
   }
 
   return formatMoney({ amountMinor: fields.totalAmountMinor, currency: fields.currency });
-}
-
-function formatExtractionConfidence(confidence: Record<string, number | undefined>) {
-  const entries = Object.entries(confidence).filter(([, value]) => typeof value === "number");
-
-  if (entries.length === 0) {
-    return "none";
-  }
-
-  return entries.map(([key, value]) => `${key}: ${Math.round((value ?? 0) * 100)}%`).join(" · ");
 }
 
 function formatMatchScore(score: number) {
   return `${Math.round(score * 100)}%`;
 }
 
-function formatEmailInboxSyncStatus(connection: EmailInboxConnectionOption) {
+function formatEmailInboxSyncStatus(
+  connection: EmailInboxConnectionOption,
+  syncQueued: boolean = false,
+) {
   const latestSyncRun = connection.latestSyncRun;
+
+  if (syncQueued && latestSyncRun?.status !== "running") {
+    return "Sync queued";
+  }
 
   if (latestSyncRun?.status === "running") {
     return `Sync running since ${formatSyncDate(latestSyncRun.startedAt)}`;
@@ -1411,10 +2051,16 @@ function formatEmailInboxSyncStatus(connection: EmailInboxConnectionOption) {
 
   if (latestSyncRun?.status === "completed") {
     const counts = emailInboxSyncRunCounts(latestSyncRun);
+    const resultSummary =
+      counts.imported === 0 && counts.skipped === 0
+        ? "0 matching receipt emails found"
+        : `${counts.imported} imported · ${counts.skipped} skipped${formatSkipReasons(
+            counts.skipReasons,
+          )}`;
 
     return `Last synced ${formatSyncDate(
       latestSyncRun.completedAt ?? connection.connection.lastSyncAt,
-    )} · ${counts.imported} imported · ${counts.skipped} skipped`;
+    )} · ${resultSummary}`;
   }
 
   if (connection.connection.lastSyncAt) {
@@ -1436,11 +2082,25 @@ function emailInboxSyncRunCounts(
   return {
     imported: numberPayloadValue(rawPayload.imported) ?? syncRun.recordsSynced,
     skipped: numberPayloadValue(rawPayload.skipped) ?? 0,
+    skipReasons: recordPayloadValue(rawPayload.skipReasons),
   };
 }
 
 function numberPayloadValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function recordPayloadValue(value: unknown) {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function formatSkipReasons(reasons: Record<string, unknown>) {
+  const summary = Object.entries(reasons)
+    .filter(([, count]) => typeof count === "number" && count > 0)
+    .map(([reason, count]) => `${String(count)} ${reason.replace(/_/g, " ")}`)
+    .join(", ");
+
+  return summary ? ` (${summary})` : "";
 }
 
 function emailInboxGrantedScopeSummary(connection: EmailInboxConnectionOption) {
@@ -1489,23 +2149,11 @@ function bestSuggestionStatus(suggestions?: { status: string }[]) {
   );
 }
 
-function statusBadgeVariant(status: string) {
-  if (status === "resolved") {
-    return "success";
-  }
-
-  if (status === "needs_review") {
-    return "warning";
-  }
-
-  return "secondary";
-}
-
 function relativeDueLabel(dueAt?: string | null, fallback?: string) {
-  const dateValue = dueAt ?? fallback;
+  const dateValue = dueAt;
 
   if (!dateValue) {
-    return "Pending";
+    return fallback ? "Due pending" : "Pending";
   }
 
   const date = new Date(dateValue);

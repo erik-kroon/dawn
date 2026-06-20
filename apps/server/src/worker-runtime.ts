@@ -6,6 +6,7 @@ import {
   generateRecurringInvoice,
   generateWeeklyInsights,
   generateInboxMatchSuggestions,
+  matchBidirectionalBatch,
   matchPendingInboxForTransaction,
   requestDueEmailInboxSyncs,
   resolveSystemAppRequest,
@@ -138,6 +139,24 @@ export function createDawnWorkerJobHandlers(env: DawnCloudflareBindings): DawnQu
         {
           teamId: message.teamId,
           transactionId: message.transactionId,
+          sourceOutboxEventId: message.sourceOutboxEventId,
+          idempotencyKey: message.idempotencyKey,
+          enforceCallerPermission: false,
+        },
+      );
+    },
+    "inbox.match_bidirectional_batch": async (message) => {
+      await matchBidirectionalBatch(
+        new DrizzleDawnRepository(),
+        resolveSystemAppRequest({
+          actorId: "system:matching",
+          requestId: message.idempotencyKey,
+          teamId: message.teamId,
+        }),
+        {
+          teamId: message.teamId,
+          transactionIds: message.transactionIds,
+          inboxItemIds: message.inboxItemIds,
           sourceOutboxEventId: message.sourceOutboxEventId,
           idempotencyKey: message.idempotencyKey,
           enforceCallerPermission: false,

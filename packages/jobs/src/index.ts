@@ -62,6 +62,15 @@ export const transactionPendingInboxMatchJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const inboxMatchBidirectionalBatchJobSchema = z.object({
+  type: z.literal("inbox.match_bidirectional_batch"),
+  teamId: z.string().min(1),
+  transactionIds: z.array(z.string().min(1)),
+  inboxItemIds: z.array(z.string().min(1)),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const transactionImportCommitJobSchema = z.object({
   type: z.literal("transaction_import.commit"),
   teamId: z.string().min(1),
@@ -166,6 +175,7 @@ export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   syncInvalidationJobSchema,
   documentExtractionJobSchema,
   transactionPendingInboxMatchJobSchema,
+  inboxMatchBidirectionalBatchJobSchema,
   transactionImportCommitJobSchema,
   inboxMatchSuggestionsJobSchema,
   inboxProviderSyncJobSchema,
@@ -183,6 +193,7 @@ export type OutboxDispatchJob = z.infer<typeof outboxDispatchJobSchema>;
 export type SyncInvalidationJob = z.infer<typeof syncInvalidationJobSchema>;
 export type DocumentExtractionJob = z.infer<typeof documentExtractionJobSchema>;
 export type TransactionPendingInboxMatchJob = z.infer<typeof transactionPendingInboxMatchJobSchema>;
+export type InboxMatchBidirectionalBatchJob = z.infer<typeof inboxMatchBidirectionalBatchJobSchema>;
 export type TransactionImportCommitJob = z.infer<typeof transactionImportCommitJobSchema>;
 export type InboxMatchSuggestionsJob = z.infer<typeof inboxMatchSuggestionsJobSchema>;
 export type InboxProviderSyncJob = z.infer<typeof inboxProviderSyncJobSchema>;
@@ -237,9 +248,8 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const dispatchJob = createOutboxDispatchJob(event);
   const syncJob = createSyncInvalidationJob(event);
   const extractionJob = createDocumentExtractionJob(event);
-  const transactionMatchJobs = createTransactionPendingInboxMatchJobs(event);
+  const inboxMatchBatchJob = createInboxMatchBidirectionalBatchJob(event);
   const transactionImportCommitJob = createTransactionImportCommitJob(event);
-  const inboxMatchJob = createInboxMatchSuggestionsJob(event);
   const inboxProviderSyncJob = createInboxProviderSyncJob(event);
   const recurringInvoiceJob = createRecurringInvoiceGenerationJob(event);
   const weeklyInsightJob = createWeeklyInsightGenerationJob(event);
@@ -250,13 +260,12 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const accountantPacketExportJob = createAccountantPacketExportJob(event);
   const deletionJob = createTeamDataDeletionJob(event);
 
-  return [
+  const messages: Array<DawnQueueMessage | null> = [
     dispatchJob,
     syncJob,
     extractionJob,
-    ...transactionMatchJobs,
+    inboxMatchBatchJob,
     transactionImportCommitJob,
-    inboxMatchJob,
     inboxProviderSyncJob,
     recurringInvoiceJob,
     weeklyInsightJob,
@@ -266,7 +275,9 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
     deletionJob,
     automationJob,
     webhookJob,
-  ].filter((message): message is DawnQueueMessage => Boolean(message));
+  ];
+
+  return messages.filter((message): message is DawnQueueMessage => message !== null);
 }
 
 export function nextOutboxRetryAt(input: { attempt: number; now: Date }) {
@@ -336,7 +347,7 @@ function createSyncInvalidationJob(event: OutboxEventForJob): SyncInvalidationJo
 }
 
 function createDocumentExtractionJob(event: OutboxEventForJob): DocumentExtractionJob | null {
-  if (event.type !== "document.uploaded") {
+  if (event.type !== "document.uploaded" && event.type !== "document_extraction.retry_requested") {
     return null;
   }
 
@@ -365,24 +376,33 @@ function createDocumentExtractionJob(event: OutboxEventForJob): DocumentExtracti
   };
 }
 
-function createTransactionPendingInboxMatchJobs(
+function createInboxMatchBidirectionalBatchJob(
   event: OutboxEventForJob,
-): TransactionPendingInboxMatchJob[] {
-  if (
-    event.type !== "transaction.created" &&
-    event.type !== "transaction_import.committed" &&
-    event.type !== "bank_connection.synced"
-  ) {
-    return [];
+): InboxMatchBidirectionalBatchJob | null {
+  const transactionIds =
+    event.type === "transaction.created" ||
+    event.type === "transaction_import.committed" ||
+    event.type === "bank_connection.synced"
+      ? transactionIdsForEvent(event)
+      : [];
+  const inboxItemIds =
+    (event.type === "document.extracted" || event.type === "document_extraction.corrected") &&
+    typeof event.payload.inboxItemId === "string"
+      ? [event.payload.inboxItemId]
+      : [];
+
+  if (transactionIds.length === 0 && inboxItemIds.length === 0) {
+    return null;
   }
 
-  return transactionIdsForEvent(event).map((transactionId) => ({
-    type: "transaction.match_pending_inbox",
+  return {
+    type: "inbox.match_bidirectional_batch",
     teamId: event.teamId,
-    transactionId,
+    transactionIds,
+    inboxItemIds,
     sourceOutboxEventId: event.id,
-    idempotencyKey: `inbox:match-pending:${event.id}:${transactionId}`,
-  }));
+    idempotencyKey: `inbox:match-batch:${event.id}`,
+  };
 }
 
 function createTransactionImportCommitJob(
@@ -408,24 +428,6 @@ function createTransactionImportCommitJob(
     actorId: event.payload.actorId,
     sourceOutboxEventId: event.id,
     idempotencyKey: `transaction-import:commit:${event.id}:${event.payload.importSessionId}`,
-  };
-}
-
-function createInboxMatchSuggestionsJob(event: OutboxEventForJob): InboxMatchSuggestionsJob | null {
-  if (event.type !== "document.extracted" && event.type !== "document_extraction.corrected") {
-    return null;
-  }
-
-  if (typeof event.payload.inboxItemId !== "string") {
-    return null;
-  }
-
-  return {
-    type: "inbox.match_suggestions",
-    teamId: event.teamId,
-    inboxItemId: event.payload.inboxItemId,
-    sourceOutboxEventId: event.id,
-    idempotencyKey: `inbox:match-suggestions:${event.id}:${event.payload.inboxItemId}`,
   };
 }
 

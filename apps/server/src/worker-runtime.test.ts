@@ -3,7 +3,12 @@ import { describe, expect, test } from "bun:test";
 import type { DawnCloudflareBindings } from "@dawn/infra/cloudflare";
 import type { DawnQueueMessage, SyncInvalidationJob } from "@dawn/jobs";
 
-import { createDawnWorkerRuntime, handleDawnWorkerQueueBatch } from "./worker-runtime";
+process.env.DATABASE_URL ??= "postgres://test";
+process.env.BETTER_AUTH_SECRET ??= "abcdefghijklmnopqrstuvwxyz123456";
+process.env.BETTER_AUTH_URL ??= "http://localhost:3000";
+process.env.CORS_ORIGIN ??= "http://localhost:3001";
+
+const { createDawnWorkerRuntime, handleDawnWorkerQueueBatch } = await import("./worker-runtime");
 
 const syncInvalidationJob = {
   type: "sync.invalidate",
@@ -45,6 +50,7 @@ describe("Dawn worker runtime", () => {
       "automation.run",
       "bank.sync",
       "document.extract",
+      "inbox.match_bidirectional_batch",
       "inbox.match_suggestions",
       "inbox.provider.sync",
       "insights.weekly.generate",
@@ -161,7 +167,7 @@ function createWorkerTestEnv(
     NODE_ENV: "test",
     CORS_ORIGIN: "http://localhost:3001",
     BETTER_AUTH_URL: "http://localhost:3000",
-    BETTER_AUTH_SECRET: "test-secret",
+    BETTER_AUTH_SECRET: "abcdefghijklmnopqrstuvwxyz123456",
     POLAR_ACCESS_TOKEN: "test",
     POLAR_SUCCESS_URL: "http://localhost:3001/success",
     DATABASE_URL: "postgres://test",

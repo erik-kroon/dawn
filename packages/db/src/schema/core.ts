@@ -669,6 +669,44 @@ export const documentExtraction = pgTable(
   ],
 );
 
+export const documentExtractionAttempt = pgTable(
+  "document_extraction_attempt",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    inboxItemId: text("inbox_item_id")
+      .notNull()
+      .references(() => inboxItem.id, { onDelete: "cascade" }),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => businessDocument.id, { onDelete: "cascade" }),
+    documentVersionId: text("document_version_id")
+      .notNull()
+      .references(() => documentVersion.id, { onDelete: "cascade" }),
+    extractionId: text("extraction_id").references(() => documentExtraction.id, {
+      onDelete: "set null",
+    }),
+    attemptNumber: integer("attempt_number").notNull(),
+    source: text("source").notNull(),
+    provider: text("provider"),
+    model: text("model"),
+    status: text("status").notNull(),
+    durationMs: integer("duration_ms"),
+    qualityScore: integer("quality_score"),
+    errorClass: text("error_class"),
+    errorMessage: text("error_message"),
+    rawTextPresent: boolean("raw_text_present").default(false).notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}).notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("document_extraction_attempt_inbox_idx").on(table.teamId, table.inboxItemId),
+    index("document_extraction_attempt_extraction_idx").on(table.extractionId),
+  ],
+);
+
 export const inboxMatchSuggestion = pgTable(
   "inbox_match_suggestion",
   {
@@ -1427,6 +1465,7 @@ export const teamRelations = relations(team, ({ many }) => ({
   inboxSources: many(inboxSource),
   inboxItems: many(inboxItem),
   documentExtractions: many(documentExtraction),
+  documentExtractionAttempts: many(documentExtractionAttempt),
   customers: many(customer),
   customerContacts: many(customerContact),
   products: many(product),

@@ -29,6 +29,7 @@ import type {
   IntegrationSyncRun,
   IntegrationSyncRunStatus,
   TeamRole,
+  Transaction,
 } from "@dawn/domain";
 import {
   createEmailInboxTokenCodec,
@@ -48,6 +49,7 @@ class MemoryEmailInboxRepository {
   inboxItems = new Map<string, InboxItem>();
   extractions = new Map<string, DocumentExtraction>();
   providerObjects = new Map<string, ProviderObjectRecord>();
+  transactions = new Map<string, Transaction>();
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   auditEvents: unknown[] = [];
   outboxEvents: unknown[] = [];
@@ -289,6 +291,12 @@ class MemoryEmailInboxRepository {
 
   async listInboxItems(teamId: string) {
     return [...this.inboxItems.values()].filter((item) => item.teamId === teamId);
+  }
+
+  async listTransactionsForReport(input: { teamId: string }) {
+    return [...this.transactions.values()].filter(
+      (transaction) => transaction.teamId === input.teamId,
+    );
   }
 
   async createDocumentUploadRecord(input: {
@@ -895,6 +903,206 @@ describe("email inbox use cases", () => {
     expect(storage.objects).toHaveLength(0);
   });
 
+  test("uses the accountant backfill window as the initial email inbox sync range", async () => {
+    const repository = new MemoryEmailInboxRepository();
+    const storage = new MemoryEmailInboxStorage();
+    const syncInputs: Parameters<EmailInboxProvider["syncEvidence"]>[0][] = [];
+    const rangeConnectors = createEmailInboxConnectors({
+      ...createMockEmailInboxProvider(),
+      async syncEvidence(input) {
+        syncInputs.push(input);
+        return { status: "completed", evidence: [], nextCursor: null, rawPayload: {} };
+      },
+    });
+    const connected = await completeEmailInboxOAuth(
+      repository as unknown as DawnRepository,
+      rangeConnectors,
+      oauthStateCodec,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-email-inbox",
+        code: "oauth_code_1",
+        redirectUrl: oauthRedirectUrl,
+        state: await createOAuthState(),
+        idempotencyKey: "email_oauth_range_ytd",
+      },
+    );
+
+    const synced = await syncEmailInbox(
+      repository as unknown as DawnRepository,
+      rangeConnectors,
+      storage,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "email_sync_range_ytd",
+        now: new Date("2026-06-16T12:00:00.000Z"),
+      },
+    );
+
+    expect(syncInputs[0]?.syncRange).toEqual({
+      receivedFrom: "2025-01-01T00:00:00.000Z",
+      receivedTo: "2026-06-16T12:00:00.000Z",
+      source: "accountant_backfill",
+    });
+    expect(synced.connection.rawPayload?.emailInbox).toMatchObject({
+      syncRange: syncInputs[0]?.syncRange,
+    });
+    expect(synced.syncRun.rawPayload).toMatchObject({
+      syncRange: syncInputs[0]?.syncRange,
+    });
+  });
+
+  test("keeps transaction activity inside the accountant backfill window", async () => {
+    const repository = new MemoryEmailInboxRepository();
+    const storage = new MemoryEmailInboxStorage();
+    const syncInputs: Parameters<EmailInboxProvider["syncEvidence"]>[0][] = [];
+    const rangeConnectors = createEmailInboxConnectors({
+      ...createMockEmailInboxProvider(),
+      async syncEvidence(input) {
+        syncInputs.push(input);
+        return { status: "completed", evidence: [], nextCursor: null, rawPayload: {} };
+      },
+    });
+    repository.transactions.set("txn_1", {
+      id: "txn_1",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Opening purchase",
+      postedAt: "2025-01-01T10:00:00.000Z",
+      money: { amountMinor: -1200, currency: "USD" },
+      type: "expense",
+      source: "csv_import",
+      providerTransactionId: "csv_txn_1",
+      categoryId: null,
+      reviewState: "needs_review",
+    });
+    repository.transactions.set("txn_2", {
+      id: "txn_2",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Year-end purchase",
+      postedAt: "2025-12-31T15:00:00.000Z",
+      money: { amountMinor: -3400, currency: "USD" },
+      type: "expense",
+      source: "csv_import",
+      providerTransactionId: "csv_txn_2",
+      categoryId: null,
+      reviewState: "needs_review",
+    });
+    const connected = await completeEmailInboxOAuth(
+      repository as unknown as DawnRepository,
+      rangeConnectors,
+      oauthStateCodec,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-email-inbox",
+        code: "oauth_code_1",
+        redirectUrl: oauthRedirectUrl,
+        state: await createOAuthState(),
+        idempotencyKey: "email_oauth_range_transactions",
+      },
+    );
+
+    await syncEmailInbox(
+      repository as unknown as DawnRepository,
+      rangeConnectors,
+      storage,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "email_sync_range_transactions",
+        now: new Date("2026-06-16T12:00:00.000Z"),
+      },
+    );
+
+    expect(syncInputs[0]?.syncRange).toEqual({
+      receivedFrom: "2025-01-01T00:00:00.000Z",
+      receivedTo: "2026-06-16T12:00:00.000Z",
+      source: "accountant_backfill",
+    });
+  });
+
+  test("ignores stored current-year cursors until the accountant backfill is covered", async () => {
+    const repository = new MemoryEmailInboxRepository();
+    const storage = new MemoryEmailInboxStorage();
+    const syncInputs: Parameters<EmailInboxProvider["syncEvidence"]>[0][] = [];
+    const rangeConnectors = createEmailInboxConnectors({
+      ...createMockEmailInboxProvider(),
+      async syncEvidence(input) {
+        syncInputs.push(input);
+        return { status: "completed", evidence: [], nextCursor: null, rawPayload: {} };
+      },
+    });
+    const connected = await completeEmailInboxOAuth(
+      repository as unknown as DawnRepository,
+      rangeConnectors,
+      oauthStateCodec,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-email-inbox",
+        code: "oauth_code_1",
+        redirectUrl: oauthRedirectUrl,
+        state: await createOAuthState(),
+        idempotencyKey: "email_oauth_range_existing_cursor",
+      },
+    );
+    const existingConnection = repository.connections.get(connected.connection.id)!;
+    const existingRawPayload = existingConnection.rawPayload ?? {};
+    const existingEmailInbox =
+      typeof existingRawPayload.emailInbox === "object" && existingRawPayload.emailInbox !== null
+        ? (existingRawPayload.emailInbox as Record<string, unknown>)
+        : {};
+    repository.connections.set(existingConnection.id, {
+      ...existingConnection,
+      rawPayload: {
+        ...existingRawPayload,
+        emailInbox: {
+          ...existingEmailInbox,
+          syncCursor: {
+            receivedAfter: "2026-06-16T12:00:00.000Z",
+            providerCursor: null,
+            rawPayload: { source: "old-ytd-sync" },
+          },
+          syncRange: {
+            receivedFrom: "2026-01-01T00:00:00.000Z",
+            receivedTo: "2026-06-16T12:00:00.000Z",
+            source: "current_calendar_year",
+          },
+        },
+      },
+    });
+
+    const synced = await syncEmailInbox(
+      repository as unknown as DawnRepository,
+      rangeConnectors,
+      storage,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "email_sync_range_existing_cursor",
+        now: new Date("2026-06-16T12:00:00.000Z"),
+      },
+    );
+
+    expect(syncInputs[0]?.cursor).toBeNull();
+    expect(syncInputs[0]?.syncRange).toEqual({
+      receivedFrom: "2025-01-01T00:00:00.000Z",
+      receivedTo: "2026-06-16T12:00:00.000Z",
+      source: "accountant_backfill",
+    });
+    expect(synced.connection.rawPayload?.emailInbox).toMatchObject({
+      syncCursor: null,
+      syncRange: syncInputs[0]?.syncRange,
+    });
+  });
+
   test("syncs attachment and body-only evidence into documents and inbox items", async () => {
     const repository = new MemoryEmailInboxRepository();
     const storage = new MemoryEmailInboxStorage();
@@ -964,6 +1172,86 @@ describe("email inbox use cases", () => {
     expect(duplicate).toMatchObject({
       imported: [],
       skipped: [{ reason: "duplicate" }, { reason: "duplicate" }],
+    });
+  });
+
+  test("imports image receipt attachments for OCR extraction", async () => {
+    const repository = new MemoryEmailInboxRepository();
+    const storage = new MemoryEmailInboxStorage();
+    const imageConnectors = createEmailInboxConnectors({
+      ...createMockEmailInboxProvider(),
+      async syncEvidence(input) {
+        return {
+          status: "completed",
+          evidence: [
+            {
+              provider: "mock-email-inbox",
+              providerConnectionId: input.connection.providerConnectionId,
+              providerMessageId: "message_image_1",
+              providerEvidenceId: "evidence_image_1",
+              subject: "Receipt",
+              receivedAt: "2026-06-15T12:00:00.000Z",
+              from: { email: "receipts@example.com" },
+              to: [{ email: "accounting@example.com" }],
+              artifact: {
+                kind: "attachment",
+                artifactId: "artifact_image_1",
+                providerPartId: "part_image_1",
+                fileName: "receipt.png",
+                contentType: "image/png",
+                byteSize: 4,
+                contentBase64: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64"),
+              },
+              rawPayload: { mock: true },
+            },
+          ],
+          nextCursor: null,
+          rawPayload: {},
+        };
+      },
+    });
+    const connected = await completeEmailInboxOAuth(
+      repository as unknown as DawnRepository,
+      imageConnectors,
+      oauthStateCodec,
+      context,
+      {
+        teamId: "team_1",
+        provider: "mock-email-inbox",
+        code: "oauth_code_image",
+        redirectUrl: oauthRedirectUrl,
+        state: await createOAuthState(),
+        idempotencyKey: "email_oauth_image",
+      },
+    );
+
+    const synced = await syncEmailInbox(
+      repository as unknown as DawnRepository,
+      imageConnectors,
+      storage,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "email_sync_image",
+      },
+    );
+
+    expect(synced).toMatchObject({
+      imported: [
+        {
+          version: { fileName: "receipt.png", contentType: "image/png", byteSize: 4 },
+          extraction: null,
+        },
+      ],
+      skipped: [],
+    });
+    expect(synced.imported[0]?.inboxItem).toMatchObject({
+      status: "pending_extraction",
+      extractionStatus: "pending",
+    });
+    expect(storage.objects.values().next().value).toMatchObject({
+      contentType: "image/png",
     });
   });
 });

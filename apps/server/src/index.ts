@@ -1321,6 +1321,12 @@ app.post("/api/webhooks/banking/sandbox", async (c) => {
 
 app.use("/*", async (c, next) => {
   const context = await createContext({ context: c });
+  context.outboxDispatcher = async (command) =>
+    dispatchOutboxEvents(
+      new DrizzleDawnRepository(),
+      createCloudflareOutboxQueuePublisher(c.env.DAWN_JOBS),
+      command,
+    );
   context.transactionImportPayloadStorage = createTransactionImportPayloadStorage(
     createR2DocumentObjectStorage(c.env.DAWN_DOCUMENTS),
   );

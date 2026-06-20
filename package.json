@@ -42,7 +42,7 @@
     "check:migrations": "bun run scripts/check-migrations.ts",
     "check:secrets": "bun run scripts/check-secrets.ts",
     "check:worker": "vp run --filter server build",
-    "release:gate": "bun run check:ignored-ts && bun run check:secrets && bun run check:migrations && bun run check-types && bun run test && bun run eval:ai && bun run check && bun run check:worker",
+    "release:gate": "bun run check:ignored-ts && bun run check:secrets && bun run check:migrations && bun run check-types && bun run test && bun run eval:ai && bun run eval:documents && bun run check && bun run check:worker",
     "test:db": "bun run test:postgres",
     "lint": "vp lint",
     "format": "vp fmt",
@@ -60,6 +60,7 @@
     "db:generate": "vp run --filter @dawn/db db:generate",
     "db:migrate": "vp run --filter @dawn/db db:migrate",
     "eval:ai": "vp run --filter @dawn/ai eval",
+    "eval:documents": "vp run --filter @dawn/documents eval",
     "deploy": "vp run --filter @dawn/infra deploy",
     "destroy": "vp run --filter @dawn/infra destroy"
   },

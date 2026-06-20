@@ -32,20 +32,6 @@ const navItems = [
   { label: "Operations", to: "/operations", icon: Settings },
 ] as const;
 
-function DawnMark() {
-  return (
-    <div aria-hidden="true" className="relative size-7">
-      {Array.from({ length: 12 }).map((_, index) => (
-        <span
-          className="absolute left-1/2 top-1/2 h-[11px] w-[2px] origin-[50%_13px] rounded-full bg-foreground"
-          key={index}
-          style={{ transform: `translate(-50%, -100%) rotate(${index * 30}deg)` }}
-        />
-      ))}
-    </div>
-  );
-}
-
 function AppSidebar() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const teamId = useRouterState({
@@ -55,16 +41,7 @@ function AppSidebar() {
   const teamSearch = teamId ? { teamId } : {};
 
   return (
-    <aside className="fixed inset-y-0 left-0 z-40 hidden w-[70px] border-r border-border bg-background md:flex md:flex-col">
-      <Link
-        aria-label="Dawn overview"
-        className="flex h-[70px] items-center justify-center border-b border-border"
-        search={teamSearch}
-        to="/dashboard"
-      >
-        <DawnMark />
-      </Link>
-
+    <aside className="fixed bottom-0 left-0 top-[70px] z-40 hidden w-[70px] border-r border-border bg-background md:flex md:flex-col">
       <nav aria-label="Primary" className="flex flex-1 flex-col items-center gap-2 py-7">
         {navItems.map(({ to, icon: Icon, label }) => {
           const isActive = pathname === to || (to !== "/dashboard" && pathname.startsWith(to));
@@ -98,11 +75,11 @@ function AppSidebar() {
 
 export function AppShell({ children }: AppShellProps) {
   return (
-    <div className="min-h-svh bg-background text-foreground">
+    <div className="h-svh overflow-hidden bg-background text-foreground">
       <AppSidebar />
-      <div className="min-h-svh md:pl-[70px]">
-        <Header />
-        <main className="min-h-[calc(100svh-70px)] px-4 md:px-8">{children}</main>
+      <Header />
+      <div className="box-border h-full pt-[70px] md:pl-[70px]">
+        <main className="h-full min-h-0 overflow-y-auto px-4 md:px-8">{children}</main>
       </div>
     </div>
   );

@@ -12,6 +12,7 @@ import type {
   CsvTransactionImportMapping,
   DawnRepository,
   DocumentExtraction,
+  DocumentExtractionAttempt,
   DocumentExtractionConfidence,
   DocumentExtractionFields,
   DocumentExtractionSource,
@@ -81,7 +82,21 @@ import {
   deriveTransactionAccountantStatus,
   ledgerDuplicateKey,
 } from "@dawn/domain";
-import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNull,
+  lte,
+  ne,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 
 import { db } from "./index";
 import * as developerPersistence from "./repositories/developer";
@@ -1407,6 +1422,76 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     };
   }
 
+  async createDocumentExtractionAttempt(input: {
+    attemptId: string;
+    teamId: string;
+    inboxItemId: string;
+    documentId: string;
+    documentVersionId: string;
+    extractionId?: string | null;
+    attemptNumber: number;
+    source: Exclude<DocumentExtractionSource, "user_correction">;
+    provider?: string | null;
+    model?: string | null;
+    status: DocumentExtractionAttempt["status"];
+    durationMs?: number | null;
+    qualityScore?: number | null;
+    errorClass?: string | null;
+    errorMessage?: string | null;
+    rawTextPresent: boolean;
+    metadata: Record<string, unknown>;
+  }): Promise<DocumentExtractionAttempt> {
+    const [attempt] = await this.client
+      .insert(schema.documentExtractionAttempt)
+      .values({
+        id: input.attemptId,
+        teamId: input.teamId,
+        inboxItemId: input.inboxItemId,
+        documentId: input.documentId,
+        documentVersionId: input.documentVersionId,
+        extractionId: input.extractionId ?? null,
+        attemptNumber: input.attemptNumber,
+        source: input.source,
+        provider: input.provider ?? null,
+        model: input.model ?? null,
+        status: input.status,
+        durationMs: input.durationMs ?? null,
+        qualityScore: encodeScore(input.qualityScore),
+        errorClass: input.errorClass ?? null,
+        errorMessage: input.errorMessage ?? null,
+        rawTextPresent: input.rawTextPresent,
+        metadata: input.metadata,
+      })
+      .returning();
+
+    if (!attempt) {
+      throw new Error("Document extraction attempt was not created");
+    }
+
+    return mapDocumentExtractionAttempt(attempt);
+  }
+
+  async listDocumentExtractionAttemptsForInboxItem(
+    teamId: string,
+    inboxItemId: string,
+  ): Promise<DocumentExtractionAttempt[]> {
+    const attempts = await this.client
+      .select()
+      .from(schema.documentExtractionAttempt)
+      .where(
+        and(
+          eq(schema.documentExtractionAttempt.teamId, teamId),
+          eq(schema.documentExtractionAttempt.inboxItemId, inboxItemId),
+        ),
+      )
+      .orderBy(
+        asc(schema.documentExtractionAttempt.attemptNumber),
+        asc(schema.documentExtractionAttempt.createdAt),
+      );
+
+    return attempts.map(mapDocumentExtractionAttempt);
+  }
+
   async createCorrectedDocumentExtraction(input: {
     extractionId: string;
     teamId: string;
@@ -1476,8 +1561,52 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     const [item] = await this.client
       .update(schema.inboxItem)
       .set({
+        status: "needs_review",
         extractionStatus: "failed",
         updatedAt: input.failedAt,
+      })
+      .where(
+        and(eq(schema.inboxItem.teamId, input.teamId), eq(schema.inboxItem.id, input.inboxItemId)),
+      )
+      .returning();
+
+    if (!item) {
+      throw new Error("Inbox item was not updated");
+    }
+
+    return mapInboxItem(item);
+  }
+
+  async markDocumentExtractionPending(input: {
+    teamId: string;
+    inboxItemId: string;
+    requestedAt: Date;
+  }) {
+    const [item] = await this.client
+      .update(schema.inboxItem)
+      .set({
+        status: "pending_extraction",
+        extractionStatus: "pending",
+        updatedAt: input.requestedAt,
+      })
+      .where(
+        and(eq(schema.inboxItem.teamId, input.teamId), eq(schema.inboxItem.id, input.inboxItemId)),
+      )
+      .returning();
+
+    if (!item) {
+      throw new Error("Inbox item was not updated");
+    }
+
+    return mapInboxItem(item);
+  }
+
+  async dismissInboxItem(input: { teamId: string; inboxItemId: string; dismissedAt: Date }) {
+    const [item] = await this.client
+      .update(schema.inboxItem)
+      .set({
+        status: "dismissed",
+        updatedAt: input.dismissedAt,
       })
       .where(
         and(eq(schema.inboxItem.teamId, input.teamId), eq(schema.inboxItem.id, input.inboxItemId)),
@@ -1623,6 +1752,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         : null;
     const hasBaseMoneyEvidence = Boolean(baseCurrency && baseAmountMinor != null);
     const signalConditions: SQL[] = [];
+    const issuedAt = parseCandidateDate(extraction.fields.issuedAt);
 
     if (extraction.fields.totalAmountMinor != null) {
       const amountMinor = Math.abs(extraction.fields.totalAmountMinor);
@@ -1636,6 +1766,15 @@ export class DrizzleDawnRepository implements DrizzleRepository {
             )`
           : sql`abs(abs(${schema.transaction.amountMinor}) - ${amountMinor}) <= ${amountTolerance}`,
       );
+
+      if (currency && issuedAt && amountMinor > 0 && !hasBaseMoneyEvidence) {
+        signalConditions.push(
+          transactionCrossCurrencyAmountCandidateCondition({
+            currency,
+            amountMinor,
+          }),
+        );
+      }
     }
 
     if (hasBaseMoneyEvidence) {
@@ -1659,8 +1798,6 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     }
 
     conditions.push(or(...signalConditions) ?? sql`false`);
-
-    const issuedAt = parseCandidateDate(extraction.fields.issuedAt);
 
     if (issuedAt) {
       const window = matchCandidateDateWindow(extraction.fields.documentType);
@@ -1708,13 +1845,23 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     signalConditions.push(sql`
       (
         ${schema.documentExtraction.fields}->>'totalAmountMinor' is not null
+        and ${schema.documentExtraction.fields}->>'totalAmountMinor' ~ '^-?[0-9]+$'
         and (
           ${schema.documentExtraction.fields}->>'currency' is null
           or upper(${schema.documentExtraction.fields}->>'currency') = ${currency}
         )
-        and abs(abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::integer) - ${amountMinor}) <= ${amountTolerance}
+        and abs(abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::numeric) - ${amountMinor}) <= ${amountTolerance}
       )
     `);
+
+    if (amountMinor > 0) {
+      signalConditions.push(
+        extractionCrossCurrencyAmountCandidateCondition({
+          currency,
+          amountMinor,
+        }),
+      );
+    }
 
     if (hasBaseMoneyEvidence) {
       const baseTolerance = Math.max(50, Math.ceil((baseAmountMinor ?? 0) * 0.15));
@@ -1723,7 +1870,8 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         (
           upper(${schema.documentExtraction.fields}->>'baseCurrency') = ${baseCurrency}
           and ${schema.documentExtraction.fields}->>'baseAmountMinor' is not null
-          and abs(abs((${schema.documentExtraction.fields}->>'baseAmountMinor')::integer) - ${baseAmountMinor}) <= ${baseTolerance}
+          and ${schema.documentExtraction.fields}->>'baseAmountMinor' ~ '^-?[0-9]+$'
+          and abs(abs((${schema.documentExtraction.fields}->>'baseAmountMinor')::numeric) - ${baseAmountMinor}) <= ${baseTolerance}
         )
       `);
     }
@@ -1772,14 +1920,14 @@ export class DrizzleDawnRepository implements DrizzleRepository {
                   between
                     case
                       when ${schema.documentExtraction.fields}->>'documentType' in ('invoice_received', 'invoice_sent')
-                        then ${daysFrom(postedAt, -123)}
-                      else ${daysFrom(postedAt, -30)}
+                        then ${timestamptzParam(daysFrom(postedAt, -123))}
+                      else ${timestamptzParam(daysFrom(postedAt, -30))}
                     end
                     and
                     case
                       when ${schema.documentExtraction.fields}->>'documentType' in ('invoice_received', 'invoice_sent')
-                        then ${daysFrom(postedAt, 90)}
-                      else ${daysFrom(postedAt, 90)}
+                        then ${timestamptzParam(daysFrom(postedAt, 90))}
+                      else ${timestamptzParam(daysFrom(postedAt, 90))}
                     end
               )`
             : sql`true`,
@@ -1898,12 +2046,11 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         eq(schema.transaction.id, schema.inboxMatchSuggestion.transactionId),
       )
       .where(
-        inboxItemId
-          ? and(
-              eq(schema.inboxMatchSuggestion.teamId, teamId),
-              eq(schema.inboxMatchSuggestion.inboxItemId, inboxItemId),
-            )
-          : eq(schema.inboxMatchSuggestion.teamId, teamId),
+        and(
+          eq(schema.inboxMatchSuggestion.teamId, teamId),
+          ne(schema.inboxMatchSuggestion.status, "expired"),
+          inboxItemId ? eq(schema.inboxMatchSuggestion.inboxItemId, inboxItemId) : undefined,
+        ),
       )
       .orderBy(
         desc(schema.inboxMatchSuggestion.score),
@@ -4494,6 +4641,15 @@ function daysFrom(date: Date, days: number) {
   return new Date(date.getTime() + days * 86_400_000);
 }
 
+function timestamptzParam(value: Date) {
+  return sql`${value}::timestamptz`;
+}
+
+const crossCurrencyAmountRatioBounds = {
+  minimum: 0.02,
+  maximum: 200,
+} as const;
+
 function normalizedSearchTerms(...values: unknown[]) {
   const terms = new Set<string>();
 
@@ -4508,6 +4664,45 @@ function normalizedSearchTerms(...values: unknown[]) {
   }
 
   return [...terms].slice(0, 5);
+}
+
+function transactionCrossCurrencyAmountCandidateCondition(input: {
+  currency: string;
+  amountMinor: number;
+}): SQL {
+  const lowerBound = Math.max(
+    1,
+    Math.floor(input.amountMinor * crossCurrencyAmountRatioBounds.minimum),
+  );
+  const upperBound = Math.min(
+    2_147_483_647,
+    Math.ceil(input.amountMinor * crossCurrencyAmountRatioBounds.maximum),
+  );
+
+  return sql`
+    (
+      ${schema.transaction.currency} <> ${input.currency}
+      and abs(${schema.transaction.amountMinor}) between ${lowerBound} and ${upperBound}
+    )
+  `;
+}
+
+function extractionCrossCurrencyAmountCandidateCondition(input: {
+  currency: string;
+  amountMinor: number;
+}): SQL {
+  return sql`
+    (
+      ${schema.documentExtraction.fields}->>'issuedAt' is not null
+      and ${schema.documentExtraction.fields}->>'totalAmountMinor' is not null
+      and ${schema.documentExtraction.fields}->>'totalAmountMinor' ~ '^-?[0-9]+$'
+      and abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::numeric) > 0
+      and ${schema.documentExtraction.fields}->>'currency' is not null
+      and upper(${schema.documentExtraction.fields}->>'currency') <> ${input.currency}
+      and (${input.amountMinor}::numeric / abs((${schema.documentExtraction.fields}->>'totalAmountMinor')::numeric))
+        between ${crossCurrencyAmountRatioBounds.minimum} and ${crossCurrencyAmountRatioBounds.maximum}
+    )
+  `;
 }
 
 function transactionTextIncludesTerm(term: string): SQL {
@@ -5003,6 +5198,39 @@ function mapDocumentExtraction(
     createdByActorId: extraction.createdByActorId,
     createdAt: extraction.createdAt.toISOString(),
   };
+}
+
+function mapDocumentExtractionAttempt(
+  attempt: typeof schema.documentExtractionAttempt.$inferSelect,
+): DocumentExtractionAttempt {
+  return {
+    id: attempt.id,
+    teamId: attempt.teamId,
+    inboxItemId: attempt.inboxItemId,
+    documentId: attempt.documentId,
+    documentVersionId: attempt.documentVersionId,
+    extractionId: attempt.extractionId,
+    attemptNumber: attempt.attemptNumber,
+    source: attempt.source as DocumentExtractionAttempt["source"],
+    provider: attempt.provider,
+    model: attempt.model,
+    status: attempt.status as DocumentExtractionAttempt["status"],
+    durationMs: attempt.durationMs,
+    qualityScore: decodeScore(attempt.qualityScore),
+    errorClass: attempt.errorClass,
+    errorMessage: attempt.errorMessage,
+    rawTextPresent: attempt.rawTextPresent,
+    metadata: attempt.metadata,
+    createdAt: attempt.createdAt.toISOString(),
+  };
+}
+
+function encodeScore(score?: number | null) {
+  return typeof score === "number" && Number.isFinite(score) ? Math.round(score * 1_000) : null;
+}
+
+function decodeScore(score: number | null) {
+  return typeof score === "number" ? score / 1_000 : null;
 }
 
 function latestExtractionForItem(

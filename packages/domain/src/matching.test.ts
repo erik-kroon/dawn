@@ -159,6 +159,49 @@ describe("inbox transaction matching", () => {
     expect(penalized[0]?.signals.feedback).toBeLessThan(0);
   });
 
+  test("uses unmatched feedback to weaken future merchant pairs", () => {
+    const baseline = suggestInboxTransactionMatches(baseInput, [
+      {
+        transaction: transaction({
+          id: "txn_unmatched_penalty",
+          description: "Figma subscription",
+        }),
+        counterpartyName: "Figma",
+      },
+    ]);
+    const penalized = suggestInboxTransactionMatches(
+      baseInput,
+      [
+        {
+          transaction: transaction({
+            id: "txn_unmatched_penalty",
+            description: "Figma subscription",
+          }),
+          counterpartyName: "Figma",
+        },
+      ],
+      {
+        feedbackReferenceAt: "2026-06-14T00:00:00.000Z",
+        feedback: [
+          {
+            source: "Figma Inc",
+            target: "Figma subscription",
+            status: "unmatched",
+            count: 3,
+            lastOccurredAt: "2026-06-01T00:00:00.000Z",
+          },
+        ],
+      },
+    );
+
+    expect(penalized[0]?.transactionId).toBe("txn_unmatched_penalty");
+    expect(penalized[0]?.score ?? 0).toBeLessThan(baseline[0]?.score ?? 0);
+    expect(penalized[0]?.signals.feedback).toBeLessThan(0);
+    expect(penalized[0]?.signalDetails.feedback?.evidence).toMatchObject({
+      unmatchedScore: 0.12,
+    });
+  });
+
   test("lets repeated confirmations override stale negative feedback", () => {
     const suggestions = suggestInboxTransactionMatches(
       baseInput,
@@ -273,6 +316,36 @@ describe("inbox transaction matching", () => {
       sampleCount: 4,
       acceptedCount: 1,
       rejectedCount: 3,
+      precision: 0.25,
+      posture: "low_precision",
+    });
+  });
+
+  test("counts unmatched outcomes as conservative calibration negatives", () => {
+    const policy = calibrateMatchPolicy({
+      feedback: [
+        {
+          source: "Figma Inc",
+          target: "Figma subscription",
+          status: "accepted",
+          count: 1,
+        },
+        {
+          source: "Acme",
+          target: "Acme Consulting",
+          status: "unmatched",
+          count: 3,
+        },
+      ],
+    });
+
+    expect(policy.suggestedScoreThreshold).toBe(0.42);
+    expect(policy.autoMatchScoreThreshold).toBe(0.97);
+    expect(policy.calibration).toMatchObject({
+      sampleCount: 4,
+      acceptedCount: 1,
+      rejectedCount: 0,
+      unmatchedCount: 3,
       precision: 0.25,
       posture: "low_precision",
     });
@@ -431,6 +504,50 @@ describe("inbox transaction matching", () => {
 
     expect(evaluation.eligible).toBe(false);
     expect(evaluation.reasons).toContain("A competing candidate is too close");
+  });
+
+  test("auto-match policy rejects positive history with material unmatched history", () => {
+    const memory = {
+      feedbackReferenceAt: "2026-06-14T00:00:00.000Z",
+      feedback: [
+        {
+          source: "Figma Inc",
+          target: "Figma Inc INV-100",
+          status: "accepted" as const,
+          count: 3,
+          lastOccurredAt: "2026-06-14T00:00:00.000Z",
+        },
+        {
+          source: "Figma Inc",
+          target: "Figma Inc INV-100",
+          status: "unmatched" as const,
+          count: 2,
+          lastOccurredAt: "2026-04-15T00:00:00.000Z",
+        },
+      ],
+    };
+    const policy = calibrateMatchPolicy(memory);
+    const [suggestion] = suggestInboxTransactionMatches(
+      baseInput,
+      [
+        {
+          transaction: transaction({ id: "txn_unmatched_auto" }),
+          counterpartyName: "Figma Inc",
+        },
+      ],
+      memory,
+      policy,
+    );
+    const evaluation = evaluateAutoMatch({
+      enabled: true,
+      candidate: suggestion ?? null,
+      alternatives: suggestion ? [suggestion] : [],
+      policy,
+    });
+
+    expect(suggestion?.signals.feedback).toBeGreaterThan(0);
+    expect(evaluation.eligible).toBe(false);
+    expect(evaluation.reasons).toContain("Negative feedback is too recent or too strong");
   });
 
   test("uses sender text as a supporting signal", () => {
@@ -623,7 +740,7 @@ describe("inbox transaction matching", () => {
     );
   });
 
-  test("keeps cross-currency matches without base amount evidence below suggestion thresholds", () => {
+  test("suggests cross-currency matches without base amount evidence for review", () => {
     const suggestions = suggestInboxTransactionMatches(
       {
         ...baseInput,
@@ -646,9 +763,174 @@ describe("inbox transaction matching", () => {
     );
 
     expect(suggestions[0]?.transactionId).toBe("txn_missing_base");
-    expect(suggestions[0]?.score ?? 0).toBeLessThan(0.35);
-    expect(suggestions[0]?.confidence).toBe("low");
+    expect(suggestions[0]?.score ?? 0).toBeGreaterThanOrEqual(0.35);
+    expect(suggestions[0]?.confidence).not.toBe("high");
+    expect(suggestions[0]?.signals.crossCurrencyAmount).toBe(0.2);
+    expect(suggestions[0]?.signals.currency).toBe(-0.05);
     expect(suggestions[0]?.signals.baseAmount).toBeUndefined();
+  });
+
+  test("keeps cross-currency amount-only matches below suggestion thresholds", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        documentText: null,
+        fields: {
+          totalAmountMinor: 1000,
+          currency: "EUR",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_cross_currency_amount_only",
+            description: "Unknown merchant",
+            money: { amountMinor: -1200, currency: "USD" },
+          }),
+        },
+      ],
+    );
+
+    expect(suggestions).toEqual([]);
+  });
+
+  test("suggests same-day cross-currency card charges with opaque references", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        documentText: null,
+        fields: {
+          issuedAt: "2026-06-14T00:00:00.000Z",
+          totalAmountMinor: 1449,
+          currency: "EUR",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_opaque_card_reference",
+            description: "100003655822",
+            money: { amountMinor: -13_000, currency: "SEK" },
+          }),
+        },
+      ],
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_opaque_card_reference");
+    expect(suggestions[0]?.score ?? 0).toBeGreaterThanOrEqual(0.35);
+    expect(suggestions[0]?.signals.crossCurrencyAmount).toBe(0.2);
+    expect(suggestions[0]?.signals.date).toBe(0.2);
+  });
+
+  test("rejects implausible cross-currency ratios for the declared currencies", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        documentText: null,
+        fields: {
+          issuedAt: "2026-06-14T00:00:00.000Z",
+          totalAmountMinor: 1449,
+          currency: "EUR",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_wrong_currency_ratio",
+            description: "100003655822",
+            money: { amountMinor: -13_000, currency: "USD" },
+          }),
+        },
+      ],
+    );
+
+    expect(suggestions).toEqual([]);
+  });
+
+  test("rejects received documents against incoming transactions", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        documentText: "Customer Erik Kroon Celander",
+        fields: {
+          documentType: "invoice_received",
+          issuedAt: "2026-06-14T00:00:00.000Z",
+          totalAmountMinor: 1449,
+          currency: "EUR",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_incoming_owner_transfer",
+            description: "ERIK KROON C",
+            money: { amountMinor: 13_000, currency: "SEK" },
+            type: "income",
+          }),
+        },
+      ],
+    );
+
+    expect(suggestions).toEqual([]);
+  });
+
+  test("does not use document body text alone to lift cross-currency matches", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        documentText: "Customer Erik Kroon Celander",
+        fields: {
+          documentType: "invoice_received",
+          issuedAt: "2026-02-05T00:00:00.000Z",
+          totalAmountMinor: 758,
+          currency: "EUR",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_customer_name_only",
+            description: "ERIK KROON C",
+            postedAt: "2026-04-09T00:00:00.000Z",
+            money: { amountMinor: -10_000, currency: "SEK" },
+          }),
+        },
+      ],
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_customer_name_only");
+    expect(suggestions[0]?.score ?? 0).toBeLessThan(0.35);
+    expect(suggestions[0]?.signals.documentText).toBeUndefined();
+  });
+
+  test("keeps stale cross-currency merchant matches below suggestion thresholds", () => {
+    const suggestions = suggestInboxTransactionMatches(
+      {
+        ...baseInput,
+        documentText: "Hetzner Online GmbH invoice",
+        fields: {
+          documentType: "invoice_received",
+          merchantName: "Hetzner Online GmbH",
+          issuedAt: "2026-03-05T00:00:00.000Z",
+          totalAmountMinor: 710,
+          currency: "EUR",
+        },
+      },
+      [
+        {
+          transaction: transaction({
+            id: "txn_stale_hetzner",
+            description: "HETZNER COM//25-12-22",
+            postedAt: "2025-12-23T00:00:00.000Z",
+            money: { amountMinor: -8455, currency: "SEK" },
+          }),
+        },
+      ],
+    );
+
+    expect(suggestions[0]?.transactionId).toBe("txn_stale_hetzner");
+    expect(suggestions[0]?.score ?? 0).toBeLessThan(0.35);
+    expect(suggestions[0]?.signals.risk).toBe(-0.25);
   });
 
   test("rejects cross-currency matches with different base currencies", () => {

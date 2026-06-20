@@ -66,7 +66,7 @@ export type InboxSource = {
   createdAt: string;
 };
 
-export type InboxItemStatus = "pending_extraction" | "needs_review" | "resolved";
+export type InboxItemStatus = "pending_extraction" | "needs_review" | "resolved" | "dismissed";
 
 export type InboxItem = {
   id: string;
@@ -152,11 +152,13 @@ export type DocumentExtractionFields = {
   taxAmountMinor?: number | null;
 };
 
-export type DocumentExtractionConfidence = Partial<Record<keyof DocumentExtractionFields, number>>;
+export type DocumentExtractionConfidence = Partial<
+  Record<keyof DocumentExtractionFields | "overall", number>
+>;
 
 export type DocumentExtractionStatus = "completed" | "failed";
 
-export type DocumentExtractionSource = "local_deterministic" | "user_correction";
+export type DocumentExtractionSource = "local_deterministic" | "tanstack_ai" | "user_correction";
 
 export type DocumentExtraction = {
   id: string;
@@ -175,26 +177,60 @@ export type DocumentExtraction = {
   createdAt: string;
 };
 
+export type DocumentExtractionAttemptStatus = "completed" | "failed";
+
+export type DocumentExtractionAttempt = {
+  id: string;
+  teamId: string;
+  inboxItemId: string;
+  documentId: string;
+  documentVersionId: string;
+  extractionId?: string | null;
+  attemptNumber: number;
+  source: Exclude<DocumentExtractionSource, "user_correction">;
+  provider?: string | null;
+  model?: string | null;
+  status: DocumentExtractionAttemptStatus;
+  durationMs?: number | null;
+  qualityScore?: number | null;
+  errorClass?: string | null;
+  errorMessage?: string | null;
+  rawTextPresent: boolean;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+};
+
 export type RunDocumentExtractionCommand = {
   teamId: string;
   inboxItemId: string;
   documentId: string;
   versionId: string;
-  rawText: string;
+  rawText?: string | null;
+  storedDocument?: StoredDocumentExtractionObject | null;
   idempotencyKey: string;
 };
 
-export type RunStoredDocumentExtractionCommand = Omit<RunDocumentExtractionCommand, "rawText">;
+export type RunStoredDocumentExtractionCommand = Omit<
+  RunDocumentExtractionCommand,
+  "rawText" | "storedDocument"
+>;
 
-export type DocumentExtractionTextStorage = {
-  readText(input: {
+export type StoredDocumentExtractionObject = {
+  body: ArrayBuffer;
+  contentType?: string | null;
+  byteSize?: number | null;
+};
+
+export type DocumentExtractionObjectStorage = {
+  readDocument(input: {
     objectKey: string;
     teamId: string;
     documentId: string;
     versionId: string;
     fileName: string;
     contentType: string;
-  }): Promise<string | null>;
+    byteSize: number;
+  }): Promise<StoredDocumentExtractionObject | null>;
 };
 
 export type RunDocumentExtractionResult = {
@@ -213,6 +249,28 @@ export type CorrectDocumentExtractionCommand = {
 export type CorrectDocumentExtractionResult = {
   inboxItem: InboxItem;
   extraction: DocumentExtraction;
+  replayed: boolean;
+};
+
+export type RequestDocumentExtractionRetryCommand = {
+  teamId: string;
+  inboxItemId: string;
+  idempotencyKey: string;
+};
+
+export type RequestDocumentExtractionRetryResult = {
+  inboxItem: InboxItem;
+  replayed: boolean;
+};
+
+export type DismissInboxItemCommand = {
+  teamId: string;
+  inboxItemId: string;
+  idempotencyKey: string;
+};
+
+export type DismissInboxItemResult = {
+  inboxItem: InboxItem;
   replayed: boolean;
 };
 
@@ -245,6 +303,24 @@ export type MatchPendingInboxForTransactionResult = {
   replayed: boolean;
 };
 
+export type MatchBidirectionalBatchCommand = {
+  teamId: string;
+  transactionIds?: string[];
+  inboxItemIds?: string[];
+  sourceOutboxEventId: string;
+  idempotencyKey: string;
+  limit?: number;
+  enforceCallerPermission?: boolean;
+  autoMatch?: AutoMatchOptions;
+};
+
+export type MatchBidirectionalBatchResult = {
+  transactionIds: string[];
+  inboxItemIds: string[];
+  suggestions: InboxTransactionMatchSuggestion[];
+  replayed: boolean;
+};
+
 export type AcceptInboxMatchCommand = {
   teamId: string;
   suggestionId: string;
@@ -273,14 +349,61 @@ export type AutoMatchOptions = {
   enabled?: boolean;
 };
 
-export type DocumentExtractionProvider = {
-  source: Exclude<DocumentExtractionSource, "user_correction">;
-  extract(input: { fileName: string; contentType: string; rawText: string }): Promise<{
-    fields: DocumentExtractionFields;
-    confidence: DocumentExtractionConfidence;
-    rawText?: string | null;
-  }>;
+export type DocumentIntelligenceInput = {
+  teamId: string;
+  inboxItemId: string;
+  documentId: string;
+  versionId: string;
+  objectKey: string;
+  fileName: string;
+  contentType: string;
+  byteSize: number;
+  body?: ArrayBuffer | null;
+  sourceUrl?: string | null;
+  rawText?: string | null;
 };
+
+export type DocumentIntelligenceResult = {
+  source?: Exclude<DocumentExtractionSource, "user_correction">;
+  fields: DocumentExtractionFields;
+  confidence: DocumentExtractionConfidence;
+  rawText?: string | null;
+  metadata?: DocumentIntelligenceMetadata | null;
+};
+
+export type DocumentIntelligenceAttemptMetadata = {
+  attempt?: number | null;
+  provider?: string | null;
+  model?: string | null;
+  status?: DocumentExtractionAttemptStatus | null;
+  durationMs?: number | null;
+  errorClass?: string | null;
+  errorMessage?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type DocumentIntelligenceMetadata = {
+  provider?: string | null;
+  model?: string | null;
+  durationMs?: number | null;
+  attempts?: DocumentIntelligenceAttemptMetadata[] | null;
+  [key: string]: unknown;
+};
+
+export type DocumentExtractionRepairInput = DocumentIntelligenceInput & {
+  current: DocumentIntelligenceResult;
+  missingFields: (keyof DocumentExtractionFields)[];
+  invalidFields: (keyof DocumentExtractionFields)[];
+  issues: string[];
+};
+
+export type DocumentIntelligenceProvider = {
+  source: Exclude<DocumentExtractionSource, "user_correction">;
+  extract(input: DocumentIntelligenceInput): Promise<DocumentIntelligenceResult>;
+  repair?(input: DocumentExtractionRepairInput): Promise<DocumentIntelligenceResult>;
+};
+
+export type DocumentExtractionProvider = DocumentIntelligenceProvider;
 
 export type CreateDocumentUploadCommand = {
   teamId: string;
@@ -406,6 +529,29 @@ export type InboxRepository = {
     rawText?: string | null;
     createdByActorId: string;
   }): Promise<{ inboxItem: InboxItem; extraction: DocumentExtraction }>;
+  createDocumentExtractionAttempt?(input: {
+    attemptId: string;
+    teamId: string;
+    inboxItemId: string;
+    documentId: string;
+    documentVersionId: string;
+    extractionId?: string | null;
+    attemptNumber: number;
+    source: Exclude<DocumentExtractionSource, "user_correction">;
+    provider?: string | null;
+    model?: string | null;
+    status: DocumentExtractionAttemptStatus;
+    durationMs?: number | null;
+    qualityScore?: number | null;
+    errorClass?: string | null;
+    errorMessage?: string | null;
+    rawTextPresent: boolean;
+    metadata: Record<string, unknown>;
+  }): Promise<DocumentExtractionAttempt>;
+  listDocumentExtractionAttemptsForInboxItem?(
+    teamId: string,
+    inboxItemId: string,
+  ): Promise<DocumentExtractionAttempt[]>;
   createCorrectedDocumentExtraction(input: {
     extractionId: string;
     teamId: string;
@@ -419,6 +565,16 @@ export type InboxRepository = {
     inboxItemId: string;
     error: string;
     failedAt: Date;
+  }): Promise<InboxItem>;
+  markDocumentExtractionPending(input: {
+    teamId: string;
+    inboxItemId: string;
+    requestedAt: Date;
+  }): Promise<InboxItem>;
+  dismissInboxItem(input: {
+    teamId: string;
+    inboxItemId: string;
+    dismissedAt: Date;
   }): Promise<InboxItem>;
   listTeamAliases(teamId: string): Promise<TeamAlias[]>;
   listTeamMatchFeedback(teamId: string): Promise<MatchFeedback[]>;
@@ -464,7 +620,10 @@ export type DocumentsInboxUseCaseRepository = TransactionReviewRepository &
 const createDocumentUploadOperation = "document.upload.create";
 const runDocumentExtractionOperation = "document.extraction.run";
 const correctDocumentExtractionOperation = "document.extraction.correct";
+const requestDocumentExtractionRetryOperation = "document.extraction.retry";
+const dismissInboxItemOperation = "inbox.item.dismiss";
 const matchPendingInboxForTransactionOperation = "inbox.match.pending_for_transaction";
+const matchBidirectionalBatchOperation = "inbox.match.bidirectional_batch";
 const acceptInboxMatchOperation = "inbox.match.accept";
 const rejectInboxMatchOperation = "inbox.match.reject";
 const defaultMatchCandidateLimit = 25;
@@ -697,14 +856,16 @@ export async function listInboxItems(
 
   return {
     teamId: access.teamId,
-    inboxItems: await repository.listInboxItems(access.teamId),
+    inboxItems: (await repository.listInboxItems(access.teamId)).filter(
+      (item) => item.status !== "dismissed",
+    ),
   };
 }
 
 export async function runStoredDocumentExtraction(
   repository: DocumentsInboxUseCaseRepository,
-  storage: DocumentExtractionTextStorage,
-  extractor: DocumentExtractionProvider,
+  storage: DocumentExtractionObjectStorage,
+  extractor: DocumentIntelligenceProvider,
   context: TransactionReviewContext,
   command: RunStoredDocumentExtractionCommand,
 ): Promise<RunDocumentExtractionResult> {
@@ -733,28 +894,43 @@ export async function runStoredDocumentExtraction(
     throw new Error("Document version not found");
   }
 
-  const rawText = await storage.readText({
-    objectKey: version.objectKey,
-    teamId: command.teamId,
-    documentId: command.documentId,
-    versionId: command.versionId,
-    fileName: version.fileName,
-    contentType: version.contentType,
-  });
+  let storedDocument: StoredDocumentExtractionObject;
 
-  if (rawText == null) {
-    throw new Error("Document object not found");
+  try {
+    const object = await storage.readDocument({
+      objectKey: version.objectKey,
+      teamId: command.teamId,
+      documentId: command.documentId,
+      versionId: command.versionId,
+      fileName: version.fileName,
+      contentType: version.contentType,
+      byteSize: version.byteSize,
+    });
+
+    if (!object) {
+      throw new Error("Document object not found");
+    }
+
+    storedDocument = object;
+  } catch (error) {
+    await repository.markDocumentExtractionFailed({
+      teamId: command.teamId,
+      inboxItemId: command.inboxItemId,
+      error: errorMessage(error),
+      failedAt: new Date(),
+    });
+    throw error;
   }
 
   return runDocumentExtraction(repository, extractor, context, {
     ...command,
-    rawText,
+    storedDocument,
   });
 }
 
 export async function runDocumentExtraction(
   repository: DocumentsInboxUseCaseRepository,
-  extractor: DocumentExtractionProvider,
+  extractor: DocumentIntelligenceProvider,
   context: TransactionReviewContext,
   command: RunDocumentExtractionCommand,
 ): Promise<RunDocumentExtractionResult> {
@@ -799,23 +975,34 @@ export async function runDocumentExtraction(
       throw new AppError("NOT_FOUND", "Inbox item not found");
     }
 
+    const documentInput = documentIntelligenceInput({
+      command,
+      inboxItem,
+      version,
+    });
+
     try {
-      const extracted = await extractor.extract({
-        fileName: version.fileName,
-        contentType: version.contentType,
-        rawText: command.rawText,
-      });
+      const extracted = await extractDocumentIntelligence(extractor, documentInput);
+      const extractionSource = extracted.source ?? extractor.source;
       const result = await inboxRepository.createDocumentExtraction({
         extractionId: crypto.randomUUID(),
         teamId: command.teamId,
         inboxItemId: inboxItem.id,
         documentId: command.documentId,
         documentVersionId: command.versionId,
-        source: extractor.source,
-        fields: normalizeDocumentExtractionFields(extracted.fields),
-        confidence: normalizeDocumentExtractionConfidence(extracted.confidence),
-        rawText: extracted.rawText ?? command.rawText,
+        source: extractionSource,
+        fields: extracted.fields,
+        confidence: extracted.confidence,
+        rawText: extracted.rawText ?? command.rawText ?? null,
         createdByActorId: context.actor.id,
+      });
+      const quality = extractionQualitySummary(extracted);
+
+      await recordDocumentExtractionAttempts(inboxRepository, {
+        input: documentInput,
+        source: extractionSource,
+        result: extracted,
+        extractionId: result.extraction.id,
       });
 
       await inboxRepository.appendAuditEvent({
@@ -829,7 +1016,8 @@ export async function runDocumentExtraction(
           documentId: command.documentId,
           versionId: command.versionId,
           extractionId: result.extraction.id,
-          provider: extractor.source,
+          source: extractionSource,
+          quality,
         },
       });
 
@@ -844,6 +1032,8 @@ export async function runDocumentExtraction(
           documentId: command.documentId,
           versionId: command.versionId,
           extractionId: result.extraction.id,
+          source: extractionSource,
+          quality,
         },
       });
 
@@ -860,6 +1050,11 @@ export async function runDocumentExtraction(
 
       return finalResult;
     } catch (error) {
+      await recordFailedDocumentExtractionAttempts(inboxRepository, {
+        input: documentInput,
+        source: extractor.source,
+        error,
+      });
       await inboxRepository.markDocumentExtractionFailed({
         teamId: command.teamId,
         inboxItemId: inboxItem.id,
@@ -873,7 +1068,7 @@ export async function runDocumentExtraction(
 
 function documentExtractionFingerprint(
   command: RunStoredDocumentExtractionCommand,
-  extractor: DocumentExtractionProvider,
+  extractor: DocumentIntelligenceProvider,
 ) {
   return JSON.stringify({
     teamId: command.teamId,
@@ -882,6 +1077,295 @@ function documentExtractionFingerprint(
     versionId: command.versionId,
     extractor: extractor.source,
   });
+}
+
+function documentIntelligenceInput(input: {
+  command: RunDocumentExtractionCommand;
+  inboxItem: InboxItem;
+  version: BusinessDocumentVersion;
+}): DocumentIntelligenceInput {
+  const storedDocument = input.command.storedDocument ?? null;
+  const contentType = normalizedOptionalText(storedDocument?.contentType ?? null);
+  const byteSize =
+    typeof storedDocument?.byteSize === "number" && Number.isSafeInteger(storedDocument.byteSize)
+      ? storedDocument.byteSize
+      : (storedDocument?.body.byteLength ?? input.version.byteSize);
+
+  return {
+    teamId: input.command.teamId,
+    inboxItemId: input.inboxItem.id,
+    documentId: input.command.documentId,
+    versionId: input.command.versionId,
+    objectKey: input.version.objectKey,
+    fileName: input.version.fileName,
+    contentType: contentType ?? input.version.contentType,
+    byteSize,
+    body: storedDocument?.body ?? null,
+    rawText: input.command.rawText ?? null,
+  };
+}
+
+async function extractDocumentIntelligence(
+  extractor: DocumentIntelligenceProvider,
+  input: DocumentIntelligenceInput,
+): Promise<DocumentIntelligenceResult> {
+  const extracted = finalizeDocumentIntelligenceResult(await extractor.extract(input));
+  const assessment = assessDocumentExtraction(extracted.fields, extracted.confidence);
+
+  if (assessment.missingCriticalFields.length === 0 || !extractor.repair) {
+    return extracted;
+  }
+
+  const repaired = finalizeDocumentIntelligenceResult(
+    mergeDocumentIntelligenceResults(
+      extracted,
+      await extractor.repair({
+        ...input,
+        current: extracted,
+        missingFields: assessment.missingCriticalFields,
+        invalidFields: assessment.invalidFields,
+        issues: assessment.issues,
+      }),
+    ),
+  );
+
+  return repaired;
+}
+
+function mergeDocumentIntelligenceResults(
+  current: DocumentIntelligenceResult,
+  repair: DocumentIntelligenceResult,
+): DocumentIntelligenceResult {
+  const { overall: _currentOverall, ...currentConfidence } = current.confidence;
+  const { overall: repairOverall, ...repairConfidence } = repair.confidence;
+
+  return {
+    source: repair.source ?? current.source,
+    fields: {
+      ...current.fields,
+      ...repair.fields,
+    },
+    confidence: {
+      ...currentConfidence,
+      ...repairConfidence,
+      ...(typeof repairOverall === "number" ? { overall: repairOverall } : {}),
+    },
+    rawText: repair.rawText ?? current.rawText,
+    metadata: repair.metadata ?? current.metadata,
+  };
+}
+
+function finalizeDocumentIntelligenceResult(
+  result: DocumentIntelligenceResult,
+): DocumentIntelligenceResult {
+  const fields = normalizeDocumentExtractionFields(result.fields);
+  const invalidFields = invalidDocumentExtractionFields(result.fields, fields);
+  const confidence = normalizeDocumentExtractionConfidence(result.confidence, fields);
+  const assessment = assessDocumentExtraction(fields, confidence, invalidFields);
+  const providerOverall = confidence.overall;
+
+  return {
+    ...result,
+    fields,
+    confidence: {
+      ...confidence,
+      overall:
+        typeof providerOverall === "number"
+          ? Math.min(providerOverall, assessment.overallConfidence)
+          : assessment.overallConfidence,
+    },
+  };
+}
+
+async function recordDocumentExtractionAttempts(
+  repository: DocumentsInboxUseCaseRepository,
+  input: {
+    input: DocumentIntelligenceInput;
+    source: Exclude<DocumentExtractionSource, "user_correction">;
+    result: DocumentIntelligenceResult;
+    extractionId: string;
+  },
+) {
+  if (!repository.createDocumentExtractionAttempt) {
+    return;
+  }
+
+  const attempts = normalizedAttemptMetadata(input.result.metadata);
+  const qualityScore = input.result.confidence.overall ?? null;
+  const rawTextPresent = Boolean(input.result.rawText?.trim());
+
+  for (const [index, attempt] of attempts.entries()) {
+    const status = attempt.status === "failed" ? "failed" : "completed";
+
+    await repository.createDocumentExtractionAttempt({
+      attemptId: crypto.randomUUID(),
+      teamId: input.input.teamId,
+      inboxItemId: input.input.inboxItemId,
+      documentId: input.input.documentId,
+      documentVersionId: input.input.versionId,
+      extractionId: input.extractionId,
+      attemptNumber: attempt.attempt ?? index + 1,
+      source: input.source,
+      provider: attempt.provider ?? input.result.metadata?.provider ?? input.source,
+      model: attempt.model ?? input.result.metadata?.model ?? null,
+      status,
+      durationMs: normalizedDurationMs(attempt.durationMs ?? input.result.metadata?.durationMs),
+      qualityScore: status === "completed" ? qualityScore : null,
+      errorClass: status === "failed" ? (attempt.errorClass ?? null) : null,
+      errorMessage: status === "failed" ? (attempt.errorMessage ?? null) : null,
+      rawTextPresent,
+      metadata: redactDocumentExtractionMetadata(attempt.metadata ?? {}),
+    });
+  }
+}
+
+async function recordFailedDocumentExtractionAttempts(
+  repository: DocumentsInboxUseCaseRepository,
+  input: {
+    input: DocumentIntelligenceInput;
+    source: Exclude<DocumentExtractionSource, "user_correction">;
+    error: unknown;
+  },
+) {
+  if (!repository.createDocumentExtractionAttempt) {
+    return;
+  }
+
+  const attempts = normalizedErrorAttemptMetadata(input.error);
+
+  for (const [index, attempt] of attempts.entries()) {
+    await repository.createDocumentExtractionAttempt({
+      attemptId: crypto.randomUUID(),
+      teamId: input.input.teamId,
+      inboxItemId: input.input.inboxItemId,
+      documentId: input.input.documentId,
+      documentVersionId: input.input.versionId,
+      extractionId: null,
+      attemptNumber: attempt.attempt ?? index + 1,
+      source: input.source,
+      provider: attempt.provider ?? input.source,
+      model: attempt.model ?? null,
+      status: "failed",
+      durationMs: normalizedDurationMs(attempt.durationMs),
+      qualityScore: null,
+      errorClass: attempt.errorClass ?? errorClass(input.error),
+      errorMessage: attempt.errorMessage ?? errorMessage(input.error),
+      rawTextPresent: false,
+      metadata: redactDocumentExtractionMetadata(attempt.metadata ?? {}),
+    });
+  }
+}
+
+function normalizedAttemptMetadata(
+  metadata: DocumentIntelligenceMetadata | null | undefined,
+): DocumentIntelligenceAttemptMetadata[] {
+  return metadata?.attempts?.length
+    ? metadata.attempts
+    : [
+        {
+          attempt: 1,
+          provider: metadata?.provider ?? null,
+          model: metadata?.model ?? null,
+          status: "completed",
+          durationMs: metadata?.durationMs ?? null,
+          metadata: {},
+        },
+      ];
+}
+
+function normalizedErrorAttemptMetadata(error: unknown): DocumentIntelligenceAttemptMetadata[] {
+  const attempts =
+    typeof error === "object" && error !== null && "attempts" in error
+      ? (error as { attempts?: unknown }).attempts
+      : null;
+
+  if (Array.isArray(attempts) && attempts.length > 0) {
+    return attempts
+      .filter(
+        (attempt): attempt is Record<string, unknown> =>
+          typeof attempt === "object" && attempt !== null,
+      )
+      .map((attempt) => ({
+        attempt: typeof attempt.attempt === "number" ? attempt.attempt : null,
+        provider: typeof attempt.provider === "string" ? attempt.provider : null,
+        model: typeof attempt.model === "string" ? attempt.model : null,
+        status: "failed",
+        durationMs: typeof attempt.durationMs === "number" ? attempt.durationMs : null,
+        errorClass: typeof attempt.errorClass === "string" ? attempt.errorClass : null,
+        errorMessage: typeof attempt.errorMessage === "string" ? attempt.errorMessage : null,
+        metadata:
+          typeof attempt.metadata === "object" && attempt.metadata !== null
+            ? (attempt.metadata as Record<string, unknown>)
+            : {},
+      }));
+  }
+
+  return [
+    {
+      attempt: 1,
+      status: "failed",
+      errorClass: errorClass(error),
+      errorMessage: errorMessage(error),
+      metadata: {},
+    },
+  ];
+}
+
+function extractionQualitySummary(result: DocumentIntelligenceResult) {
+  const assessment = assessDocumentExtraction(result.fields, result.confidence);
+
+  return {
+    overallConfidence: result.confidence.overall ?? assessment.overallConfidence,
+    missingCriticalFields: assessment.missingCriticalFields,
+    invalidFields: assessment.invalidFields,
+  };
+}
+
+function redactDocumentExtractionMetadata(value: Record<string, unknown>): Record<string, unknown> {
+  return redactMetadataValue(value) as Record<string, unknown>;
+}
+
+function redactMetadataValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(redactMetadataValue);
+  }
+
+  if (typeof value !== "object" || value === null) {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !isSensitiveDocumentMetadataKey(key))
+      .map(([key, nestedValue]) => [key, redactMetadataValue(nestedValue)]),
+  );
+}
+
+function isSensitiveDocumentMetadataKey(key: string) {
+  const normalized = key.toLowerCase().replace(/[_-]/g, "");
+
+  return (
+    normalized === "apikey" ||
+    normalized === "authorization" ||
+    normalized === "secret" ||
+    normalized === "password" ||
+    normalized === "accesstoken" ||
+    normalized === "refreshtoken" ||
+    normalized === "rawpayload" ||
+    normalized === "body" ||
+    normalized === "requestbody" ||
+    normalized === "responsebody" ||
+    normalized === "contentbase64" ||
+    normalized === "bytes"
+  );
+}
+
+function normalizedDurationMs(value: unknown) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function errorClass(error: unknown) {
+  return error instanceof Error && error.constructor.name ? error.constructor.name : "Error";
 }
 
 export async function correctDocumentExtraction(
@@ -983,6 +1467,190 @@ export async function correctDocumentExtraction(
   });
 }
 
+export async function requestDocumentExtractionRetry(
+  repository: DocumentsInboxUseCaseRepository,
+  context: TransactionReviewContext,
+  command: RequestDocumentExtractionRetryCommand,
+): Promise<RequestDocumentExtractionRetryResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const inboxRepository = transactionRepository as DocumentsInboxUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Inbox item not found");
+
+    await resolveTeamAccess(
+      inboxRepository,
+      { ...context, teamId: command.teamId },
+      "documents.write",
+      "You cannot retry extraction for this team",
+    );
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      inboxItemId: command.inboxItemId,
+    });
+    const replayed = await inboxRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      requestDocumentExtractionRetryOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different extraction retry",
+        );
+      }
+
+      return { ...(replayed.result as RequestDocumentExtractionRetryResult), replayed: true };
+    }
+
+    const inboxItem = await inboxRepository.getInboxItemForTeam(
+      command.teamId,
+      command.inboxItemId,
+    );
+
+    if (!inboxItem) {
+      throw new AppError("NOT_FOUND", "Inbox item not found");
+    }
+
+    if (inboxItem.extractionStatus !== "failed") {
+      throw new AppError("CONFLICT", "Only failed extraction items can be retried");
+    }
+
+    const requestedAt = new Date();
+    const updated = await inboxRepository.markDocumentExtractionPending({
+      teamId: command.teamId,
+      inboxItemId: command.inboxItemId,
+      requestedAt,
+    });
+
+    await inboxRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "document_extraction.retry_requested",
+      entityType: "inbox_item",
+      entityId: command.inboxItemId,
+      metadata: {
+        documentId: inboxItem.documentId,
+        versionId: inboxItem.documentVersionId,
+      },
+    });
+
+    await inboxRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "document_extraction.retry_requested",
+      version: 1,
+      payload: {
+        inboxItemId: command.inboxItemId,
+        documentId: inboxItem.documentId,
+        versionId: inboxItem.documentVersionId,
+        actorId: context.actor.id,
+      },
+    });
+
+    const result = { inboxItem: updated, replayed: false };
+
+    await inboxRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: requestDocumentExtractionRetryOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function dismissInboxItem(
+  repository: DocumentsInboxUseCaseRepository,
+  context: TransactionReviewContext,
+  command: DismissInboxItemCommand,
+): Promise<DismissInboxItemResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const inboxRepository = transactionRepository as DocumentsInboxUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Inbox item not found");
+
+    await resolveTeamAccess(
+      inboxRepository,
+      { ...context, teamId: command.teamId },
+      "documents.write",
+      "You cannot dismiss inbox items for this team",
+    );
+
+    const fingerprint = JSON.stringify({
+      teamId: command.teamId,
+      inboxItemId: command.inboxItemId,
+    });
+    const replayed = await inboxRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      dismissInboxItemOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different inbox dismissal",
+        );
+      }
+
+      return { ...(replayed.result as DismissInboxItemResult), replayed: true };
+    }
+
+    const inboxItem = await inboxRepository.getInboxItemForTeam(
+      command.teamId,
+      command.inboxItemId,
+    );
+
+    if (!inboxItem) {
+      throw new AppError("NOT_FOUND", "Inbox item not found");
+    }
+
+    const dismissedAt = new Date();
+    const updated = await inboxRepository.dismissInboxItem({
+      teamId: command.teamId,
+      inboxItemId: command.inboxItemId,
+      dismissedAt,
+    });
+
+    await inboxRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "inbox_item.dismissed",
+      entityType: "inbox_item",
+      entityId: command.inboxItemId,
+      metadata: {
+        documentId: inboxItem.documentId,
+        versionId: inboxItem.documentVersionId,
+      },
+    });
+
+    const result = { inboxItem: updated, replayed: false };
+
+    await inboxRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: dismissInboxItemOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
 export async function generateInboxMatchSuggestions(
   repository: DocumentsInboxUseCaseRepository,
   context: TransactionReviewContext,
@@ -1017,6 +1685,10 @@ export async function generateInboxMatchSuggestions(
 
     if (!inboxItem || !inboxItem.latestExtraction) {
       throw new AppError("NOT_FOUND", "Inbox item not found");
+    }
+
+    if (!extractionAllowsMatchSuggestions(inboxItem.latestExtraction)) {
+      return { inboxItemId: inboxItem.id, suggestions: [] };
     }
 
     const candidates = await inboxRepository.listTransactionMatchCandidatesForInboxItem({
@@ -1059,7 +1731,9 @@ export async function generateInboxMatchSuggestions(
       persistedSuggestions,
       candidateSuggestions: suggestions,
       policy,
-      autoMatch: command.autoMatch,
+      autoMatch: extractionAllowsAutoMatch(inboxItem.latestExtraction)
+        ? command.autoMatch
+        : { enabled: false },
     });
 
     return {
@@ -1135,7 +1809,10 @@ export async function matchPendingInboxForTransaction(
     const persistedSuggestions: InboxTransactionMatchSuggestion[] = [];
 
     for (const inboxItem of candidateInboxItems) {
-      if (!inboxItem.latestExtraction) {
+      if (
+        !inboxItem.latestExtraction ||
+        !extractionAllowsMatchSuggestions(inboxItem.latestExtraction)
+      ) {
         continue;
       }
 
@@ -1180,7 +1857,9 @@ export async function matchPendingInboxForTransaction(
         persistedSuggestions: upserted,
         candidateSuggestions: [suggestion],
         policy,
-        autoMatch: command.autoMatch,
+        autoMatch: extractionAllowsAutoMatch(inboxItem.latestExtraction)
+          ? command.autoMatch
+          : { enabled: false },
       });
       const persisted = upserted.find(
         (candidate) =>
@@ -1204,6 +1883,227 @@ export async function matchPendingInboxForTransaction(
       teamId: command.teamId,
       actorId: context.actor.id,
       operation: matchPendingInboxForTransactionOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
+export async function matchBidirectionalBatch(
+  repository: DocumentsInboxUseCaseRepository,
+  context: TransactionReviewContext,
+  command: MatchBidirectionalBatchCommand,
+): Promise<MatchBidirectionalBatchResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const inboxRepository = transactionRepository as DocumentsInboxUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Inbox match batch not found");
+
+    if (command.enforceCallerPermission !== false) {
+      await resolveTeamAccess(
+        inboxRepository,
+        { ...context, teamId: command.teamId },
+        "documents.read",
+        "You cannot read inbox items for this team",
+      );
+      await resolveTeamAccess(
+        inboxRepository,
+        { ...context, teamId: command.teamId },
+        "transactions.read",
+        "You cannot read transactions for this team",
+      );
+    }
+
+    const normalized = normalizeMatchBidirectionalBatchCommand(command);
+    const fingerprint = matchBidirectionalBatchFingerprint(normalized);
+    const replayed = await inboxRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      matchBidirectionalBatchOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different inbox matching batch",
+        );
+      }
+
+      return { ...(replayed.result as MatchBidirectionalBatchResult), replayed: true };
+    }
+
+    const limit = normalizeMatchCandidateLimit(command.limit);
+    const [aliases, feedback] = await Promise.all([
+      inboxRepository.listTeamAliases(command.teamId),
+      inboxRepository.listTeamMatchFeedback(command.teamId),
+    ]);
+    const claimedInboxItemIds = new Set<string>();
+    const claimedTransactionIds = new Set<string>();
+    const persistedSuggestions: InboxTransactionMatchSuggestion[] = [];
+
+    for (const transactionId of normalized.transactionIds) {
+      if (claimedTransactionIds.has(transactionId)) {
+        continue;
+      }
+
+      const transaction = await inboxRepository.getTransactionForTeam(
+        command.teamId,
+        transactionId,
+      );
+
+      if (!transaction) {
+        continue;
+      }
+
+      const candidateInboxItems = await inboxRepository.listInboxMatchCandidatesForTransaction({
+        teamId: command.teamId,
+        transaction,
+        limit,
+      });
+      const scoredCandidates: {
+        inboxItem: InboxItem;
+        suggestion: InboxMatchSuggestion;
+        policy: MatchPolicy;
+      }[] = [];
+
+      for (const inboxItem of candidateInboxItems) {
+        if (
+          claimedInboxItemIds.has(inboxItem.id) ||
+          !inboxItem.latestExtraction ||
+          !extractionAllowsMatchSuggestions(inboxItem.latestExtraction)
+        ) {
+          continue;
+        }
+
+        const hardNegatives = await inboxRepository.listHardNegativeMatches(
+          command.teamId,
+          inboxItem.id,
+        );
+        const memory = { aliases, feedback, hardNegatives };
+        const policy = calibrateMatchPolicy(memory);
+        const [suggestion] = suggestInboxTransactionMatches(
+          inboxMatchInputForItem(inboxItem),
+          [
+            {
+              transaction,
+              providerReference: transaction.providerTransactionId,
+            },
+          ],
+          memory,
+          policy,
+        ).filter((candidate) => candidate.score >= policy.suggestedScoreThreshold);
+
+        if (suggestion) {
+          scoredCandidates.push({ inboxItem, suggestion, policy });
+        }
+      }
+
+      scoredCandidates.sort(
+        (left, right) =>
+          right.suggestion.score - left.suggestion.score ||
+          left.inboxItem.id.localeCompare(right.inboxItem.id),
+      );
+      const selected = scoredCandidates[0];
+
+      if (!selected) {
+        continue;
+      }
+
+      const persisted = await persistBatchSuggestion({
+        repository: inboxRepository,
+        context,
+        teamId: command.teamId,
+        inboxItemId: selected.inboxItem.id,
+        suggestion: selected.suggestion,
+        candidateSuggestions: [selected.suggestion],
+        policy: selected.policy,
+        autoMatch: extractionAllowsAutoMatch(selected.inboxItem.latestExtraction!)
+          ? command.autoMatch
+          : { enabled: false },
+      });
+
+      if (persisted) {
+        persistedSuggestions.push(persisted);
+        claimedInboxItemIds.add(selected.inboxItem.id);
+        claimedTransactionIds.add(transaction.id);
+      }
+    }
+
+    for (const inboxItemId of normalized.inboxItemIds) {
+      if (claimedInboxItemIds.has(inboxItemId)) {
+        continue;
+      }
+
+      const inboxItem = await inboxRepository.getInboxItemForTeam(command.teamId, inboxItemId);
+
+      if (
+        !inboxItem?.latestExtraction ||
+        !extractionAllowsMatchSuggestions(inboxItem.latestExtraction)
+      ) {
+        continue;
+      }
+
+      const candidates = (
+        await inboxRepository.listTransactionMatchCandidatesForInboxItem({
+          teamId: command.teamId,
+          inboxItem,
+          limit,
+        })
+      ).filter((candidate) => !claimedTransactionIds.has(candidate.transaction.id));
+      const hardNegatives = await inboxRepository.listHardNegativeMatches(
+        command.teamId,
+        inboxItem.id,
+      );
+      const memory = { aliases, feedback, hardNegatives };
+      const policy = calibrateMatchPolicy(memory);
+      const candidateSuggestions = suggestInboxTransactionMatches(
+        inboxMatchInputForItem(inboxItem),
+        candidates,
+        memory,
+        policy,
+      ).filter((candidate) => candidate.score >= policy.suggestedScoreThreshold);
+      const [suggestion] = candidateSuggestions;
+
+      if (!suggestion) {
+        continue;
+      }
+
+      const persisted = await persistBatchSuggestion({
+        repository: inboxRepository,
+        context,
+        teamId: command.teamId,
+        inboxItemId: inboxItem.id,
+        suggestion,
+        candidateSuggestions,
+        policy,
+        autoMatch: extractionAllowsAutoMatch(inboxItem.latestExtraction)
+          ? command.autoMatch
+          : { enabled: false },
+      });
+
+      if (persisted) {
+        persistedSuggestions.push(persisted);
+        claimedInboxItemIds.add(inboxItem.id);
+        claimedTransactionIds.add(suggestion.transactionId);
+      }
+    }
+
+    const result = {
+      transactionIds: normalized.transactionIds,
+      inboxItemIds: normalized.inboxItemIds,
+      suggestions: persistedSuggestions,
+      replayed: false,
+    };
+
+    await inboxRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: matchBidirectionalBatchOperation,
       key: command.idempotencyKey,
       fingerprint,
       result,
@@ -1461,11 +2361,11 @@ export function createDocumentUploadFingerprint(command: CreateDocumentUploadCom
   });
 }
 
-export function createDeterministicDocumentExtractor(): DocumentExtractionProvider {
+export function createDeterministicDocumentExtractor(): DocumentIntelligenceProvider {
   return {
     source: "local_deterministic",
     async extract(input) {
-      const rawText = input.rawText.trim();
+      const rawText = (input.rawText ?? "").trim();
       const text = rawText || input.fileName;
       const fields = inferDocumentExtractionFields(text, input.fileName);
 
@@ -1509,57 +2409,207 @@ function inferDocumentExtractionFields(text: string, fileName: string): Document
 function normalizeDocumentExtractionFields(
   fields: DocumentExtractionFields,
 ): DocumentExtractionFields {
+  const documentType = normalizedDocumentType(fields.documentType);
+  const totalAmountMinor = normalizedPositiveMinorAmount(fields.totalAmountMinor);
+  const baseAmountMinor = normalizedPositiveMinorAmount(fields.baseAmountMinor);
+  const taxAmountMinor = normalizedTaxAmount(fields.taxAmountMinor, totalAmountMinor);
+
   return {
-    documentType: fields.documentType ?? null,
+    documentType,
     merchantName: normalizedOptionalText(fields.merchantName),
     customerName: normalizedOptionalText(fields.customerName),
-    issuedAt: normalizedOptionalText(fields.issuedAt),
-    dueAt: normalizedOptionalText(fields.dueAt),
+    issuedAt: normalizedDateString(fields.issuedAt),
+    dueAt: normalizedDateString(fields.dueAt),
     invoiceNumber: normalizedOptionalText(fields.invoiceNumber),
-    totalAmountMinor:
-      typeof fields.totalAmountMinor === "number" && Number.isSafeInteger(fields.totalAmountMinor)
-        ? fields.totalAmountMinor
-        : null,
-    currency: normalizedOptionalText(fields.currency)?.toUpperCase() ?? null,
-    baseAmountMinor:
-      typeof fields.baseAmountMinor === "number" && Number.isSafeInteger(fields.baseAmountMinor)
-        ? fields.baseAmountMinor
-        : null,
-    baseCurrency: normalizedOptionalText(fields.baseCurrency)?.toUpperCase() ?? null,
-    taxAmountMinor:
-      typeof fields.taxAmountMinor === "number" && Number.isSafeInteger(fields.taxAmountMinor)
-        ? fields.taxAmountMinor
-        : null,
+    totalAmountMinor,
+    currency: normalizedCurrencyCode(fields.currency),
+    baseAmountMinor,
+    baseCurrency: normalizedCurrencyCode(fields.baseCurrency),
+    taxAmountMinor,
   };
 }
 
 function normalizeDocumentExtractionConfidence(
   confidence: DocumentExtractionConfidence,
+  fields?: DocumentExtractionFields,
 ): DocumentExtractionConfidence {
+  const availableFields = fields
+    ? new Set(
+        Object.entries(fields)
+          .filter(([, value]) => value !== null && value !== undefined && value !== "")
+          .map(([key]) => key),
+      )
+    : null;
+
   return Object.fromEntries(
     Object.entries(confidence)
-      .filter(([, value]) => typeof value === "number" && Number.isFinite(value))
+      .filter(
+        ([key, value]) =>
+          typeof value === "number" &&
+          Number.isFinite(value) &&
+          (key === "overall" || !availableFields || availableFields.has(key)),
+      )
       .map(([key, value]) => [key, Math.max(0, Math.min(1, value ?? 0))]),
   ) as DocumentExtractionConfidence;
+}
+
+function invalidDocumentExtractionFields(
+  input: DocumentExtractionFields,
+  normalized: DocumentExtractionFields,
+): (keyof DocumentExtractionFields)[] {
+  return (
+    [
+      "documentType",
+      "issuedAt",
+      "dueAt",
+      "totalAmountMinor",
+      "currency",
+      "baseAmountMinor",
+      "baseCurrency",
+      "taxAmountMinor",
+    ] as const
+  ).filter(
+    (field) => hasExtractionFieldValue(input[field]) && !hasExtractionFieldValue(normalized[field]),
+  );
+}
+
+function assessDocumentExtraction(
+  fields: DocumentExtractionFields,
+  confidence: DocumentExtractionConfidence,
+  invalidFields: (keyof DocumentExtractionFields)[] = [],
+) {
+  const criticalFields = criticalDocumentExtractionFields(fields.documentType);
+  const missingCriticalFields = criticalFields.filter(
+    (field) => !hasExtractionFieldValue(fields[field]),
+  );
+  const issues = [
+    ...missingCriticalFields.map((field) => `Missing critical field: ${field}`),
+    ...invalidFields.map((field) => `Invalid field: ${field}`),
+  ];
+  const criticalConfidences = criticalFields
+    .filter((field) => hasExtractionFieldValue(fields[field]))
+    .map((field) => confidence[field] ?? 0.72);
+  const criticalConfidence =
+    criticalConfidences.length > 0
+      ? criticalConfidences.reduce((total, value) => total + value, 0) / criticalConfidences.length
+      : (confidence.documentType ?? 0.72);
+  const coverage =
+    criticalFields.length > 0
+      ? (criticalFields.length - missingCriticalFields.length) / criticalFields.length
+      : 1;
+  let overallConfidence = Math.min(coverage, criticalConfidence);
+
+  if (missingCriticalFields.length > 0 || invalidFields.length > 0) {
+    overallConfidence = Math.min(overallConfidence, 0.69);
+  }
+
+  return {
+    missingCriticalFields,
+    invalidFields,
+    issues,
+    overallConfidence: Math.max(0, Math.min(1, overallConfidence)),
+  };
+}
+
+function criticalDocumentExtractionFields(
+  documentType: DocumentExtractionFields["documentType"],
+): (keyof DocumentExtractionFields)[] {
+  switch (documentType) {
+    case "receipt":
+      return ["documentType", "merchantName", "issuedAt", "totalAmountMinor", "currency"];
+    case "invoice_received":
+    case "invoice_sent":
+      return ["documentType", "merchantName", "issuedAt", "totalAmountMinor", "currency"];
+    default:
+      return documentType ? ["documentType"] : [];
+  }
+}
+
+function normalizedDocumentType(value: DocumentExtractionFields["documentType"]) {
+  const normalized = normalizedOptionalText(value);
+
+  if (
+    normalized === "receipt" ||
+    normalized === "invoice_received" ||
+    normalized === "invoice_sent" ||
+    normalized === "bank_statement" ||
+    normalized === "contract" ||
+    normalized === "tax_document" ||
+    normalized === "other"
+  ) {
+    return normalized;
+  }
+
+  return null;
+}
+
+function normalizedPositiveMinorAmount(value: unknown) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function normalizedTaxAmount(value: unknown, totalAmountMinor: number | null) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    return null;
+  }
+
+  if (totalAmountMinor == null || value > totalAmountMinor) {
+    return null;
+  }
+
+  return value;
+}
+
+function normalizedCurrencyCode(value: unknown) {
+  const normalized = normalizedOptionalText(value)?.toUpperCase() ?? null;
+
+  return normalized && /^[A-Z]{3}$/.test(normalized) ? normalized : null;
+}
+
+function normalizedDateString(value: unknown) {
+  const normalized = normalizedOptionalText(value);
+
+  if (!normalized || !/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    return null;
+  }
+
+  const date = new Date(`${normalized}T00:00:00.000Z`);
+
+  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== normalized
+    ? null
+    : normalized;
+}
+
+function hasExtractionFieldValue(value: unknown) {
+  return value !== null && value !== undefined && value !== "";
 }
 
 function confidenceForExtractedFields(
   fields: DocumentExtractionFields,
   hasRawText: boolean,
 ): DocumentExtractionConfidence {
-  return Object.fromEntries(
+  const confidence = Object.fromEntries(
     Object.entries(fields)
       .filter(([, value]) => value !== null && value !== undefined && value !== "")
-      .map(([key]) => [key, hasRawText ? 0.72 : 0.35]),
+      .map(([key]) => [key, hasRawText ? 0.82 : 0.35]),
   ) as DocumentExtractionConfidence;
+
+  return {
+    ...confidence,
+    overall: assessDocumentExtraction(fields, confidence).overallConfidence,
+  };
 }
 
 function correctionConfidence(fields: DocumentExtractionFields): DocumentExtractionConfidence {
-  return Object.fromEntries(
+  const confidence = Object.fromEntries(
     Object.entries(fields)
       .filter(([, value]) => value !== null && value !== undefined && value !== "")
       .map(([key]) => [key, 1]),
   ) as DocumentExtractionConfidence;
+
+  return {
+    ...confidence,
+    overall: 1,
+  };
 }
 
 function inboxMatchInputForItem(inboxItem: InboxItem) {
@@ -1574,6 +2624,50 @@ function inboxMatchInputForItem(inboxItem: InboxItem) {
     documentText: inboxItem.latestExtraction.rawText,
     fields: inboxItem.latestExtraction.fields,
   };
+}
+
+function extractionAllowsMatchSuggestions(extraction: DocumentExtraction) {
+  let financialDocument = false;
+
+  switch (extraction.fields.documentType) {
+    case "receipt":
+    case "invoice_received":
+    case "invoice_sent":
+      financialDocument = true;
+      break;
+    case "other":
+    case "bank_statement":
+    case "contract":
+    case "tax_document":
+      return false;
+    default:
+      financialDocument = Boolean(
+        extraction.fields.totalAmountMinor &&
+        extraction.fields.currency &&
+        extraction.fields.merchantName,
+      );
+  }
+
+  return financialDocument && extractionQualityAllowsMatchSuggestions(extraction);
+}
+
+function extractionQualityAllowsMatchSuggestions(extraction: DocumentExtraction) {
+  if (Object.keys(extraction.confidence).length === 0) {
+    return true;
+  }
+
+  const assessment = assessDocumentExtraction(extraction.fields, extraction.confidence);
+  const overallConfidence = extraction.confidence.overall ?? assessment.overallConfidence;
+
+  return overallConfidence >= 0.7 && assessment.missingCriticalFields.length === 0;
+}
+
+function extractionAllowsAutoMatch(extraction: DocumentExtraction) {
+  if (!extractionAllowsMatchSuggestions(extraction)) {
+    return false;
+  }
+
+  return true;
 }
 
 async function maybeAutoAcceptInboxMatch(input: {
@@ -1648,6 +2742,47 @@ async function maybeAutoAcceptInboxMatch(input: {
   });
 
   return accepted.suggestion;
+}
+
+async function persistBatchSuggestion(input: {
+  repository: DocumentsInboxUseCaseRepository;
+  context: TransactionReviewContext;
+  teamId: string;
+  inboxItemId: string;
+  suggestion: InboxMatchSuggestion;
+  candidateSuggestions: InboxMatchSuggestion[];
+  policy: MatchPolicy;
+  autoMatch?: AutoMatchOptions;
+}) {
+  const upserted = currentSuggestedPersistedSuggestions(
+    await input.repository.upsertInboxMatchSuggestions({
+      teamId: input.teamId,
+      inboxItemId: input.inboxItemId,
+      suggestions: [input.suggestion],
+    }),
+    [input.suggestion],
+  );
+  const autoAccepted = await maybeAutoAcceptInboxMatch({
+    repository: input.repository,
+    context: input.context,
+    teamId: input.teamId,
+    persistedSuggestions: upserted,
+    candidateSuggestions: input.candidateSuggestions,
+    policy: input.policy,
+    autoMatch: input.autoMatch,
+  });
+
+  if (autoAccepted) {
+    return autoAccepted;
+  }
+
+  return (
+    upserted.find(
+      (candidate) =>
+        candidate.inboxItemId === input.suggestion.inboxItemId &&
+        candidate.transactionId === input.suggestion.transactionId,
+    ) ?? null
+  );
 }
 
 function replaceAcceptedSuggestion(
@@ -1729,6 +2864,33 @@ export function matchPendingInboxForTransactionFingerprint(
   });
 }
 
+export function matchBidirectionalBatchFingerprint(command: MatchBidirectionalBatchCommand) {
+  const normalized = normalizeMatchBidirectionalBatchCommand(command);
+
+  return JSON.stringify({
+    teamId: normalized.teamId,
+    sourceOutboxEventId: normalized.sourceOutboxEventId,
+    transactionIds: normalized.transactionIds,
+    inboxItemIds: normalized.inboxItemIds,
+    limit: normalizeMatchCandidateLimit(normalized.limit),
+    autoMatch: normalized.autoMatch?.enabled === true,
+  });
+}
+
+function normalizeMatchBidirectionalBatchCommand(
+  command: MatchBidirectionalBatchCommand,
+): MatchBidirectionalBatchCommand & { transactionIds: string[]; inboxItemIds: string[] } {
+  return {
+    ...command,
+    transactionIds: uniqueNonEmptyStrings(command.transactionIds ?? []),
+    inboxItemIds: uniqueNonEmptyStrings(command.inboxItemIds ?? []),
+  };
+}
+
+function uniqueNonEmptyStrings(values: readonly string[]) {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
 function normalizeMatchCandidateLimit(limit: number | null | undefined) {
   if (!Number.isSafeInteger(limit) || !limit || limit <= 0) {
     return defaultMatchCandidateLimit;
@@ -1737,8 +2899,8 @@ function normalizeMatchCandidateLimit(limit: number | null | undefined) {
   return Math.min(limit, maxMatchCandidateLimit);
 }
 
-function normalizedOptionalText(value: string | null | undefined) {
-  const normalized = value?.trim();
+function normalizedOptionalText(value: unknown) {
+  const normalized = typeof value === "string" ? value.trim() : "";
   return normalized ? normalized : null;
 }
 

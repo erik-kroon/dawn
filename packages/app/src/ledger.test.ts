@@ -28,6 +28,7 @@ import {
   listLedgerSummary,
   previewCsvTransactionImport,
   runQueuedCsvTransactionImport,
+  suggestCsvTransactionImportMapping,
 } from "./index";
 
 class MemoryTransactionImportPayloadStorage implements TransactionImportPayloadStorage {
@@ -624,6 +625,62 @@ describe("ledger use cases", () => {
       currency: "USD",
     });
   });
+
+  test("summarizes mixed-currency ledgers using the dominant transaction currency", async () => {
+    const repository = seededRepository("accountant");
+    repository.accounts.set("acct_sek", {
+      id: "acct_sek",
+      teamId: "team_1",
+      name: "SEK checking",
+      currency: "SEK",
+      type: "bank",
+    });
+    repository.transactions.set("txn_usd", {
+      id: "txn_usd",
+      teamId: "team_1",
+      accountId: "acct_1",
+      description: "Figma subscription",
+      postedAt: "2026-06-10",
+      money: { amountMinor: -1200, currency: "USD" },
+      type: "expense",
+      source: "manual",
+      categoryId: "cat_software",
+      reviewState: "reviewed",
+    });
+    repository.transactions.set("txn_sek_income", {
+      id: "txn_sek_income",
+      teamId: "team_1",
+      accountId: "acct_sek",
+      description: "Owner transfer",
+      postedAt: "2026-06-14",
+      money: { amountMinor: 360_00, currency: "SEK" },
+      type: "income",
+      source: "csv_import",
+      categoryId: null,
+      reviewState: "reviewed",
+    });
+    repository.transactions.set("txn_sek_expense", {
+      id: "txn_sek_expense",
+      teamId: "team_1",
+      accountId: "acct_sek",
+      description: "100003655822",
+      postedAt: "2026-06-14",
+      money: { amountMinor: -130_00, currency: "SEK" },
+      type: "expense",
+      source: "csv_import",
+      categoryId: "cat_software",
+      reviewState: "reviewed",
+    });
+
+    const summary = await listLedgerSummary(repository, context, {
+      teamId: "team_1",
+    });
+
+    expect(summary.transactionCount).toBe(3);
+    expect(summary.totals.revenue).toEqual({ amountMinor: 360_00, currency: "SEK" });
+    expect(summary.totals.expenses).toEqual({ amountMinor: -130_00, currency: "SEK" });
+    expect(summary.totals.profit).toEqual({ amountMinor: 230_00, currency: "SEK" });
+  });
 });
 
 describe("CSV transaction import", () => {
@@ -744,6 +801,52 @@ describe("CSV transaction import", () => {
       { amountMinor: 5000, currency: "USD" },
     ]);
     expect(result.preview.rows.map((row) => row.status)).toEqual(["ready", "ready"]);
+  });
+
+  test("suggests a generic mapping for split amount CSV exports before preview", async () => {
+    const repository = seededRepository("owner");
+    repository.accounts.set("acct_1", {
+      id: "acct_1",
+      teamId: "team_1",
+      name: "Operating",
+      currency: "SEK",
+      type: "bank",
+    });
+    const csvText = [
+      "A,B,C,D,E,F,G",
+      "2026-06-16,2026-06-16,ERIK KROON C,Transfer,360.00,,130.00",
+      "2026-06-16,2026-06-16,AVI OVERDRAFT,Other,,-100.00,-230.00",
+      "2026-06-02,2026-06-02,100003843496,Other,,-130.00,-130.00",
+      "2026-05-12,2026-05-12,ERIK KROON C,Transfer,127.00,,0.00",
+    ].join("\n");
+
+    const suggestion = await suggestCsvTransactionImportMapping(repository, context, {
+      teamId: "team_1",
+      csvText,
+    });
+    const preview = await previewCsvTransactionImport(repository, context, {
+      teamId: "team_1",
+      accountId: "acct_1",
+      csvText,
+      mapping: suggestion.mapping,
+    });
+
+    expect(suggestion).toMatchObject({
+      source: "heuristic",
+      mapping: {
+        postedAt: "A",
+        description: "C",
+        amount: null,
+        credit: "E",
+        debit: "F",
+        balance: "G",
+      },
+    });
+    expect(preview.readyCount).toBe(4);
+    expect(preview.summary.readyCurrencyTotals).toEqual({
+      SEK: { amountMinor: 25700, currency: "SEK" },
+    });
+    expect(preview.rows.every((row) => row.draft?.money.currency === "SEK")).toBe(true);
   });
 
   test("imports bank exports whose signed amount convention needs inversion", async () => {

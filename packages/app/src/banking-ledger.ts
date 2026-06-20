@@ -10,8 +10,15 @@ import type {
   TeamRole,
   Transaction,
   TransactionAccountantStatus,
+  CsvTransactionImportRow,
   TransactionTag,
 } from "@dawn/domain";
+import {
+  buildCsvTransactionMappingPrompt,
+  compactCsvMappingSampleRows,
+  normalizeCsvMappingHeaders,
+  type CsvTransactionMappingSuggestionProvider,
+} from "@dawn/ai";
 import {
   applyTransactionReview,
   assertLedgerTransactionDraft,
@@ -165,6 +172,25 @@ export type PreviewCsvTransactionImportCommand = {
   teamId: string;
   accountId: string;
   csvText: string;
+  mapping: CsvTransactionImportMapping;
+};
+
+export type SuggestCsvTransactionImportMappingCommand = {
+  teamId: string;
+  csvText: string;
+  sampleRowLimit?: number;
+};
+
+export type SuggestCsvTransactionImportMappingOptions = {
+  mappingProvider?: CsvTransactionMappingSuggestionProvider;
+};
+
+export type CsvTransactionImportMappingSuggestion = {
+  teamId: string;
+  headers: string[];
+  sampleRows: Record<string, string>[];
+  source: "model" | "heuristic";
+  detectedMapping: CsvTransactionImportMapping;
   mapping: CsvTransactionImportMapping;
 };
 
@@ -899,18 +925,34 @@ export async function listLedgerSummary(
   ]);
   const currency =
     accounts.find((account) => account.id === input.accountId)?.currency ??
+    mostFrequentTransactionCurrency(transactions) ??
     accounts[0]?.currency ??
-    transactions[0]?.money.currency ??
     "USD";
+  const totalTransactions = transactions.filter(
+    (transaction) => transaction.money.currency === currency,
+  );
 
   return {
     teamId: access.teamId,
     accounts,
     counterparties,
     tags,
-    totals: createReportTotals(transactions, currency),
+    totals: createReportTotals(totalTransactions, currency),
     transactionCount: transactions.length,
   };
+}
+
+function mostFrequentTransactionCurrency(transactions: readonly Transaction[]) {
+  const counts = new Map<string, number>();
+
+  for (const transaction of transactions) {
+    counts.set(transaction.money.currency, (counts.get(transaction.money.currency) ?? 0) + 1);
+  }
+
+  return [...counts.entries()].sort(
+    ([leftCurrency, leftCount], [rightCurrency, rightCount]) =>
+      rightCount - leftCount || leftCurrency.localeCompare(rightCurrency),
+  )[0]?.[0];
 }
 
 export async function createLedgerCounterparty(
@@ -2247,6 +2289,77 @@ export async function previewCsvTransactionImport(
   return buildCsvImportPreview(repository, command, account);
 }
 
+export async function suggestCsvTransactionImportMapping(
+  repository: TransactionReviewRepository,
+  context: TransactionReviewContext,
+  command: SuggestCsvTransactionImportMappingCommand,
+  options: SuggestCsvTransactionImportMappingOptions = {},
+): Promise<CsvTransactionImportMappingSuggestion> {
+  assertCommandTeamMatchesContext(context, command.teamId, "CSV import not found");
+
+  await resolveTeamAccess(
+    repository,
+    { ...context, teamId: command.teamId },
+    "transactions.write",
+    "You cannot import transactions for this team",
+  );
+
+  let rows: CsvTransactionImportRow[];
+
+  try {
+    rows = parseCsvTransactionRows(command.csvText);
+  } catch (error) {
+    throw new AppError(
+      "CONFLICT",
+      error instanceof Error ? error.message : "CSV import file is invalid",
+    );
+  }
+
+  const headers = normalizeCsvMappingHeaders(Object.keys(rows[0]?.values ?? {}));
+  const sampleRows = compactCsvMappingSampleRows(
+    rows.slice(0, command.sampleRowLimit ?? 10).map((row) => row.values),
+    headers,
+  );
+  const detectedMapping = {
+    ...detectCsvTransactionColumnMapping(rows),
+    categoryId: null,
+  };
+  const prompt = buildCsvTransactionMappingPrompt({
+    headers,
+    sampleRows,
+    detectedMapping,
+  });
+  let modelMapping: Partial<CsvTransactionImportMapping> | null = null;
+
+  if (options.mappingProvider) {
+    try {
+      modelMapping = normalizeModelCsvMapping(
+        await options.mappingProvider.suggestCsvTransactionMapping({
+          headers,
+          sampleRows,
+          detectedMapping,
+          prompt,
+        }),
+        headers,
+      );
+    } catch {
+      modelMapping = null;
+    }
+  }
+  const mapping = modelMapping
+    ? mergeCsvTransactionImportMapping(detectedMapping, modelMapping)
+    : detectedMapping;
+
+  return {
+    teamId: command.teamId,
+    headers,
+    sampleRows,
+    source: modelMapping ? "model" : "heuristic",
+    detectedMapping,
+    mapping,
+  };
+}
+
 export async function commitCsvTransactionImport(
   repository: TransactionReviewRepository,
   context: TransactionReviewContext,
@@ -2833,6 +2946,61 @@ function csvImportPreviewSummary(
     readyIncomeCount: readyDrafts.filter((draft) => draft.money.amountMinor > 0).length,
     readyExpenseCount: readyDrafts.filter((draft) => draft.money.amountMinor < 0).length,
     readyZeroAmountCount: readyDrafts.filter((draft) => draft.money.amountMinor === 0).length,
+  };
+}
+
+function normalizeModelCsvMapping(
+  mapping: Partial<CsvTransactionImportMapping> | null,
+  headers: readonly string[],
+): Partial<CsvTransactionImportMapping> | null {
+  if (!mapping) {
+    return null;
+  }
+
+  const normalized: Partial<CsvTransactionImportMapping> = {};
+
+  for (const field of [
+    "postedAt",
+    "description",
+    "amount",
+    "debit",
+    "credit",
+    "currency",
+    "balance",
+  ] as const) {
+    const value = mapping[field];
+
+    if (typeof value === "string" && headers.includes(value)) {
+      normalized[field] = value;
+    }
+  }
+
+  if (typeof mapping.invertAmount === "boolean") {
+    normalized.invertAmount = mapping.invertAmount;
+  }
+
+  if (normalized.amount) {
+    normalized.debit = null;
+    normalized.credit = null;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function mergeCsvTransactionImportMapping(
+  detected: CsvTransactionImportMapping,
+  suggested: Partial<CsvTransactionImportMapping>,
+): CsvTransactionImportMapping {
+  return {
+    postedAt: suggested.postedAt ?? detected.postedAt,
+    description: suggested.description ?? detected.description,
+    amount: suggested.amount === undefined ? detected.amount : suggested.amount,
+    debit: suggested.debit === undefined ? detected.debit : suggested.debit,
+    credit: suggested.credit === undefined ? detected.credit : suggested.credit,
+    currency: suggested.currency === undefined ? detected.currency : suggested.currency,
+    balance: suggested.balance === undefined ? detected.balance : suggested.balance,
+    invertAmount: suggested.invertAmount ?? detected.invertAmount ?? false,
+    categoryId: detected.categoryId ?? null,
   };
 }
 

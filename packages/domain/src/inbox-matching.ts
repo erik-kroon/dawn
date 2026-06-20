@@ -1,4 +1,4 @@
-import type { Money } from "./money";
+import { currencyMinorUnitDigits, type Money } from "./money";
 import type { Transaction } from "./transactions";
 
 export type DocumentMatchFields = {
@@ -48,9 +48,11 @@ export type MatchSignal = {
 export type MatchSignals = {
   amount?: MatchSignal;
   currency?: MatchSignal;
+  crossCurrencyAmount?: MatchSignal;
   baseAmount?: MatchSignal;
   baseCurrency?: MatchSignal;
   date?: MatchSignal;
+  direction?: MatchSignal;
   name?: MatchSignal;
   reference?: MatchSignal;
   sender?: MatchSignal;
@@ -75,6 +77,7 @@ export type MatchCalibration = {
   sampleCount: number;
   acceptedCount: number;
   rejectedCount: number;
+  unmatchedCount: number;
   precision: number | null;
   posture: "low_sample" | "high_precision" | "low_precision" | "default";
 };
@@ -122,7 +125,7 @@ export type TeamMatchAlias = {
 export type TeamMatchFeedback = {
   source: string;
   target: string;
-  status: "accepted" | "rejected";
+  status: "accepted" | "rejected" | "unmatched";
   count?: number;
   lastOccurredAt?: string | null;
 };
@@ -144,9 +147,11 @@ export type InboxMatchConfidence = "low" | "medium" | "high";
 export type InboxMatchSignalScores = {
   amount?: number;
   currency?: number;
+  crossCurrencyAmount?: number;
   baseAmount?: number;
   baseCurrency?: number;
   date?: number;
+  direction?: number;
   counterparty?: number;
   name?: number;
   reference?: number;
@@ -202,6 +207,7 @@ export const defaultMatchPolicy: MatchPolicy = {
     sampleCount: 0,
     acceptedCount: 0,
     rejectedCount: 0,
+    unmatchedCount: 0,
     precision: null,
     posture: "low_sample",
   },
@@ -215,7 +221,11 @@ export function calibrateMatchPolicy(memory: InboxMatchMemory = {}): MatchPolicy
   const rejectedCount = feedback
     .filter((entry) => entry.status === "rejected")
     .reduce((total, entry) => total + feedbackCount(entry), 0);
-  const sampleCount = acceptedCount + rejectedCount;
+  const unmatchedCount = feedback
+    .filter((entry) => entry.status === "unmatched")
+    .reduce((total, entry) => total + feedbackCount(entry), 0);
+  const negativeCount = rejectedCount + unmatchedCount;
+  const sampleCount = acceptedCount + negativeCount;
   const precision = sampleCount > 0 ? acceptedCount / sampleCount : null;
   let posture: MatchCalibration["posture"] = "default";
   let suggestedScoreThreshold = defaultMatchPolicy.suggestedScoreThreshold;
@@ -245,6 +255,7 @@ export function calibrateMatchPolicy(memory: InboxMatchMemory = {}): MatchPolicy
       sampleCount,
       acceptedCount,
       rejectedCount,
+      unmatchedCount,
       precision,
       posture,
     },
@@ -302,17 +313,19 @@ export function evaluateAutoMatch(input: AutoMatchEvaluationInput): AutoMatchEva
   const feedbackCount = numericEvidence(feedbackSignal, "feedbackCount");
   const acceptedScore = numericEvidence(feedbackSignal, "acceptedScore");
   const rejectedScore = numericEvidence(feedbackSignal, "rejectedScore");
+  const unmatchedScore = numericEvidence(feedbackSignal, "unmatchedScore");
+  const negativeScore = rejectedScore + unmatchedScore;
 
   if (
     !feedbackSignal?.matched ||
     feedbackSignal.score <= 0 ||
     feedbackCount < minimumFeedbackCount ||
-    acceptedScore <= rejectedScore
+    acceptedScore <= negativeScore
   ) {
     reasons.push("No repeated confirmed team pattern");
   }
 
-  if (rejectedScore > 0.04) {
+  if (negativeScore > 0.04) {
     reasons.push("Negative feedback is too recent or too strong");
   }
 
@@ -439,6 +452,15 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
   const currencyMatches = inputCurrency.length > 0 && transactionCurrency === inputCurrency;
   const currencyMismatches = inputCurrency.length > 0 && transactionCurrency !== inputCurrency;
   const canUseBaseCurrency = currencyMismatches && baseCurrenciesMatch;
+  const crossCurrencyAmountSignal =
+    currencyMismatches && !baseCurrenciesDiffer && !baseCurrenciesMatch
+      ? crossCurrencyAmountMatchSignal({
+          documentAmountMinor: candidate.document.fields.totalAmountMinor,
+          transactionAmountMinor: transaction.money.amountMinor,
+          documentCurrency: inputCurrency,
+          transactionCurrency,
+        })
+      : null;
   const amountSignal = currencyMismatches
     ? null
     : amountMatchSignal({
@@ -449,6 +471,10 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
 
   if (amountSignal) {
     addSignal(signals, explanation, "amount", amountSignal);
+  }
+
+  if (crossCurrencyAmountSignal) {
+    addSignal(signals, explanation, "crossCurrencyAmount", crossCurrencyAmountSignal);
   }
 
   if (currencyMatches) {
@@ -474,6 +500,16 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
         documentCurrency: inputCurrency,
         transactionCurrency,
         baseCurrency: documentBaseMoney.currency,
+      },
+    });
+  } else if (currencyMismatches && crossCurrencyAmountSignal) {
+    addSignal(signals, explanation, "currency", {
+      score: -0.05,
+      matched: false,
+      reason: "Currency differs; cross-currency amount needs review",
+      evidence: {
+        documentCurrency: inputCurrency,
+        transactionCurrency,
       },
     });
   } else if (currencyMismatches) {
@@ -518,6 +554,11 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
   const dateSignal = dateMatchSignal(candidate.document.fields, transaction.postedAt);
   if (dateSignal) {
     addSignal(signals, explanation, "date", dateSignal);
+  }
+
+  const directionSignal = transactionDirectionSignal(candidate.document.fields, transaction);
+  if (directionSignal) {
+    addSignal(signals, explanation, "direction", directionSignal);
   }
 
   const nameScore = nameSimilarityScore(candidate.document.fields.merchantName, [
@@ -574,7 +615,11 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
     });
   }
 
-  if (documentText && searchText) {
+  const hasIndependentTextEvidence = Boolean(
+    signals.name || signals.reference || signals.sender || signals.senderDomain,
+  );
+
+  if (documentText && searchText && (!currencyMismatches || hasIndependentTextEvidence)) {
     const transactionText = normalizeSearchText(transaction.description);
     const counterpartyText = normalizeSearchText(candidate.transaction.counterpartyName ?? "");
 
@@ -632,7 +677,9 @@ export function scoreDocumentTransactionMatch(candidate: MatchCandidate): MatchD
     Object.values(signals).reduce((total, signal) => total + signal.score, 0),
   );
   const decisiveMismatch =
-    signals.baseAmount?.matched === false || signals.baseCurrency?.matched === false;
+    signals.baseAmount?.matched === false ||
+    signals.baseCurrency?.matched === false ||
+    signals.direction?.matched === false;
 
   return {
     document: candidate.document,
@@ -680,9 +727,11 @@ function legacySignalScores(signals: MatchSignals): InboxMatchSignalScores {
   return {
     amount: signals.amount?.score,
     currency: signals.currency?.score,
+    crossCurrencyAmount: signals.crossCurrencyAmount?.score,
     baseAmount: signals.baseAmount?.score,
     baseCurrency: signals.baseCurrency?.score,
     date: signals.date?.score,
+    direction: signals.direction?.score,
     counterparty: signals.name?.score,
     name: signals.name?.score,
     reference: signals.reference?.score,
@@ -756,6 +805,26 @@ function confidenceForScore(score: number, policy: MatchPolicy): InboxMatchConfi
 }
 
 const commonVatRates = [0.05, 0.06, 0.07, 0.075, 0.08, 0.1, 0.12, 0.19, 0.2, 0.21, 0.25];
+const crossCurrencyRatioBounds = {
+  minimum: 0.02,
+  maximum: 200,
+} as const;
+const crossCurrencyReferenceUsdRates: Record<string, number> = {
+  AUD: 0.65,
+  CAD: 0.75,
+  CHF: 1.12,
+  DKK: 0.15,
+  EUR: 1.08,
+  GBP: 1.27,
+  JPY: 0.0065,
+  NOK: 0.095,
+  SEK: 0.096,
+  USD: 1,
+};
+const crossCurrencyReferenceTolerance = {
+  minimumFactor: 0.65,
+  maximumFactor: 1.55,
+} as const;
 const companySuffixes = new Set([
   "ab",
   "ag",
@@ -877,6 +946,81 @@ function amountMatchSignal(input: {
   }
 
   return null;
+}
+
+function crossCurrencyAmountMatchSignal(input: {
+  documentAmountMinor?: number | null;
+  transactionAmountMinor: number;
+  documentCurrency: string;
+  transactionCurrency: string;
+}): MatchSignal | null {
+  if (input.documentAmountMinor == null) {
+    return null;
+  }
+
+  const documentAmount = Math.abs(input.documentAmountMinor);
+  const transactionAmount = Math.abs(input.transactionAmountMinor);
+
+  if (documentAmount === 0 || transactionAmount === 0) {
+    return null;
+  }
+
+  const ratio = transactionAmount / documentAmount;
+
+  if (ratio < crossCurrencyRatioBounds.minimum || ratio > crossCurrencyRatioBounds.maximum) {
+    return null;
+  }
+
+  const expectedRatio = expectedCrossCurrencyMinorRatio(
+    input.documentCurrency,
+    input.transactionCurrency,
+  );
+
+  if (expectedRatio != null) {
+    const ratioFactor = ratio / expectedRatio;
+
+    if (
+      ratioFactor < crossCurrencyReferenceTolerance.minimumFactor ||
+      ratioFactor > crossCurrencyReferenceTolerance.maximumFactor
+    ) {
+      return null;
+    }
+  }
+
+  return {
+    score: 0.2,
+    matched: true,
+    reason: "Cross-currency amount is plausible",
+    evidence: {
+      documentAmountMinor: input.documentAmountMinor,
+      transactionAmountMinor: input.transactionAmountMinor,
+      documentCurrency: input.documentCurrency,
+      transactionCurrency: input.transactionCurrency,
+      ratio,
+      expectedRatio,
+    },
+  };
+}
+
+function expectedCrossCurrencyMinorRatio(documentCurrency: string, transactionCurrency: string) {
+  const documentReferenceRate = crossCurrencyReferenceUsdRates[documentCurrency];
+  const transactionReferenceRate = crossCurrencyReferenceUsdRates[transactionCurrency];
+
+  if (!documentReferenceRate || !transactionReferenceRate) {
+    return null;
+  }
+
+  try {
+    const documentMinorUnitDigits = currencyMinorUnitDigits(documentCurrency);
+    const transactionMinorUnitDigits = currencyMinorUnitDigits(transactionCurrency);
+
+    return (
+      (documentReferenceRate / transactionReferenceRate) *
+      10 ** (transactionMinorUnitDigits - documentMinorUnitDigits)
+    );
+  } catch {
+    return null;
+  }
 }
 
 function baseAmountMatchSignal(input: {
@@ -1023,6 +1167,49 @@ function dateMatchSignal(fields: DocumentMatchFields, transactionDate: string): 
       matched: true,
       reason: "Transaction date is close",
       evidence: { ...evidence, signedDays },
+    };
+  }
+
+  return null;
+}
+
+function transactionDirectionSignal(
+  fields: DocumentMatchFields,
+  transaction: Transaction,
+): MatchSignal | null {
+  if (transaction.money.amountMinor === 0) {
+    return null;
+  }
+
+  const incoming = transaction.money.amountMinor > 0 || transaction.type === "income";
+  const outgoing = transaction.money.amountMinor < 0 || transaction.type === "expense";
+
+  if (
+    (fields.documentType === "receipt" || fields.documentType === "invoice_received") &&
+    incoming
+  ) {
+    return {
+      score: -0.7,
+      matched: false,
+      reason: "Received documents usually match outgoing transactions",
+      evidence: {
+        documentType: fields.documentType,
+        transactionType: transaction.type ?? null,
+        transactionAmountMinor: transaction.money.amountMinor,
+      },
+    };
+  }
+
+  if (fields.documentType === "invoice_sent" && outgoing) {
+    return {
+      score: -0.7,
+      matched: false,
+      reason: "Sent invoices usually match incoming transactions",
+      evidence: {
+        documentType: fields.documentType,
+        transactionType: transaction.type ?? null,
+        transactionAmountMinor: transaction.money.amountMinor,
+      },
     };
   }
 
@@ -1177,7 +1364,11 @@ function teamFeedbackSignal(input: {
   const rejectedScore = matchingFeedback
     .filter((entry) => entry.status === "rejected")
     .reduce((total, entry) => total + feedbackEntryWeight(entry, referenceAt), 0);
-  const score = clampFeedbackScore(acceptedScore - rejectedScore);
+  const unmatchedScore = matchingFeedback
+    .filter((entry) => entry.status === "unmatched")
+    .reduce((total, entry) => total + feedbackEntryWeight(entry, referenceAt), 0);
+  const negativeScore = rejectedScore + unmatchedScore;
+  const score = clampFeedbackScore(acceptedScore - negativeScore);
 
   if (score === 0) {
     return null;
@@ -1190,6 +1381,7 @@ function teamFeedbackSignal(input: {
     evidence: {
       acceptedScore: clampMatchScore(acceptedScore),
       rejectedScore: clampMatchScore(rejectedScore),
+      unmatchedScore: clampMatchScore(unmatchedScore),
       feedbackCount: matchingFeedback.reduce((total, entry) => total + feedbackCount(entry), 0),
     },
   };
@@ -1223,7 +1415,7 @@ function feedbackTargetMatchesSearchText(target: string, searchText: string) {
 function feedbackEntryWeight(entry: TeamMatchFeedback, referenceAt?: string | null) {
   const count = feedbackCount(entry);
   const base = Math.min(entry.status === "accepted" ? 0.08 : 0.12, count * 0.04);
-  return entry.status === "rejected"
+  return entry.status === "rejected" || entry.status === "unmatched"
     ? base * negativeFeedbackDecay(entry.lastOccurredAt, referenceAt)
     : base;
 }
@@ -1314,6 +1506,18 @@ function addCrossCurrencyRiskSignals(
   currencyMismatches: boolean,
 ) {
   if (!currencyMismatches) {
+    return;
+  }
+
+  if (signals.crossCurrencyAmount?.matched) {
+    if (!signals.date && !signals.reference) {
+      addSignal(signals, explanation, "risk", {
+        score: -0.25,
+        matched: true,
+        reason: "Cross-currency amount needs date or reference support",
+      });
+    }
+
     return;
   }
 

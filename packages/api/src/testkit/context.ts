@@ -15,7 +15,7 @@ export const testApiUser: ApiTestUser = {
   email: "owner@example.com",
 };
 
-export function createApiTestContext(user?: ApiTestUser | null) {
+export function createApiTestContext(user?: ApiTestUser | null): Context {
   const session = user
     ? {
         session: {
@@ -42,6 +42,7 @@ export function createApiTestContext(user?: ApiTestUser | null) {
     auth: null,
     requestId: testRequestId,
     session,
+    outboxDispatcher: undefined,
     transactionImportPayloadStorage: undefined as TransactionImportPayloadStorage | undefined,
   } satisfies Context;
 }

@@ -9,7 +9,12 @@ import { useState } from "react";
 import z from "zod";
 
 import { authClient } from "@/lib/auth-client";
-import { googleInboxAuthScopes, googleInboxCallbackUrl } from "@/lib/google-inbox-auth";
+import {
+  clearGoogleInboxConnectIntent,
+  googleInboxAuthScopes,
+  googleInboxCallbackUrl,
+  rememberGoogleInboxConnectIntent,
+} from "@/lib/google-inbox-auth";
 
 import Loader from "./loader";
 
@@ -22,6 +27,7 @@ export default function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp: () 
 
   async function signInWithGoogle() {
     setGooglePending(true);
+    rememberGoogleInboxConnectIntent();
     await authClient.signIn.social(
       {
         provider: "google",
@@ -31,6 +37,7 @@ export default function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp: () 
       {
         onError: (error) => {
           setGooglePending(false);
+          clearGoogleInboxConnectIntent();
           toastManager.add({
             title: error.error.message || error.error.statusText,
             type: "error",

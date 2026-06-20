@@ -27,13 +27,14 @@ function webhookDeliveryJob(eventType: string) {
   };
 }
 
-function transactionMatchJob(transactionId: string) {
+function inboxMatchBatchJob(input: { transactionIds?: string[]; inboxItemIds?: string[] }) {
   return {
-    type: "transaction.match_pending_inbox" as const,
+    type: "inbox.match_bidirectional_batch" as const,
     teamId: "team_1",
-    transactionId,
+    transactionIds: input.transactionIds ?? [],
+    inboxItemIds: input.inboxItemIds ?? [],
     sourceOutboxEventId: "outbox_1",
-    idempotencyKey: `inbox:match-pending:outbox_1:${transactionId}`,
+    idempotencyKey: "inbox:match-batch:outbox_1",
   };
 }
 
@@ -70,7 +71,7 @@ describe("job contracts", () => {
         sourceOutboxEventId: "outbox_1",
         idempotencyKey: "sync:transactions:outbox_1",
       },
-      transactionMatchJob("txn_1"),
+      inboxMatchBatchJob({ transactionIds: ["txn_1"] }),
       {
         type: "automation.run",
         teamId: "team_1",
@@ -182,8 +183,7 @@ describe("job contracts", () => {
         sourceOutboxEventId: "outbox_1",
         idempotencyKey: "sync:transactions:outbox_1",
       },
-      transactionMatchJob("txn_1"),
-      transactionMatchJob("txn_2"),
+      inboxMatchBatchJob({ transactionIds: ["txn_1", "txn_2"] }),
       {
         type: "automation.run",
         teamId: "team_1",
@@ -195,7 +195,7 @@ describe("job contracts", () => {
     ]);
   });
 
-  test("maps transaction import outbox events to pending inbox matching jobs", () => {
+  test("maps transaction import outbox events to bidirectional inbox matching jobs", () => {
     expect(
       outboxEventToQueueMessages({
         ...event,
@@ -221,8 +221,7 @@ describe("job contracts", () => {
         sourceOutboxEventId: "outbox_1",
         idempotencyKey: "sync:transactions:outbox_1",
       },
-      transactionMatchJob("txn_1"),
-      transactionMatchJob("txn_2"),
+      inboxMatchBatchJob({ transactionIds: ["txn_1", "txn_2"] }),
       {
         type: "automation.run",
         teamId: "team_1",
@@ -384,7 +383,50 @@ describe("job contracts", () => {
     ]);
   });
 
-  test("maps extracted document outbox events to inbox matching jobs", () => {
+  test("maps document extraction retry requests to extraction jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "document_extraction.retry_requested",
+        payload: {
+          documentId: "doc_1",
+          versionId: "ver_1",
+          inboxItemId: "inbox_1",
+          actorId: "user_1",
+        },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "document_extraction.retry_requested",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "document.extract",
+        teamId: "team_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        inboxItemId: "inbox_1",
+        actorId: "user_1",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "document:extract:outbox_1",
+      },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "document_extraction.retry_requested",
+        idempotencyKey: "automation:run:outbox_1",
+      },
+      webhookDeliveryJob("document_extraction.retry_requested"),
+    ]);
+  });
+
+  test("maps extracted document outbox events to bidirectional inbox matching jobs", () => {
     expect(
       outboxEventToQueueMessages({
         ...event,
@@ -407,11 +449,12 @@ describe("job contracts", () => {
         idempotencyKey: "outbox:outbox_1:attempt:1",
       },
       {
-        type: "inbox.match_suggestions",
+        type: "inbox.match_bidirectional_batch",
         teamId: "team_1",
-        inboxItemId: "inbox_1",
+        transactionIds: [],
+        inboxItemIds: ["inbox_1"],
         sourceOutboxEventId: "outbox_1",
-        idempotencyKey: "inbox:match-suggestions:outbox_1:inbox_1",
+        idempotencyKey: "inbox:match-batch:outbox_1",
       },
       {
         type: "automation.run",
@@ -637,6 +680,7 @@ describe("job contracts", () => {
       "outbox.dispatch": record("outbox.dispatch"),
       "sync.invalidate": record("sync.invalidate"),
       "document.extract": record("document.extract"),
+      "inbox.match_bidirectional_batch": record("inbox.match_bidirectional_batch"),
       "inbox.match_suggestions": record("inbox.match_suggestions"),
       "inbox.provider.sync": record("inbox.provider.sync"),
       "transaction_import.commit": record("transaction_import.commit"),

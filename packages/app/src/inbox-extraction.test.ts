@@ -3,14 +3,18 @@ import { describe, expect, test } from "bun:test";
 import {
   correctDocumentExtraction,
   createDeterministicDocumentExtractor,
+  requestDocumentExtractionRetry,
   runDocumentExtraction,
   runStoredDocumentExtraction,
   type BusinessDocument,
   type BusinessDocumentVersion,
   type DawnRepository,
   type DocumentExtraction,
+  type DocumentExtractionAttempt,
   type DocumentExtractionConfidence,
   type DocumentExtractionFields,
+  type DocumentExtractionSource,
+  type DocumentIntelligenceProvider,
   type IdempotencyResult,
   type InboxItem,
   type InboxSource,
@@ -21,6 +25,7 @@ class MemoryInboxRepository {
   auditEvents: unknown[] = [];
   documents = new Map<string, BusinessDocument>();
   documentVersions = new Map<string, BusinessDocumentVersion>();
+  extractionAttempts: DocumentExtractionAttempt[] = [];
   extractions = new Map<string, DocumentExtraction>();
   inboxItems = new Map<string, InboxItem>();
   inboxSources = new Map<string, InboxSource>();
@@ -131,7 +136,7 @@ class MemoryInboxRepository {
     inboxItemId: string;
     documentId: string;
     documentVersionId: string;
-    source: "local_deterministic";
+    source: Exclude<DocumentExtractionSource, "user_correction">;
     fields: DocumentExtractionFields;
     confidence: DocumentExtractionConfidence;
     rawText?: string | null;
@@ -169,6 +174,39 @@ class MemoryInboxRepository {
     this.extractions.set(extraction.id, extraction);
     this.inboxItems.set(updatedItem.id, updatedItem);
     return { inboxItem: updatedItem, extraction };
+  }
+
+  async createDocumentExtractionAttempt(
+    input: Omit<DocumentExtractionAttempt, "id" | "createdAt"> & { attemptId: string },
+  ) {
+    const attempt: DocumentExtractionAttempt = {
+      id: input.attemptId,
+      teamId: input.teamId,
+      inboxItemId: input.inboxItemId,
+      documentId: input.documentId,
+      documentVersionId: input.documentVersionId,
+      extractionId: input.extractionId,
+      attemptNumber: input.attemptNumber,
+      source: input.source,
+      provider: input.provider,
+      model: input.model,
+      status: input.status,
+      durationMs: input.durationMs,
+      qualityScore: input.qualityScore,
+      errorClass: input.errorClass,
+      errorMessage: input.errorMessage,
+      rawTextPresent: input.rawTextPresent,
+      metadata: input.metadata,
+      createdAt: "2026-06-15T10:01:00.000Z",
+    };
+    this.extractionAttempts.push(attempt);
+    return attempt;
+  }
+
+  async listDocumentExtractionAttemptsForInboxItem(teamId: string, inboxItemId: string) {
+    return this.extractionAttempts.filter(
+      (attempt) => attempt.teamId === teamId && attempt.inboxItemId === inboxItemId,
+    );
   }
 
   async createCorrectedDocumentExtraction(input: {
@@ -221,8 +259,30 @@ class MemoryInboxRepository {
 
     const updated = {
       ...item,
+      status: "needs_review" as const,
       extractionStatus: "failed" as const,
       updatedAt: input.failedAt.toISOString(),
+    };
+    this.inboxItems.set(updated.id, updated);
+    return updated;
+  }
+
+  async markDocumentExtractionPending(input: {
+    teamId: string;
+    inboxItemId: string;
+    requestedAt: Date;
+  }) {
+    const item = this.inboxItems.get(input.inboxItemId);
+
+    if (!item || item.teamId !== input.teamId) {
+      throw new Error("Inbox item not found");
+    }
+
+    const updated = {
+      ...item,
+      status: "pending_extraction" as const,
+      extractionStatus: "pending" as const,
+      updatedAt: input.requestedAt.toISOString(),
     };
     this.inboxItems.set(updated.id, updated);
     return updated;
@@ -267,16 +327,41 @@ describe("inbox extraction use cases", () => {
   test("runs stored document extraction through an app-owned storage adapter", async () => {
     const repository = seededRepository();
     const reads: string[] = [];
+    const providerInputs: Array<{
+      fileName: string;
+      contentType: string;
+      byteSize: number;
+      bodyByteLength: number;
+    }> = [];
+    const body = new TextEncoder().encode("Acme Supplies\nReceipt R-100\nTotal USD 42.50").buffer;
 
     const result = await runStoredDocumentExtraction(
       repository as unknown as DawnRepository,
       {
-        async readText(input) {
+        async readDocument(input) {
           reads.push(input.objectKey);
-          return "Acme Supplies\nReceipt R-100\nTotal USD 42.50";
+          return {
+            body,
+            contentType: "text/plain",
+            byteSize: body.byteLength,
+          };
         },
       },
-      createDeterministicDocumentExtractor(),
+      {
+        source: "local_deterministic",
+        async extract(input) {
+          providerInputs.push({
+            fileName: input.fileName,
+            contentType: input.contentType,
+            byteSize: input.byteSize,
+            bodyByteLength: input.body?.byteLength ?? 0,
+          });
+          return createDeterministicDocumentExtractor().extract({
+            ...input,
+            rawText: new TextDecoder("utf-8").decode(input.body ?? new ArrayBuffer(0)),
+          });
+        },
+      },
       { actor: { id: "user_1", type: "user" }, requestId: "request_1", teamId: "team_1" },
       {
         teamId: "team_1",
@@ -289,11 +374,16 @@ describe("inbox extraction use cases", () => {
     const replay = await runStoredDocumentExtraction(
       repository as unknown as DawnRepository,
       {
-        async readText() {
+        async readDocument() {
           throw new Error("storage should not be read on replay");
         },
       },
-      createDeterministicDocumentExtractor(),
+      {
+        source: "local_deterministic",
+        async extract() {
+          throw new Error("provider should not run on replay");
+        },
+      },
       { actor: { id: "user_1", type: "user" }, requestId: "request_2", teamId: "team_1" },
       {
         teamId: "team_1",
@@ -305,6 +395,14 @@ describe("inbox extraction use cases", () => {
     );
 
     expect(reads).toEqual(["teams/team_1/documents/doc_1/versions/ver_1/receipt.txt"]);
+    expect(providerInputs).toEqual([
+      {
+        fileName: "receipt.txt",
+        contentType: "text/plain",
+        byteSize: body.byteLength,
+        bodyByteLength: body.byteLength,
+      },
+    ]);
     expect(result.extraction.fields).toMatchObject({
       merchantName: "Acme Supplies",
       totalAmountMinor: 4250,
@@ -312,6 +410,379 @@ describe("inbox extraction use cases", () => {
     });
     expect(replay.replayed).toBe(true);
     expect(repository.auditEvents).toHaveLength(1);
+  });
+
+  test("marks stored document extraction failed when the stored object is unavailable", async () => {
+    const repository = seededRepository();
+
+    await expect(
+      runStoredDocumentExtraction(
+        repository as unknown as DawnRepository,
+        {
+          async readDocument() {
+            return null;
+          },
+        },
+        createDeterministicDocumentExtractor(),
+        { actor: { id: "user_1", type: "user" }, requestId: "request_1", teamId: "team_1" },
+        {
+          teamId: "team_1",
+          inboxItemId: "inbox_1",
+          documentId: "doc_1",
+          versionId: "ver_1",
+          idempotencyKey: "extract_1",
+        },
+      ),
+    ).rejects.toThrow("Document object not found");
+    expect(repository.inboxItems.get("inbox_1")).toMatchObject({
+      status: "needs_review",
+      extractionStatus: "failed",
+    });
+    expect(repository.auditEvents).toEqual([]);
+    expect(repository.outboxEvents).toEqual([]);
+  });
+
+  test("queues a failed extraction retry and marks the inbox item pending", async () => {
+    const repository = seededRepository();
+
+    await repository.markDocumentExtractionFailed({
+      teamId: "team_1",
+      inboxItemId: "inbox_1",
+      error: "OCR provider timed out",
+      failedAt: new Date("2026-06-15T10:05:00.000Z"),
+    });
+
+    const result = await requestDocumentExtractionRetry(
+      repository as unknown as DawnRepository,
+      { actor: { id: "user_1", type: "user" }, requestId: "request_retry", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        idempotencyKey: "retry_extract_1",
+      },
+    );
+
+    expect(result.inboxItem).toMatchObject({
+      id: "inbox_1",
+      status: "pending_extraction",
+      extractionStatus: "pending",
+    });
+    expect(repository.auditEvents.at(-1)).toMatchObject({
+      action: "document_extraction.retry_requested",
+      metadata: {
+        documentId: "doc_1",
+        versionId: "ver_1",
+      },
+    });
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "document_extraction.retry_requested",
+      payload: {
+        documentId: "doc_1",
+        versionId: "ver_1",
+        inboxItemId: "inbox_1",
+        actorId: "user_1",
+      },
+    });
+  });
+
+  test("repairs missing critical receipt fields once before persistence", async () => {
+    const repository = seededRepository();
+    const repairInputs: unknown[] = [];
+    const provider: DocumentIntelligenceProvider = {
+      source: "tanstack_ai",
+      async extract() {
+        return {
+          fields: {
+            documentType: "receipt",
+            merchantName: "Acme Supplies",
+            issuedAt: "2026-06-14",
+            totalAmountMinor: 4250,
+          },
+          confidence: {
+            merchantName: 0.92,
+            issuedAt: 0.9,
+            totalAmountMinor: 0.93,
+          },
+          rawText: "Acme Supplies\nDate 2026-06-14\nTotal 42.50",
+        };
+      },
+      async repair(input) {
+        repairInputs.push(input);
+        return {
+          fields: {
+            currency: "usd",
+          },
+          confidence: {
+            currency: 0.88,
+          },
+        };
+      },
+    };
+
+    const result = await runDocumentExtraction(
+      repository as unknown as DawnRepository,
+      provider,
+      { actor: { id: "user_1", type: "user" }, requestId: "request_1", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        rawText: "Acme Supplies\nDate 2026-06-14\nTotal 42.50",
+        idempotencyKey: "extract_repair_currency",
+      },
+    );
+
+    expect(repairInputs).toHaveLength(1);
+    expect(repairInputs[0]).toMatchObject({
+      missingFields: ["currency"],
+    });
+    expect(result.extraction.fields).toMatchObject({
+      documentType: "receipt",
+      merchantName: "Acme Supplies",
+      issuedAt: "2026-06-14",
+      totalAmountMinor: 4250,
+      currency: "USD",
+    });
+    expect(result.extraction.confidence.overall).toBeGreaterThanOrEqual(0.8);
+  });
+
+  test("validates bad dates currency and amounts before persistence", async () => {
+    const repository = seededRepository();
+    const provider: DocumentIntelligenceProvider = {
+      source: "tanstack_ai",
+      async extract() {
+        return {
+          fields: {
+            documentType: "receipt",
+            merchantName: "Acme Supplies",
+            issuedAt: "06/14/2026",
+            totalAmountMinor: -4250,
+            currency: "US dollars",
+            taxAmountMinor: 5000,
+          },
+          confidence: {
+            merchantName: 0.9,
+            issuedAt: 0.9,
+            totalAmountMinor: 0.9,
+            currency: 0.9,
+            taxAmountMinor: 0.9,
+          },
+          rawText: "bad receipt",
+        };
+      },
+    };
+
+    const result = await runDocumentExtraction(
+      repository as unknown as DawnRepository,
+      provider,
+      { actor: { id: "user_1", type: "user" }, requestId: "request_1", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        rawText: "bad receipt",
+        idempotencyKey: "extract_invalid_fields",
+      },
+    );
+
+    expect(result.extraction.fields).toMatchObject({
+      documentType: "receipt",
+      merchantName: "Acme Supplies",
+      issuedAt: null,
+      totalAmountMinor: null,
+      currency: null,
+      taxAmountMinor: null,
+    });
+    expect(result.extraction.confidence).not.toHaveProperty("issuedAt");
+    expect(result.extraction.confidence).not.toHaveProperty("totalAmountMinor");
+    expect(result.extraction.confidence.overall).toBeLessThan(0.75);
+  });
+
+  test("low field confidence lowers overall extraction confidence", async () => {
+    const repository = seededRepository();
+    const provider: DocumentIntelligenceProvider = {
+      source: "tanstack_ai",
+      async extract() {
+        return {
+          fields: {
+            documentType: "receipt",
+            merchantName: "Acme Supplies",
+            issuedAt: "2026-06-14",
+            totalAmountMinor: 4250,
+            currency: "USD",
+          },
+          confidence: {
+            merchantName: 0.92,
+            issuedAt: 0.9,
+            totalAmountMinor: 0.2,
+            currency: 0.93,
+          },
+          rawText: "Acme Supplies\nDate 2026-06-14\nTotal USD 42.50 or 24.50",
+        };
+      },
+    };
+
+    const result = await runDocumentExtraction(
+      repository as unknown as DawnRepository,
+      provider,
+      { actor: { id: "user_1", type: "user" }, requestId: "request_1", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        rawText: "Acme Supplies\nDate 2026-06-14\nTotal USD 42.50 or 24.50",
+        idempotencyKey: "extract_ambiguous_total",
+      },
+    );
+
+    expect(result.extraction.confidence).toMatchObject({
+      totalAmountMinor: 0.2,
+    });
+    expect(result.extraction.confidence.overall).toBeLessThan(0.75);
+  });
+
+  test("records redacted provider attempts without losing final extraction", async () => {
+    const repository = seededRepository();
+    const provider: DocumentIntelligenceProvider = {
+      source: "tanstack_ai",
+      async extract() {
+        return {
+          fields: {
+            documentType: "receipt",
+            merchantName: "Acme Supplies",
+            issuedAt: "2026-06-14",
+            totalAmountMinor: 4250,
+            currency: "USD",
+          },
+          confidence: {
+            merchantName: 0.92,
+            issuedAt: 0.9,
+            totalAmountMinor: 0.93,
+            currency: 0.88,
+          },
+          rawText: "Acme Supplies\nTotal USD 42.50",
+          metadata: {
+            provider: "gemini",
+            model: "gemini-3.1-pro-preview",
+            attempts: [
+              {
+                attempt: 1,
+                provider: "gemini",
+                model: "gemini-3.1-pro-preview",
+                status: "completed",
+                durationMs: 42,
+                metadata: {
+                  promptTokens: 120,
+                  rawPayload: { fullText: "sensitive" },
+                  apiKey: "secret",
+                },
+              },
+            ],
+          },
+        };
+      },
+    };
+
+    const result = await runDocumentExtraction(
+      repository as unknown as DawnRepository,
+      provider,
+      { actor: { id: "user_1", type: "user" }, requestId: "request_1", teamId: "team_1" },
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        documentId: "doc_1",
+        versionId: "ver_1",
+        rawText: "Acme Supplies\nTotal USD 42.50",
+        idempotencyKey: "extract_attempt_success",
+      },
+    );
+
+    expect(result.extraction.fields).toMatchObject({
+      merchantName: "Acme Supplies",
+      totalAmountMinor: 4250,
+    });
+    expect(repository.extractionAttempts).toEqual([
+      expect.objectContaining({
+        extractionId: result.extraction.id,
+        attemptNumber: 1,
+        source: "tanstack_ai",
+        provider: "gemini",
+        model: "gemini-3.1-pro-preview",
+        status: "completed",
+        durationMs: 42,
+        qualityScore: expect.any(Number),
+        rawTextPresent: true,
+        metadata: { promptTokens: 120 },
+      }),
+    ]);
+  });
+
+  test("records failed cascade attempts before marking extraction failed", async () => {
+    const repository = seededRepository();
+    const error = Object.assign(
+      new Error("Document extraction failed for every configured model"),
+      {
+        attempts: [
+          {
+            attempt: 1,
+            provider: "gemini",
+            model: "gemini-3.1-pro-preview",
+            status: "failed",
+            durationMs: 50,
+            errorClass: "DocumentExtractionTimeoutError",
+            errorMessage: "Document extraction timed out after 50ms",
+            metadata: {
+              rawPayload: { providerBody: "sensitive" },
+              secret: "redacted",
+              retryable: true,
+            },
+          },
+        ],
+      },
+    );
+    const provider: DocumentIntelligenceProvider = {
+      source: "tanstack_ai",
+      async extract() {
+        throw error;
+      },
+    };
+
+    await expect(
+      runDocumentExtraction(
+        repository as unknown as DawnRepository,
+        provider,
+        { actor: { id: "user_1", type: "user" }, requestId: "request_1", teamId: "team_1" },
+        {
+          teamId: "team_1",
+          inboxItemId: "inbox_1",
+          documentId: "doc_1",
+          versionId: "ver_1",
+          rawText: "Acme Supplies\nTotal USD 42.50",
+          idempotencyKey: "extract_attempt_failure",
+        },
+      ),
+    ).rejects.toThrow("Document extraction failed for every configured model");
+
+    expect(repository.inboxItems.get("inbox_1")).toMatchObject({
+      status: "needs_review",
+      extractionStatus: "failed",
+    });
+    expect(repository.extractionAttempts).toEqual([
+      expect.objectContaining({
+        extractionId: null,
+        attemptNumber: 1,
+        source: "tanstack_ai",
+        provider: "gemini",
+        model: "gemini-3.1-pro-preview",
+        status: "failed",
+        errorClass: "DocumentExtractionTimeoutError",
+        errorMessage: "Document extraction timed out after 50ms",
+        metadata: { retryable: true },
+      }),
+    ]);
   });
 
   test("persists user corrections as a new extraction version", async () => {

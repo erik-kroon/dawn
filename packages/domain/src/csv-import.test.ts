@@ -159,6 +159,66 @@ describe("csv transaction import", () => {
     expect(draft.type).toBe("expense");
   });
 
+  test("infers split inflow and outflow columns from row values without header aliases", () => {
+    const rows = parseCsvTransactionRows(
+      [
+        "A,B,C,D,E,F,G",
+        "2026-06-16,2026-06-16,ERIK KROON C,Transfer,360.00,,130.00",
+        "2026-06-16,2026-06-16,AVI OVERDRAFT,Other,,-100.00,-230.00",
+        "2026-06-02,2026-06-02,100003843496,Other,,-130.00,-130.00",
+        "2026-05-12,2026-05-12,ERIK KROON C,Transfer,127.00,,0.00",
+      ].join("\n"),
+    );
+
+    const mapping = detectCsvTransactionColumnMapping(rows);
+
+    expect(mapping).toMatchObject({
+      postedAt: "A",
+      description: "C",
+      amount: null,
+      credit: "E",
+      debit: "F",
+      balance: "G",
+    });
+
+    expect(
+      rows.map((row) =>
+        csvRowToLedgerDraft({
+          teamId: "team_1",
+          accountId: "acct_1",
+          accountCurrency: "SEK",
+          mapping,
+          row,
+        }),
+      ),
+    ).toMatchObject([
+      { money: { amountMinor: 36000, currency: "SEK" }, type: "income" },
+      { money: { amountMinor: -10000, currency: "SEK" }, type: "expense" },
+      { money: { amountMinor: -13000, currency: "SEK" }, type: "expense" },
+      { money: { amountMinor: 12700, currency: "SEK" }, type: "income" },
+    ]);
+  });
+
+  test("infers a signed amount column and separates a running balance", () => {
+    const rows = parseCsvTransactionRows(
+      [
+        "A,B,C,D",
+        "2026-06-16,ERIK KROON C,360.00,130.00",
+        "2026-06-16,AVI OVERDRAFT,-100.00,-230.00",
+        "2026-06-02,100003843496,-130.00,-130.00",
+      ].join("\n"),
+    );
+
+    expect(detectCsvTransactionColumnMapping(rows)).toMatchObject({
+      postedAt: "A",
+      description: "B",
+      amount: "C",
+      balance: "D",
+      debit: null,
+      credit: null,
+    });
+  });
+
   test("rejects invalid CSV rows with row-level errors", () => {
     const row = parseCsvTransactionRows("Date,Description,Amount\nnot-a-date,Figma,-12.00\n")[0];
 

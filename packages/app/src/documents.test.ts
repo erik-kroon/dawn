@@ -324,6 +324,7 @@ class MemoryDocumentRepository {
 
     const updated = {
       ...inboxItem,
+      status: "needs_review" as const,
       extractionStatus: "failed" as const,
       updatedAt: input.failedAt.toISOString(),
     };

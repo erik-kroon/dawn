@@ -1,5 +1,7 @@
 import { auth } from "@dawn/auth";
 import {
+  type DispatchOutboxCommand,
+  type DispatchOutboxResult,
   resolveSessionAppRequest,
   type ResolvedAppRequest,
   type TransactionImportPayloadStorage,
@@ -9,6 +11,8 @@ import type { Context as HonoContext } from "hono";
 export type CreateContextOptions = {
   context: HonoContext;
 };
+
+export type OutboxDispatcher = (command?: DispatchOutboxCommand) => Promise<DispatchOutboxResult>;
 
 export async function createContext({ context }: CreateContextOptions) {
   const session = await auth.api.getSession({
@@ -21,6 +25,7 @@ export async function createContext({ context }: CreateContextOptions) {
       context.res.headers.get("x-request-id") ??
       crypto.randomUUID(),
     session,
+    outboxDispatcher: undefined as OutboxDispatcher | undefined,
     transactionImportPayloadStorage: undefined as TransactionImportPayloadStorage | undefined,
   };
 }

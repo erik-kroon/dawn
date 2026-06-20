@@ -232,11 +232,12 @@
   }
 
   html {
-    @apply font-sans;
+    @apply bg-background font-sans text-foreground;
   }
 
   body {
     @apply bg-background font-sans text-foreground antialiased;
+    min-height: 100svh;
     position: relative;
   }
 

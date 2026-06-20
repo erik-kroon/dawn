@@ -36,6 +36,7 @@ import {
   createWebhookSubscription,
   disableIntegration,
   disconnectBankConnection,
+  dismissInboxItem,
   createEmailInboxAuthorizationUrl,
   generateInboxMatchSuggestions,
   getAssistantConversation,
@@ -63,12 +64,14 @@ import {
   listTransactionSyncCollection,
   listTransactionReviewWorkspace,
   previewCsvTransactionImport,
+  suggestCsvTransactionImportMapping,
   previewOAuthConsent,
   previewInvoicePdf,
   rejectInboxMatch,
   rejectAssistantAction,
   recordInvoicePayment,
   requestEmailInboxSync,
+  requestDocumentExtractionRetry,
   requestAccountantPacketExport,
   reviewTransaction,
   revokeAccountantPacketExport,
@@ -97,6 +100,7 @@ import {
   updateDraftInvoice,
   updateTeamMemberRole,
 } from "@dawn/app";
+import type { CsvTransactionMappingSuggestionProvider } from "@dawn/ai";
 import { RateLimitError } from "@dawn/app/rate-limit";
 import { getGoogleAuthAccountTokensForUser, type GoogleAuthAccountTokens } from "@dawn/auth";
 import { DrizzleDawnRepository } from "@dawn/db/dawn-repository";
@@ -119,7 +123,7 @@ import {
 import { z } from "zod";
 
 import { protectedProcedure, publicProcedure } from "../index";
-import { appRequestFromSession } from "../context";
+import { appRequestFromSession, type Context } from "../context";
 import { createDocumentUrlSigner } from "../document-url";
 import { createDefaultEmailInboxConnectors } from "../email-inbox-connectors";
 import { enforceAssistantRateLimit } from "../rate-limit";
@@ -135,6 +139,7 @@ export type AppRouterDependencies = {
   accountantPacketAttachmentResolver?: AccountantPacketAttachmentResolver;
   accountantPacketEmailDeliveryProvider?: AccountantPacketEmailDeliveryProvider;
   transactionImportPayloadStorage?: TransactionImportPayloadStorage;
+  csvTransactionMappingProvider?: CsvTransactionMappingSuggestionProvider;
   invoicePdfRenderer: InvoicePdfRenderer;
   invoiceEmailDeliveryProvider: InvoiceEmailDeliveryProvider;
 };
@@ -528,9 +533,22 @@ const correctDocumentExtractionInput = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+const retryDocumentExtractionInput = z.object({
+  teamId: z.string().min(1),
+  inboxItemId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const dismissInboxItemInput = z.object({
+  teamId: z.string().min(1),
+  inboxItemId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 const generateInboxMatchSuggestionsInput = z.object({
   teamId: z.string().min(1),
   inboxItemId: z.string().min(1),
+  limit: z.number().int().min(1).max(100).optional(),
 });
 
 const acceptInboxMatchInput = z.object({
@@ -710,6 +728,7 @@ const csvTransactionImportMappingInput = z
     debit: z.string().min(1).nullable().optional(),
     credit: z.string().min(1).nullable().optional(),
     currency: z.string().min(1).nullable().optional(),
+    balance: z.string().min(1).nullable().optional(),
     invertAmount: z.boolean().optional(),
     categoryId: z.string().min(1).nullable().optional(),
   })
@@ -722,6 +741,12 @@ const previewCsvTransactionImportInput = z.object({
   accountId: z.string().min(1),
   csvText: z.string().min(1),
   mapping: csvTransactionImportMappingInput,
+});
+
+const suggestCsvTransactionImportMappingInput = z.object({
+  teamId: z.string().min(1),
+  csvText: z.string().min(1),
+  sampleRowLimit: z.number().int().min(1).max(20).optional(),
 });
 
 const commitCsvTransactionImportInput = previewCsvTransactionImportInput.extend({
@@ -831,6 +856,14 @@ function googleAuthTokensToEmailInboxBundle(
   };
 }
 
+async function dispatchEmailInboxOutbox(context: Pick<Context, "outboxDispatcher">) {
+  if (!context.outboxDispatcher) {
+    return null;
+  }
+
+  return await context.outboxDispatcher({ limit: 25 });
+}
+
 export function createAppRouter(dependencies: AppRouterDependencies = createDefaultDependencies()) {
   const {
     bankingProviders,
@@ -848,6 +881,7 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     accountantPacketAttachmentResolver,
     accountantPacketEmailDeliveryProvider,
     transactionImportPayloadStorage,
+    csvTransactionMappingProvider,
   } = dependencies;
   const bankingProviderRegistry = createBankingProviderRegistry(bankingProviders);
 
@@ -1694,8 +1728,9 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 idempotencyKey: `${input.idempotencyKey}:initial-sync`,
               },
             );
+            const outboxDispatch = await dispatchEmailInboxOutbox(context);
 
-            return { ...connected, syncRequest };
+            return { ...connected, syncRequest, outboxDispatch };
           } catch (error) {
             mapAppError(error);
           }
@@ -1704,11 +1739,14 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .input(requestEmailInboxSyncInput)
         .handler(async ({ context, input }) => {
           try {
-            return await requestEmailInboxSync(
+            const syncRequest = await requestEmailInboxSync(
               dawnRepository,
               appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
+            const outboxDispatch = await dispatchEmailInboxOutbox(context);
+
+            return { ...syncRequest, outboxDispatch };
           } catch (error) {
             mapAppError(error);
           }
@@ -2039,6 +2077,32 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             mapAppError(error);
           }
         }),
+      retryExtraction: protectedProcedure
+        .input(retryDocumentExtractionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await requestDocumentExtractionRetry(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      dismissItem: protectedProcedure
+        .input(dismissInboxItemInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await dismissInboxItem(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
       suggestMatches: protectedProcedure
         .input(generateInboxMatchSuggestionsInput)
         .handler(async ({ context, input }) => {
@@ -2080,6 +2144,20 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         }),
     },
     csvImport: {
+      suggestMapping: protectedProcedure
+        .input(suggestCsvTransactionImportMappingInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await suggestCsvTransactionImportMapping(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+              { mappingProvider: csvTransactionMappingProvider },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
       preview: protectedProcedure
         .input(previewCsvTransactionImportInput)
         .handler(async ({ context, input }) => {

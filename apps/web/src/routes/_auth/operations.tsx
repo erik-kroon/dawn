@@ -61,6 +61,7 @@ type CsvImportMappingState = {
   debit: string;
   credit: string;
   currency: string;
+  balance: string;
   invertAmount: boolean;
   categoryId: string;
 };
@@ -85,6 +86,7 @@ type CsvImportPreviewData = {
     debit?: string | null;
     credit?: string | null;
     currency?: string | null;
+    balance?: string | null;
     invertAmount?: boolean | null;
   };
   rows: {
@@ -143,6 +145,7 @@ function OperationsRoute() {
     debit: "",
     credit: "",
     currency: "",
+    balance: "",
     invertAmount: false,
     categoryId: "",
   });
@@ -422,6 +425,7 @@ function OperationsRoute() {
       },
     }),
   );
+  const csvSuggestMappingMutation = useMutation(orpc.csvImport.suggestMapping.mutationOptions());
   const csvPreviewMutation = useMutation(orpc.csvImport.preview.mutationOptions());
   const csvCommitMutation = useMutation(
     orpc.csvImport.commit.mutationOptions({
@@ -512,6 +516,9 @@ function OperationsRoute() {
   );
   const accountantPacketAuditEvents =
     packetAccessAudit.data?.auditEvents ?? operations.data?.auditEvents ?? [];
+  const selectedCsvAccount = ledgerSummary.data?.accounts.find(
+    (account) => account.id === csvAccountId,
+  );
 
   return (
     <div className="mx-auto grid w-full max-w-[1728px] gap-8 py-8">
@@ -1379,8 +1386,16 @@ function OperationsRoute() {
                     setCsvFileName(file.name);
                     setCsvText(text);
                     setCsvParseError(null);
+                    csvSuggestMappingMutation.reset();
+                    csvPreviewMutation.reset();
+                    csvCommitMutation.reset();
+                    setCsvPreviewFingerprint(null);
+                    setCsvCommitAcknowledgementFingerprint(null);
+                    let parsedRowCount = 0;
+
                     try {
                       const rows = parseCsvTransactionRows(text);
+                      parsedRowCount = rows.length;
                       const detected = mappingStateFromDetected(
                         detectCsvTransactionColumnMapping(rows),
                       );
@@ -1393,11 +1408,28 @@ function OperationsRoute() {
                       setCsvParseError(
                         error instanceof Error ? error.message : "CSV import file is invalid",
                       );
+                      csvPreviewMutation.reset();
+                      csvCommitMutation.reset();
+                      setCsvPreviewFingerprint(null);
+                      setCsvCommitAcknowledgementFingerprint(null);
+                      return;
                     }
-                    csvPreviewMutation.reset();
-                    csvCommitMutation.reset();
-                    setCsvPreviewFingerprint(null);
-                    setCsvCommitAcknowledgementFingerprint(null);
+
+                    if (currentTeamId && parsedRowCount > 0) {
+                      try {
+                        const suggestion = await csvSuggestMappingMutation.mutateAsync({
+                          teamId: currentTeamId,
+                          csvText: text,
+                        });
+
+                        setCsvMapping((mapping) => ({
+                          ...mappingStateFromDetected(suggestion.mapping),
+                          categoryId: mapping.categoryId,
+                        }));
+                      } catch {
+                        // The local deterministic mapping remains available if model-backed mapping fails.
+                      }
+                    }
                   }}
                   type="file"
                 />
@@ -1428,6 +1460,12 @@ function OperationsRoute() {
                     [csvMapping.debit, csvMapping.credit].filter(Boolean).join(" / ") ||
                     "not mapped"}
                 </span>
+                <span>
+                  CSV currency:{" "}
+                  {csvMapping.currency ||
+                    `account currency ${selectedCsvAccount?.currency ?? "selected account"}`}
+                </span>
+                <span>Balance: {csvMapping.balance || "not mapped"}</span>
               </div>
             ) : null}
             <div className="grid gap-2 md:grid-cols-3">
@@ -1467,9 +1505,15 @@ function OperationsRoute() {
               />
               <ColumnSelect
                 headers={csvHeaders}
-                label="Currency optional"
+                label="CSV currency optional"
                 onChange={(value) => setCsvMapping((mapping) => ({ ...mapping, currency: value }))}
                 value={csvMapping.currency}
+              />
+              <ColumnSelect
+                headers={csvHeaders}
+                label="Balance optional"
+                onChange={(value) => setCsvMapping((mapping) => ({ ...mapping, balance: value }))}
+                value={csvMapping.balance}
               />
               <select
                 aria-label="CSV category"
@@ -1564,7 +1608,10 @@ function OperationsRoute() {
             ) : null}
             {csvPreviewMutation.data && hasCurrentCsvPreview ? (
               <>
-                <CsvImportPreview preview={csvPreviewMutation.data} />
+                <CsvImportPreview
+                  accountCurrency={selectedCsvAccount?.currency}
+                  preview={csvPreviewMutation.data}
+                />
                 <label className="flex items-start gap-3 border border-border bg-card/30 p-3 text-sm">
                   <Checkbox
                     aria-label="Acknowledge CSV preview checks"
@@ -2021,6 +2068,7 @@ function normalizedCsvMapping(mapping: CsvImportMappingState) {
     debit: mapping.debit.trim() || null,
     credit: mapping.credit.trim() || null,
     currency: mapping.currency.trim() || null,
+    balance: mapping.balance.trim() || null,
     invertAmount: mapping.invertAmount,
     categoryId: mapping.categoryId || null,
   };
@@ -2045,6 +2093,7 @@ function mappingStateFromDetected(mapping: {
   debit?: string | null;
   credit?: string | null;
   currency?: string | null;
+  balance?: string | null;
   invertAmount?: boolean | null;
 }): CsvImportMappingState {
   return {
@@ -2054,6 +2103,7 @@ function mappingStateFromDetected(mapping: {
     debit: mapping.debit ?? "",
     credit: mapping.credit ?? "",
     currency: mapping.currency ?? "",
+    balance: mapping.balance ?? "",
     invertAmount: Boolean(mapping.invertAmount),
     categoryId: "",
   };
@@ -2092,7 +2142,13 @@ function ColumnSelect({
   );
 }
 
-function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
+function CsvImportPreview({
+  accountCurrency,
+  preview,
+}: {
+  accountCurrency?: string;
+  preview: CsvImportPreviewData;
+}) {
   const detected = mappingStateFromDetected(preview.detectedMapping);
 
   return (
@@ -2115,6 +2171,11 @@ function CsvImportPreview({ preview }: { preview: CsvImportPreviewData }) {
         <span>{preview.headers.length} columns scanned</span>
         <span>Date: {detected.postedAt || "not detected"}</span>
         <span>Amount: {detected.amount || detected.debit || "not detected"}</span>
+        <span>
+          Currency:{" "}
+          {detected.currency ? `CSV column ${detected.currency}` : accountCurrency || "account"}
+        </span>
+        <span>Balance: {detected.balance || "not detected"}</span>
       </div>
       <div className="grid gap-2 border border-border/70 p-2 text-xs sm:grid-cols-3">
         <p>

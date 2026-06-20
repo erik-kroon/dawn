@@ -1,0 +1,29 @@
+{
+  "name": "@dawn/documents",
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./src/index.ts"
+    },
+    "./*": {
+      "default": "./src/*.ts"
+    }
+  },
+  "scripts": {
+    "test": "bun test",
+    "eval": "bun run src/evals.cli.ts",
+    "check-types": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@tanstack/ai": "^0.29.0",
+    "@tanstack/ai-gemini": "^0.16.0",
+    "@tanstack/ai-openai": "^0.14.2",
+    "@tanstack/ai-openrouter": "^0.13.2",
+    "unpdf": "^1.6.2",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@dawn/config": "workspace:*",
+    "typescript": "catalog:"
+  }
+}

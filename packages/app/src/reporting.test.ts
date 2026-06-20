@@ -168,6 +168,55 @@ describe("business reporting use cases", () => {
     });
   });
 
+  test("builds reports for the dominant transaction currency when data is mixed-currency", async () => {
+    const repository = fixtureRepository();
+    repository.transactions.push(
+      {
+        id: "txn_sek_income",
+        teamId: "team_1",
+        description: "Owner transfer",
+        postedAt: "2026-06-13T00:00:00.000Z",
+        money: { amountMinor: 360_00, currency: "SEK" },
+        categoryId: "owner",
+        reviewState: "reviewed",
+      },
+      {
+        id: "txn_sek_card",
+        teamId: "team_1",
+        description: "100003655822",
+        postedAt: "2026-06-13T00:00:00.000Z",
+        money: { amountMinor: -130_00, currency: "SEK" },
+        categoryId: "software",
+        reviewState: "reviewed",
+      },
+      {
+        id: "txn_sek_fee",
+        teamId: "team_1",
+        description: "AVI OVERDRAG",
+        postedAt: "2026-06-13T00:00:00.000Z",
+        money: { amountMinor: -100_00, currency: "SEK" },
+        categoryId: "fees",
+        reviewState: "reviewed",
+      },
+    );
+
+    const result = await listBusinessReport(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      from: "2026-06-08T00:00:00.000Z",
+      to: "2026-06-15T23:59:59.000Z",
+    });
+
+    expect(result.report.currency).toBe("SEK");
+    expect(result.report.totals.revenue).toEqual({ amountMinor: 360_00, currency: "SEK" });
+    expect(result.report.totals.expenses).toEqual({ amountMinor: -230_00, currency: "SEK" });
+    expect(result.report.cashflow).toEqual({ amountMinor: 130_00, currency: "SEK" });
+    expect(result.report.unpaidInvoices).toEqual([]);
+    expect(result.report.timeUtilization.billableValue).toEqual({
+      amountMinor: 0,
+      currency: "SEK",
+    });
+  });
+
   test("generates weekly insights with source citations through provider", async () => {
     const repository = fixtureRepository();
     const result = await generateWeeklyInsights(

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   acceptInboxMatch,
   generateInboxMatchSuggestions,
+  matchBidirectionalBatch,
   matchPendingInboxForTransaction,
   rejectInboxMatch,
   type DawnRepository,
@@ -57,6 +58,7 @@ class MemoryMatchingRepository {
     },
     matchSuggestions: [],
   };
+  additionalInboxItems: InboxItem[] = [];
   transactions: Transaction[] = [
     {
       id: "txn_1",
@@ -73,6 +75,7 @@ class MemoryMatchingRepository {
     },
   ];
   suggestions = new Map<string, InboxTransactionMatchSuggestion>();
+  nextSuggestionSequence = 1;
   aliases: TeamAlias[] = [];
   hardNegatives: HardNegativeTransactionMatch[] = [];
   attachments: { transactionId: string; documentId: string }[] = [];
@@ -90,13 +93,33 @@ class MemoryMatchingRepository {
   }
 
   async getInboxItemForTeam(teamId: string, inboxItemId: string) {
-    return teamId === this.inboxItem.teamId && inboxItemId === this.inboxItem.id
-      ? this.inboxItem
-      : null;
+    const item = this.findInboxItem(inboxItemId);
+    return item?.teamId === teamId ? item : null;
   }
 
   async listInboxItems(teamId: string) {
-    return teamId === this.inboxItem.teamId ? [this.inboxItem] : [];
+    return this.allInboxItems().filter((item) => item.teamId === teamId);
+  }
+
+  allInboxItems() {
+    return [this.inboxItem, ...this.additionalInboxItems];
+  }
+
+  findInboxItem(inboxItemId: string) {
+    return this.allInboxItems().find((item) => item.id === inboxItemId) ?? null;
+  }
+
+  setInboxItem(item: InboxItem) {
+    if (this.inboxItem.id === item.id) {
+      this.inboxItem = item;
+      return;
+    }
+
+    const index = this.additionalInboxItems.findIndex((candidate) => candidate.id === item.id);
+
+    if (index >= 0) {
+      this.additionalInboxItems[index] = item;
+    }
   }
 
   async getTransactionForTeam(teamId: string, transactionId: string) {
@@ -161,7 +184,8 @@ class MemoryMatchingRepository {
       )
       .map((suggestion) => ({
         teamId,
-        source: this.inboxItem.latestExtraction?.fields.merchantName ?? "",
+        source:
+          this.findInboxItem(suggestion.inboxItemId)?.latestExtraction?.fields.merchantName ?? "",
         target: suggestion.transaction?.description ?? "",
         status: suggestion.status as "accepted" | "rejected",
         count: 1,
@@ -217,29 +241,33 @@ class MemoryMatchingRepository {
     transaction: Transaction;
     limit: number;
   }) {
-    if (
-      input.teamId !== this.inboxItem.teamId ||
-      this.inboxItem.status !== "needs_review" ||
-      this.inboxItem.extractionStatus !== "completed" ||
-      !this.inboxItem.latestExtraction
-    ) {
-      return [];
-    }
-
-    const alreadyAttached = this.attachments.some(
-      (attachment) =>
-        attachment.documentId === this.inboxItem.documentId ||
-        attachment.transactionId === input.transaction.id,
-    );
-    const alreadySuggested = [...this.suggestions.values()].some(
-      (suggestion) =>
-        suggestion.teamId === input.teamId &&
-        suggestion.inboxItemId === this.inboxItem.id &&
-        suggestion.transactionId === input.transaction.id &&
-        (suggestion.status === "suggested" || suggestion.status === "accepted"),
-    );
-
-    return alreadyAttached || alreadySuggested ? [] : [this.inboxItem].slice(0, input.limit);
+    return this.allInboxItems()
+      .filter(
+        (item) =>
+          item.teamId === input.teamId &&
+          item.status === "needs_review" &&
+          item.extractionStatus === "completed" &&
+          item.latestExtraction,
+      )
+      .filter(
+        (item) =>
+          !this.attachments.some(
+            (attachment) =>
+              attachment.documentId === item.documentId ||
+              attachment.transactionId === input.transaction.id,
+          ),
+      )
+      .filter(
+        (item) =>
+          ![...this.suggestions.values()].some(
+            (suggestion) =>
+              suggestion.teamId === input.teamId &&
+              suggestion.inboxItemId === item.id &&
+              suggestion.transactionId === input.transaction.id &&
+              (suggestion.status === "suggested" || suggestion.status === "accepted"),
+          ),
+      )
+      .slice(0, input.limit);
   }
 
   async upsertInboxMatchSuggestions(input: {
@@ -247,7 +275,7 @@ class MemoryMatchingRepository {
     inboxItemId: string;
     suggestions: InboxMatchSuggestion[];
   }) {
-    const persisted = input.suggestions.map((suggestion, index) => {
+    const persisted = input.suggestions.map((suggestion) => {
       const existing = [...this.suggestions.values()].find(
         (record) =>
           record.teamId === input.teamId &&
@@ -255,7 +283,7 @@ class MemoryMatchingRepository {
           record.transactionId === suggestion.transactionId,
       );
       const record: InboxTransactionMatchSuggestion = {
-        id: existing?.id ?? `match_${index + 1}`,
+        id: existing?.id ?? `match_${this.nextSuggestionSequence++}`,
         teamId: input.teamId,
         inboxItemId: input.inboxItemId,
         transactionId: suggestion.transactionId,
@@ -277,7 +305,12 @@ class MemoryMatchingRepository {
       this.suggestions.set(record.id, record);
       return record;
     });
-    this.inboxItem.matchSuggestions = persisted;
+    const item = this.findInboxItem(input.inboxItemId);
+
+    if (item) {
+      this.setInboxItem({ ...item, matchSuggestions: persisted });
+    }
+
     return persisted;
   }
 
@@ -291,6 +324,12 @@ class MemoryMatchingRepository {
 
     if (!suggestion || suggestion.teamId !== input.teamId) {
       throw new Error("Inbox match suggestion not found");
+    }
+
+    const item = this.findInboxItem(suggestion.inboxItemId);
+
+    if (!item) {
+      throw new Error("Inbox item not found");
     }
 
     const accepted = { ...suggestion, status: "accepted" as const };
@@ -311,17 +350,18 @@ class MemoryMatchingRepository {
     }
     this.attachments.push({
       transactionId: accepted.transactionId,
-      documentId: this.inboxItem.documentId,
+      documentId: item.documentId,
     });
     this.aliases.push({
       id: "alias_1",
       teamId: input.teamId,
-      source: this.inboxItem.latestExtraction?.fields.merchantName ?? "",
+      source: item.latestExtraction?.fields.merchantName ?? "",
       target: accepted.transaction?.description ?? "",
       createdAt: "2026-06-14T00:00:00.000Z",
     });
-    this.inboxItem = { ...this.inboxItem, status: "resolved", matchSuggestions: [accepted] };
-    return { suggestion: accepted, inboxItem: this.inboxItem };
+    const updatedItem = { ...item, status: "resolved" as const, matchSuggestions: [accepted] };
+    this.setInboxItem(updatedItem);
+    return { suggestion: accepted, inboxItem: updatedItem };
   }
 
   async rejectInboxMatchSuggestion(input: {
@@ -337,6 +377,7 @@ class MemoryMatchingRepository {
 
     const wasAccepted = suggestion.status === "accepted";
     const rejected = { ...suggestion, status: "rejected" as const };
+    const item = this.findInboxItem(rejected.inboxItemId);
     this.suggestions.set(rejected.id, rejected);
     this.hardNegatives.push({
       id: "negative_1",
@@ -350,9 +391,12 @@ class MemoryMatchingRepository {
       this.attachments = this.attachments.filter(
         (attachment) =>
           attachment.transactionId !== rejected.transactionId ||
-          attachment.documentId !== this.inboxItem.documentId,
+          attachment.documentId !== item?.documentId,
       );
-      this.inboxItem = { ...this.inboxItem, status: "needs_review", matchSuggestions: [rejected] };
+
+      if (item) {
+        this.setInboxItem({ ...item, status: "needs_review", matchSuggestions: [rejected] });
+      }
     }
     return rejected;
   }
@@ -382,6 +426,30 @@ class MemoryMatchingRepository {
   async appendOutboxEvent(input: unknown) {
     this.outboxEvents.push(input);
   }
+}
+
+function createHistoryInboxItem(base: InboxItem, id: string): InboxItem {
+  const suffix = id.replace(/[^a-zA-Z0-9]+/g, "_");
+  const documentId = `doc_${suffix}`;
+  const documentVersionId = `version_${suffix}`;
+
+  return {
+    ...base,
+    id,
+    documentId,
+    documentVersionId,
+    status: "resolved",
+    latestExtraction: base.latestExtraction
+      ? {
+          ...base.latestExtraction,
+          id: `extraction_${suffix}`,
+          inboxItemId: id,
+          documentId,
+          documentVersionId,
+        }
+      : null,
+    matchSuggestions: [],
+  };
 }
 
 const context = {
@@ -439,6 +507,9 @@ describe("inbox matching use cases", () => {
     const repository = new MemoryMatchingRepository();
 
     for (const index of [1, 2]) {
+      repository.additionalInboxItems.push(
+        createHistoryInboxItem(repository.inboxItem, `history_inbox_${index}`),
+      );
       const transaction = {
         ...repository.transactions[0]!,
         id: `txn_history_${index}`,
@@ -503,6 +574,157 @@ describe("inbox matching use cases", () => {
         }),
       ]),
     );
+  });
+
+  test("skips low-quality extraction even with repeated confirmed patterns", async () => {
+    const repository = new MemoryMatchingRepository();
+    repository.inboxItem = {
+      ...repository.inboxItem,
+      latestExtraction: repository.inboxItem.latestExtraction
+        ? {
+            ...repository.inboxItem.latestExtraction,
+            confidence: {
+              merchantName: 0.92,
+              issuedAt: 0.91,
+              totalAmountMinor: 0.2,
+              currency: 0.95,
+              overall: 0.52,
+            },
+          }
+        : null,
+    };
+
+    for (const index of [1, 2]) {
+      repository.additionalInboxItems.push(
+        createHistoryInboxItem(repository.inboxItem, `history_low_quality_${index}`),
+      );
+      const transaction = {
+        ...repository.transactions[0]!,
+        id: `txn_low_quality_history_${index}`,
+        providerTransactionId: `provider_low_quality_history_${index}`,
+      };
+      repository.suggestions.set(`low_quality_history_${index}`, {
+        id: `low_quality_history_${index}`,
+        teamId: "team_1",
+        inboxItemId: `history_low_quality_${index}`,
+        transactionId: transaction.id,
+        score: 1,
+        confidence: "high",
+        explanation: ["Historical accepted suggestion"],
+        status: "accepted",
+        createdAt: "2026-06-14T00:00:00.000Z",
+        updatedAt: "2026-06-14T00:00:00.000Z",
+        transaction,
+      });
+    }
+
+    const generated = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+        autoMatch: { enabled: true },
+      },
+    );
+
+    const batch = await matchBidirectionalBatch(
+      repository as unknown as DawnRepository,
+      systemMatchingContext,
+      {
+        teamId: "team_1",
+        transactionIds: ["txn_1"],
+        inboxItemIds: ["inbox_1"],
+        sourceOutboxEventId: "outbox_low_quality",
+        idempotencyKey: "inbox:match-batch:outbox_low_quality",
+        enforceCallerPermission: false,
+        autoMatch: { enabled: true },
+      },
+    );
+
+    expect(generated.suggestions).toEqual([]);
+    expect(batch.suggestions).toEqual([]);
+    expect(
+      [...repository.suggestions.values()].filter(
+        (suggestion) =>
+          suggestion.inboxItemId === "inbox_1" && suggestion.transactionId === "txn_1",
+      ),
+    ).toEqual([]);
+    expect(repository.attachments).toEqual([]);
+    expect(repository.auditEvents).toEqual([]);
+    expect(repository.outboxEvents).toEqual([]);
+  });
+
+  test("allows complete extractions with conservative provider confidence", async () => {
+    const repository = new MemoryMatchingRepository();
+    repository.inboxItem = {
+      ...repository.inboxItem,
+      latestExtraction: repository.inboxItem.latestExtraction
+        ? {
+            ...repository.inboxItem.latestExtraction,
+            confidence: {
+              overall: 0.72,
+            },
+          }
+        : null,
+    };
+
+    const generated = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      {
+        teamId: "team_1",
+        inboxItemId: "inbox_1",
+      },
+    );
+
+    expect(generated.suggestions).toHaveLength(1);
+    expect(generated.suggestions[0]?.transactionId).toBe("txn_1");
+  });
+
+  test("skips non-financial extracted documents during matching", async () => {
+    const repository = new MemoryMatchingRepository();
+    repository.inboxItem = {
+      ...repository.inboxItem,
+      latestExtraction: repository.inboxItem.latestExtraction
+        ? {
+            ...repository.inboxItem.latestExtraction,
+            fields: {
+              documentType: "other",
+              merchantName: "Acme Supplies",
+              issuedAt: "2026-06-14",
+              totalAmountMinor: 1200,
+              currency: "USD",
+            },
+            confidence: {
+              documentType: 0.93,
+              overall: 0.91,
+            },
+          }
+        : null,
+    };
+
+    const direct = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      { teamId: "team_1", inboxItemId: "inbox_1" },
+    );
+    const batch = await matchBidirectionalBatch(
+      repository as unknown as DawnRepository,
+      systemMatchingContext,
+      {
+        teamId: "team_1",
+        transactionIds: ["txn_1"],
+        inboxItemIds: ["inbox_1"],
+        sourceOutboxEventId: "outbox_other",
+        idempotencyKey: "inbox:match-batch:outbox_other",
+        enforceCallerPermission: false,
+      },
+    );
+
+    expect(direct.suggestions).toEqual([]);
+    expect(batch.suggestions).toEqual([]);
+    expect(repository.suggestions.size).toBe(0);
   });
 
   test("moves reviewed transactions into and out of ready-to-export when receipt matches change", async () => {
@@ -703,8 +925,85 @@ describe("inbox matching use cases", () => {
     ).toHaveLength(1);
   });
 
+  test("batch matching keeps competing same-amount receipts and transactions non-conflicting", async () => {
+    const repository = new MemoryMatchingRepository();
+    repository.additionalInboxItems = [
+      {
+        ...repository.inboxItem,
+        id: "inbox_2",
+        documentId: "doc_2",
+        documentVersionId: "version_2",
+        latestExtraction: {
+          ...repository.inboxItem.latestExtraction!,
+          id: "extraction_2",
+          inboxItemId: "inbox_2",
+          documentId: "doc_2",
+          documentVersionId: "version_2",
+        },
+        matchSuggestions: [],
+      },
+    ];
+    repository.transactions = [
+      repository.transactions[0]!,
+      {
+        ...repository.transactions[0]!,
+        id: "txn_2",
+        providerTransactionId: "provider_2",
+      },
+    ];
+
+    const result = await matchBidirectionalBatch(
+      repository as unknown as DawnRepository,
+      systemMatchingContext,
+      {
+        teamId: "team_1",
+        transactionIds: ["txn_1", "txn_2"],
+        inboxItemIds: ["inbox_1", "inbox_2"],
+        sourceOutboxEventId: "outbox_batch_1",
+        idempotencyKey: "inbox:match-batch:outbox_batch_1",
+        enforceCallerPermission: false,
+      },
+    );
+    const replayed = await matchBidirectionalBatch(
+      repository as unknown as DawnRepository,
+      systemMatchingContext,
+      {
+        teamId: "team_1",
+        transactionIds: ["txn_1", "txn_2"],
+        inboxItemIds: ["inbox_1", "inbox_2"],
+        sourceOutboxEventId: "outbox_batch_1",
+        idempotencyKey: "inbox:match-batch:outbox_batch_1",
+        enforceCallerPermission: false,
+      },
+    );
+
+    expect(result.suggestions).toHaveLength(2);
+    expect(
+      result.suggestions.map((suggestion) => ({
+        inboxItemId: suggestion.inboxItemId,
+        transactionId: suggestion.transactionId,
+      })),
+    ).toEqual([
+      { inboxItemId: "inbox_1", transactionId: "txn_1" },
+      { inboxItemId: "inbox_2", transactionId: "txn_2" },
+    ]);
+    expect(new Set(result.suggestions.map((suggestion) => suggestion.inboxItemId)).size).toBe(2);
+    expect(new Set(result.suggestions.map((suggestion) => suggestion.transactionId)).size).toBe(2);
+    expect(replayed.replayed).toBe(true);
+    expect(
+      [...repository.suggestions.values()].filter(
+        (suggestion) =>
+          suggestion.status === "suggested" &&
+          (suggestion.inboxItemId === "inbox_1" || suggestion.inboxItemId === "inbox_2"),
+      ),
+    ).toHaveLength(2);
+  });
+
   test("uses calibrated thresholds for reverse-generated suggestions", async () => {
     const repository = new MemoryMatchingRepository();
+    repository.additionalInboxItems.push(
+      createHistoryInboxItem(repository.inboxItem, "history_inbox"),
+    );
     repository.inboxItem = {
       ...repository.inboxItem,
       latestExtraction: {
@@ -857,6 +1156,42 @@ describe("inbox matching use cases", () => {
     ]);
   });
 
+  test("accepting a match is idempotent by key and rejects conflicting replays", async () => {
+    const repository = new MemoryMatchingRepository();
+    const generated = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      { teamId: "team_1", inboxItemId: "inbox_1" },
+    );
+
+    const accepted = await acceptInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: generated.suggestions[0]?.id ?? "",
+      idempotencyKey: "accept_idempotent_1",
+    });
+    const replayed = await acceptInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: generated.suggestions[0]?.id ?? "",
+      idempotencyKey: "accept_idempotent_1",
+    });
+
+    expect(replayed.replayed).toBe(true);
+    expect(replayed.suggestion.id).toBe(accepted.suggestion.id);
+    expect(repository.attachments).toEqual([{ transactionId: "txn_1", documentId: "doc_1" }]);
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.outboxEvents).toHaveLength(1);
+    await expect(
+      acceptInboxMatch(repository as unknown as DawnRepository, context, {
+        teamId: "team_1",
+        suggestionId: "different_suggestion",
+        idempotencyKey: "accept_idempotent_1",
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: "Idempotency key was already used for a different inbox match",
+    });
+  });
+
   test("rejects a suggestion and remembers the hard negative", async () => {
     const repository = new MemoryMatchingRepository();
     const generated = await generateInboxMatchSuggestions(
@@ -893,5 +1228,44 @@ describe("inbox matching use cases", () => {
       },
     );
     expect(next.suggestions).toEqual([]);
+  });
+
+  test("rejecting a match is idempotent by key and rejects conflicting replays", async () => {
+    const repository = new MemoryMatchingRepository();
+    const generated = await generateInboxMatchSuggestions(
+      repository as unknown as DawnRepository,
+      context,
+      { teamId: "team_1", inboxItemId: "inbox_1" },
+    );
+
+    const rejected = await rejectInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: generated.suggestions[0]?.id ?? "",
+      reason: "wrong receipt",
+      idempotencyKey: "reject_idempotent_1",
+    });
+    const replayed = await rejectInboxMatch(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      suggestionId: generated.suggestions[0]?.id ?? "",
+      reason: "wrong receipt",
+      idempotencyKey: "reject_idempotent_1",
+    });
+
+    expect(replayed.replayed).toBe(true);
+    expect(replayed.suggestion.id).toBe(rejected.suggestion.id);
+    expect(repository.hardNegatives).toHaveLength(1);
+    expect(repository.auditEvents).toHaveLength(1);
+    expect(repository.outboxEvents).toHaveLength(1);
+    await expect(
+      rejectInboxMatch(repository as unknown as DawnRepository, context, {
+        teamId: "team_1",
+        suggestionId: generated.suggestions[0]?.id ?? "",
+        reason: "different reason",
+        idempotencyKey: "reject_idempotent_1",
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: "Idempotency key was already used for a different inbox match rejection",
+    });
   });
 });
