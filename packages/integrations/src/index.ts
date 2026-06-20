@@ -1,6 +1,21 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
 
-import type { InvoiceDraft, LedgerTransactionDraft, Money, Transaction } from "@dawn/domain";
+import {
+  normalizeFortnoxArticleNumber,
+  normalizeFortnoxCustomerNumber,
+  normalizeSwedishOrganizationNumber,
+  type InvoiceDraft,
+  type LedgerTransactionDraft,
+  type Money,
+  type Transaction,
+} from "@dawn/domain";
 
 export * from "./email-inbox";
 
@@ -139,6 +154,7 @@ export type AccountantPacketEmailDeliveryProvider = {
 export type IntegrationCategory = "accounting" | "payments" | "messaging" | "email";
 
 export type IntegrationProviderName =
+  | "fortnox"
   | "mock-accounting"
   | "mock-payments"
   | "mock-messaging"
@@ -171,9 +187,38 @@ export type IntegrationProviderConnection = {
   rawPayload: ProviderRawPayload;
 };
 
+export type IntegrationProviderAuthorizationUrl = {
+  provider: IntegrationProviderName;
+  authorizationUrl: string;
+  state: string;
+  rawPayload: ProviderRawPayload;
+};
+
+export type IntegrationProviderDisconnectResult = {
+  status: "disconnected";
+  rawPayload: ProviderRawPayload;
+};
+
+export type IntegrationProviderExternalObject = {
+  providerObjectType: string;
+  providerObjectId: string;
+  internalEntityType?: string | null;
+  internalEntityId?: string | null;
+  rawPayload: ProviderRawPayload;
+};
+
 export type IntegrationProviderSyncResult = {
-  status: "completed";
+  status: "completed" | "partial";
   recordsSynced: number;
+  externalObjects?: readonly IntegrationProviderExternalObject[];
+  refreshedToken?: IntegrationProviderToken | null;
+  connectionRawPayload?: ProviderRawPayload | null;
+  nextCursor?: ProviderRawPayload | null;
+  recovery?: {
+    message: string;
+    retryCursor?: ProviderRawPayload | null;
+  } | null;
+  error?: string | null;
   rawPayload: ProviderRawPayload;
 };
 
@@ -209,6 +254,20 @@ export type IntegrationProvider = {
   category: IntegrationCategory;
   displayName: string;
   capabilities: readonly IntegrationProviderCapability[];
+  createAuthorizationUrl?(input: {
+    teamId: string;
+    actorId: string;
+    redirectUrl: string;
+    state: string;
+  }): IntegrationProviderAuthorizationUrl;
+  exchangeOAuthCode?(input: {
+    teamId: string;
+    actorId: string;
+    code: string;
+    redirectUrl: string;
+    state: string;
+    idempotencyKey: string;
+  }): Promise<IntegrationProviderConnection>;
   connect(input: {
     teamId: string;
     actorId: string;
@@ -217,6 +276,10 @@ export type IntegrationProvider = {
   sync(input: {
     teamId: string;
     providerConnectionId: string;
+    token?: IntegrationProviderToken | null;
+    rawPayload?: ProviderRawPayload | null;
+    syncMode?: "initial" | "incremental";
+    cursor?: ProviderRawPayload | null;
   }): Promise<IntegrationProviderSyncResult>;
   exportTransactions?(input: {
     teamId: string;
@@ -246,7 +309,76 @@ export type IntegrationProvider = {
     subject: string;
     text: string;
   }): Promise<IntegrationProviderDeliveryResult>;
+  disconnect?(input: {
+    teamId: string;
+    providerConnectionId: string;
+  }): Promise<IntegrationProviderDisconnectResult>;
 };
+
+export type FortnoxTokenBundle = {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: string;
+  tokenType: "bearer" | "Bearer";
+  scopes: string[];
+  rawPayload: ProviderRawPayload;
+};
+
+export type FortnoxTokenCodec = {
+  encrypt(tokens: FortnoxTokenBundle): Promise<IntegrationProviderToken>;
+  decrypt(token: IntegrationProviderToken): Promise<FortnoxTokenBundle>;
+};
+
+export type FortnoxConnectionHealthWarning = {
+  code: "missing_scope" | "missing_license" | "token_expiring";
+  message: string;
+  scope?: string | null;
+};
+
+export type FortnoxConnectionHealth = {
+  status: "connected" | "warning";
+  grantedScopes: string[];
+  missingScopes: string[];
+  warnings: FortnoxConnectionHealthWarning[];
+  expiresAt?: string | null;
+};
+
+export const fortnoxRequiredScopes = [
+  "companyinformation",
+  "customer",
+  "article",
+  "invoice",
+] as const;
+
+export type FortnoxHttpFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+export type FortnoxIntegrationProviderConfig = {
+  clientId: string;
+  clientSecret: string;
+  tokenCodec: FortnoxTokenCodec;
+  fetch?: FortnoxHttpFetch;
+  now?: () => Date;
+  scopes?: readonly string[];
+  maxPagesPerSync?: number;
+  endpoints?: Partial<{
+    authorizationUrl: string;
+    tokenUrl: string;
+    apiBaseUrl: string;
+  }>;
+};
+
+type FortnoxSyncResource = "company" | "customer" | "article" | "invoice" | "payment";
+
+type FortnoxSyncCursor = {
+  resource?: FortnoxSyncResource;
+  page?: number;
+};
+
+const defaultFortnoxEndpoints = {
+  authorizationUrl: "https://apps.fortnox.se/oauth-v1/auth",
+  tokenUrl: "https://apps.fortnox.se/oauth-v1/token",
+  apiBaseUrl: "https://api.fortnox.se/3",
+} as const;
 
 export function canonicalProviderTransactionId(input: {
   provider: BankingProviderName;
@@ -283,6 +415,106 @@ export function providerTransactionToLedgerDraft(input: {
       providerAccountId: input.transaction.providerAccountId,
       providerTransactionId: input.transaction.providerTransactionId,
     }),
+  };
+}
+
+export function createFortnoxTokenCodec(input: {
+  secret: string;
+  keyId?: string;
+}): FortnoxTokenCodec {
+  const key = createHash("sha256").update(input.secret).digest();
+  const keyId = input.keyId ?? "fortnox-token-v1";
+
+  return {
+    async encrypt(tokens) {
+      const iv = randomBytes(12);
+      const cipher = createCipheriv("aes-256-gcm", key, iv);
+      const ciphertext = Buffer.concat([
+        cipher.update(JSON.stringify(tokens), "utf8"),
+        cipher.final(),
+      ]);
+      const tag = cipher.getAuthTag();
+      const encryptedToken = [
+        "v1",
+        iv.toString("base64url"),
+        tag.toString("base64url"),
+        ciphertext.toString("base64url"),
+      ].join(":");
+
+      return {
+        encryptedToken,
+        keyId,
+        lastFour: tokens.refreshToken.slice(-4),
+      };
+    },
+    async decrypt(token) {
+      const [version, iv, tag, ciphertext] = token.encryptedToken.split(":");
+
+      if (version !== "v1" || !iv || !tag || !ciphertext) {
+        throw new Error("Fortnox token cannot be decrypted");
+      }
+
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"));
+      decipher.setAuthTag(Buffer.from(tag, "base64url"));
+      const plaintext = Buffer.concat([
+        decipher.update(Buffer.from(ciphertext, "base64url")),
+        decipher.final(),
+      ]).toString("utf8");
+
+      return parseFortnoxTokenBundle(JSON.parse(plaintext));
+    },
+  };
+}
+
+export function normalizeFortnoxConnectionHealth(input: {
+  grantedScopes: readonly string[];
+  licensedScopes?: readonly string[] | null;
+  expiresAt?: string | null;
+  now?: Date;
+}): FortnoxConnectionHealth {
+  const grantedScopes = [...new Set(input.grantedScopes.map((scope) => scope.trim()))].filter(
+    Boolean,
+  );
+  const granted = new Set(grantedScopes);
+  const licensed =
+    input.licensedScopes && input.licensedScopes.length > 0 ? new Set(input.licensedScopes) : null;
+  const missingScopes = fortnoxRequiredScopes.filter((scope) => !granted.has(scope));
+  const warnings: FortnoxConnectionHealthWarning[] = missingScopes.map((scope) => ({
+    code: "missing_scope" as const,
+    scope,
+    message: `Fortnox OAuth grant is missing required scope: ${scope}`,
+  }));
+
+  if (licensed) {
+    for (const scope of fortnoxRequiredScopes) {
+      if (!licensed.has(scope)) {
+        warnings.push({
+          code: "missing_license",
+          scope,
+          message: `Fortnox company may be missing licence access for: ${scope}`,
+        });
+      }
+    }
+  }
+
+  if (input.expiresAt) {
+    const now = input.now ?? new Date();
+    const expiresSoon = new Date(input.expiresAt).getTime() - now.getTime() <= 5 * 60_000;
+
+    if (expiresSoon) {
+      warnings.push({
+        code: "token_expiring",
+        message: "Fortnox access token is near expiry and should be refreshed before sync",
+      });
+    }
+  }
+
+  return {
+    status: warnings.length > 0 ? "warning" : "connected",
+    grantedScopes,
+    missingScopes,
+    warnings,
+    expiresAt: input.expiresAt ?? null,
   };
 }
 
@@ -569,6 +801,7 @@ export function createMockInvoiceEmailDeliveryProvider(): InvoiceEmailDeliveryPr
 
 export function createMockIntegrationProviders(): IntegrationProvider[] {
   return [
+    createMockFortnoxIntegrationProvider(),
     createMockIntegrationProvider({
       provider: "mock-accounting",
       category: "accounting",
@@ -598,6 +831,405 @@ export function createMockIntegrationProviders(): IntegrationProvider[] {
       recordsSynced: 4,
     }),
   ];
+}
+
+export function createConfiguredIntegrationProviders(input: {
+  fortnoxClientId?: string | null;
+  fortnoxClientSecret?: string | null;
+  tokenSecret: string;
+  fetch?: FortnoxHttpFetch;
+}): IntegrationProvider[] {
+  const hasFortnoxClientId = Boolean(input.fortnoxClientId?.trim());
+  const hasFortnoxClientSecret = Boolean(input.fortnoxClientSecret?.trim());
+
+  if (hasFortnoxClientId !== hasFortnoxClientSecret) {
+    throw new Error("FORTNOX_CLIENT_ID and FORTNOX_CLIENT_SECRET must be set together");
+  }
+
+  return [
+    hasFortnoxClientId && hasFortnoxClientSecret
+      ? createFortnoxIntegrationProvider({
+          clientId: input.fortnoxClientId!.trim(),
+          clientSecret: input.fortnoxClientSecret!.trim(),
+          tokenCodec: createFortnoxTokenCodec({
+            secret: input.tokenSecret,
+            keyId: "fortnox-token-v1",
+          }),
+          fetch: input.fetch,
+        })
+      : createMockFortnoxIntegrationProvider(),
+    createMockIntegrationProvider({
+      provider: "mock-accounting",
+      category: "accounting",
+      displayName: "Mock Accounting",
+      capabilities: ["connect", "sync", "disable", "exportTransactions", "exportInvoices"],
+      recordsSynced: 8,
+    }),
+    createMockIntegrationProvider({
+      provider: "mock-payments",
+      category: "payments",
+      displayName: "Mock Payments",
+      capabilities: ["connect", "sync", "disable", "receivePaymentEvents"],
+      recordsSynced: 3,
+    }),
+    createMockIntegrationProvider({
+      provider: "mock-messaging",
+      category: "messaging",
+      displayName: "Mock Messaging",
+      capabilities: ["connect", "sync", "disable", "sendMessage"],
+      recordsSynced: 2,
+    }),
+    createMockIntegrationProvider({
+      provider: "mock-email",
+      category: "email",
+      displayName: "Mock Email",
+      capabilities: ["connect", "sync", "disable", "sendEmail"],
+      recordsSynced: 4,
+    }),
+  ];
+}
+
+export function createFortnoxIntegrationProvider(
+  input: FortnoxIntegrationProviderConfig,
+): IntegrationProvider {
+  const endpoints = { ...defaultFortnoxEndpoints, ...input.endpoints };
+  const fetchFn = input.fetch ?? fetch;
+  const now = input.now ?? (() => new Date());
+  const scopes = [...(input.scopes ?? fortnoxRequiredScopes)];
+  const maxPagesPerSync = input.maxPagesPerSync ?? 25;
+
+  return {
+    provider: "fortnox",
+    category: "accounting",
+    displayName: "Fortnox",
+    capabilities: ["connect", "sync", "disable"],
+    createAuthorizationUrl(command) {
+      const authorizationUrl = new URL(endpoints.authorizationUrl);
+      authorizationUrl.searchParams.set("client_id", input.clientId);
+      authorizationUrl.searchParams.set("redirect_uri", command.redirectUrl);
+      authorizationUrl.searchParams.set("scope", scopes.join(" "));
+      authorizationUrl.searchParams.set("state", command.state);
+      authorizationUrl.searchParams.set("access_type", "offline");
+      authorizationUrl.searchParams.set("response_type", "code");
+      authorizationUrl.searchParams.set("account_type", "service");
+
+      return {
+        provider: "fortnox",
+        authorizationUrl: authorizationUrl.toString(),
+        state: command.state,
+        rawPayload: {
+          provider: "fortnox",
+          endpoint: endpoints.authorizationUrl,
+          teamId: command.teamId,
+          actorId: command.actorId,
+          scopes,
+          accessType: "offline",
+          accountType: "service",
+        },
+      };
+    },
+    async exchangeOAuthCode(command) {
+      const issuedAt = now();
+      const tokenBundle = await requestFortnoxToken({
+        fetchFn,
+        tokenUrl: endpoints.tokenUrl,
+        clientId: input.clientId,
+        clientSecret: input.clientSecret,
+        now: issuedAt,
+        body: {
+          grant_type: "authorization_code",
+          code: command.code,
+          redirect_uri: command.redirectUrl,
+        },
+      });
+      const health = normalizeFortnoxConnectionHealth({
+        grantedScopes: tokenBundle.scopes,
+        expiresAt: tokenBundle.expiresAt,
+        now: issuedAt,
+      });
+
+      return {
+        provider: "fortnox",
+        category: "accounting",
+        providerConnectionId: `fortnox:${command.teamId}`,
+        displayName: "Fortnox",
+        status: "connected",
+        capabilities: ["connect", "sync", "disable"],
+        token: await input.tokenCodec.encrypt(tokenBundle),
+        rawPayload: {
+          provider: "fortnox",
+          teamId: command.teamId,
+          oauth: {
+            source: "authorization_code",
+            stateValidated: true,
+            scopes: tokenBundle.scopes,
+            tokenEndpoint: endpoints.tokenUrl,
+            tokenType: tokenBundle.tokenType,
+            expiresAt: tokenBundle.expiresAt,
+            authorizationCodeLastFour: command.code.slice(-4),
+          },
+          health,
+        },
+      };
+    },
+    async connect(command) {
+      throw new Error(`Fortnox requires OAuth; use createAuthorizationUrl for ${command.teamId}`);
+    },
+    async sync(command) {
+      if (!command.token) {
+        throw new Error("Fortnox sync requires an encrypted OAuth token");
+      }
+
+      const syncStartedAt = now();
+      const tokenState = await ensureFortnoxAccessToken({
+        fetchFn,
+        tokenUrl: endpoints.tokenUrl,
+        clientId: input.clientId,
+        clientSecret: input.clientSecret,
+        tokenCodec: input.tokenCodec,
+        token: command.token,
+        providerConnectionId: command.providerConnectionId,
+        now: syncStartedAt,
+      });
+      const catalog = await syncFortnoxCatalog({
+        fetchFn,
+        apiBaseUrl: endpoints.apiBaseUrl,
+        providerConnectionId: command.providerConnectionId,
+        accessToken: tokenState.tokens.accessToken,
+        cursor: parseFortnoxSyncCursor(command.cursor),
+        maxPages: maxPagesPerSync,
+      });
+      const rawPayload = {
+        provider: "fortnox",
+        providerConnectionId: command.providerConnectionId,
+        syncMode: command.syncMode ?? "initial",
+        customerCount: catalog.externalObjects.filter(
+          (object) => object.providerObjectType === "customer",
+        ).length,
+        articleCount: catalog.externalObjects.filter(
+          (object) => object.providerObjectType === "article",
+        ).length,
+        invoiceCount: catalog.externalObjects.filter(
+          (object) => object.providerObjectType === "invoice",
+        ).length,
+        paymentCount: catalog.externalObjects.filter(
+          (object) => object.providerObjectType === "payment",
+        ).length,
+        invoicePollingFallback: true,
+        paymentPollingFallback: true,
+        nextCursor: catalog.nextCursor,
+        recovery: catalog.recovery,
+        health: tokenState.health,
+        warnings: tokenState.health.warnings,
+      };
+
+      return {
+        status: catalog.status,
+        recordsSynced: catalog.externalObjects.length,
+        externalObjects: catalog.externalObjects,
+        refreshedToken: tokenState.refreshedToken,
+        connectionRawPayload: tokenState.connectionRawPayload,
+        nextCursor: catalog.nextCursor,
+        recovery: catalog.recovery,
+        error: catalog.error,
+        rawPayload,
+      };
+    },
+    async disconnect(command) {
+      return {
+        status: "disconnected",
+        rawPayload: {
+          provider: "fortnox",
+          providerConnectionId: command.providerConnectionId,
+          revokeDeferred: true,
+        },
+      };
+    },
+  };
+}
+
+export function createMockFortnoxIntegrationProvider(
+  input: {
+    tokenCodec?: FortnoxTokenCodec;
+    grantedScopes?: readonly string[];
+    licensedScopes?: readonly string[];
+    now?: () => Date;
+    partialFailure?: boolean;
+  } = {},
+): IntegrationProvider {
+  const tokenCodec =
+    input.tokenCodec ??
+    createFortnoxTokenCodec({
+      secret: "mock-fortnox-token-secret",
+      keyId: "mock-fortnox-token",
+    });
+  const now = input.now ?? (() => new Date("2026-06-15T10:00:00.000Z"));
+
+  return {
+    provider: "fortnox",
+    category: "accounting",
+    displayName: "Fortnox",
+    capabilities: ["connect", "sync", "disable"],
+    createAuthorizationUrl(command) {
+      const authorizationUrl = new URL("https://apps.fortnox.se/oauth-v1/auth");
+      authorizationUrl.searchParams.set("client_id", "mock-fortnox-client");
+      authorizationUrl.searchParams.set("redirect_uri", command.redirectUrl);
+      authorizationUrl.searchParams.set(
+        "scope",
+        ["companyinformation", "customer", "article", "invoice"].join(" "),
+      );
+      authorizationUrl.searchParams.set("state", command.state);
+      authorizationUrl.searchParams.set("access_type", "offline");
+      authorizationUrl.searchParams.set("response_type", "code");
+      authorizationUrl.searchParams.set("account_type", "service");
+
+      return {
+        provider: "fortnox",
+        authorizationUrl: authorizationUrl.toString(),
+        state: command.state,
+        rawPayload: {
+          mock: true,
+          provider: "fortnox",
+          endpoint: "https://apps.fortnox.se/oauth-v1/auth",
+          teamId: command.teamId,
+          actorId: command.actorId,
+          scopes: ["companyinformation", "customer", "article", "invoice"],
+          accessType: "offline",
+          accountType: "service",
+        },
+      };
+    },
+    async exchangeOAuthCode(command) {
+      return await fortnoxProviderConnection({
+        teamId: command.teamId,
+        actorId: command.actorId,
+        idempotencyKey: command.idempotencyKey,
+        tokenCodec,
+        grantedScopes: input.grantedScopes,
+        licensedScopes: input.licensedScopes,
+        now: now(),
+        oauth: {
+          source: "authorization_code",
+          redirectUrl: command.redirectUrl,
+          state: command.state,
+          authorizationCodeLastFour: command.code.slice(-4),
+        },
+      });
+    },
+    async connect(command) {
+      return await fortnoxProviderConnection({
+        teamId: command.teamId,
+        actorId: command.actorId,
+        idempotencyKey: command.idempotencyKey,
+        tokenCodec,
+        grantedScopes: input.grantedScopes,
+        licensedScopes: input.licensedScopes,
+        now: now(),
+        oauth: {
+          source: "direct_mock",
+          stateValidated: true,
+        },
+      });
+    },
+    async sync(command) {
+      const company = mockFortnoxCompany(command.teamId);
+      const customers = mockFortnoxCustomers();
+      const articles = mockFortnoxArticles();
+      const invoices = mockFortnoxInvoices();
+      const payments = mockFortnoxInvoicePayments();
+      const refreshed = command.token
+        ? await maybeRefreshFortnoxToken({
+            tokenCodec,
+            token: command.token,
+            providerConnectionId: command.providerConnectionId,
+            now: now(),
+            licensedScopes: input.licensedScopes,
+          })
+        : null;
+      const externalObjects: IntegrationProviderExternalObject[] = [
+        {
+          providerObjectType: "company",
+          providerObjectId: company.organizationNumber,
+          rawPayload: {
+            ...company,
+            provider: "fortnox",
+            providerConnectionId: command.providerConnectionId,
+          },
+        },
+        ...customers.map((customer) => ({
+          providerObjectType: "customer",
+          providerObjectId: normalizeFortnoxCustomerNumber(customer.customerNumber),
+          rawPayload: {
+            ...customer,
+            provider: "fortnox",
+            providerConnectionId: command.providerConnectionId,
+          },
+        })),
+        ...articles.map((article) => ({
+          providerObjectType: "article",
+          providerObjectId: normalizeFortnoxArticleNumber(article.articleNumber),
+          rawPayload: {
+            ...article,
+            provider: "fortnox",
+            providerConnectionId: command.providerConnectionId,
+          },
+        })),
+        ...invoices.map((invoice) =>
+          fortnoxInvoiceExternalObject(invoice, command.providerConnectionId),
+        ),
+        ...payments.map((payment) =>
+          fortnoxInvoicePaymentExternalObject(payment, command.providerConnectionId),
+        ),
+      ];
+      const scopedObjects = fortnoxObjectsForSync({
+        objects: externalObjects,
+        partialFailure: input.partialFailure === true,
+        cursor: command.cursor ?? null,
+      });
+      const rawPayload = {
+        mock: true,
+        provider: "fortnox",
+        providerConnectionId: command.providerConnectionId,
+        syncMode: command.syncMode ?? "initial",
+        companyOrganizationNumber: company.organizationNumber,
+        customerCount: customers.length,
+        articleCount: articles.length,
+        invoiceCount: invoices.length,
+        paymentCount: payments.length,
+        invoicePollingFallback: true,
+        paymentPollingFallback: true,
+        nextCursor: scopedObjects.nextCursor,
+        recovery: scopedObjects.recovery,
+        health: refreshed?.health ?? null,
+        warnings: refreshed?.health.warnings ?? [],
+      };
+
+      return {
+        status: scopedObjects.status,
+        recordsSynced: scopedObjects.objects.length,
+        externalObjects: scopedObjects.objects,
+        refreshedToken: refreshed?.token ?? null,
+        connectionRawPayload: refreshed?.connectionRawPayload ?? null,
+        nextCursor: scopedObjects.nextCursor,
+        recovery: scopedObjects.recovery,
+        error: scopedObjects.error,
+        rawPayload,
+      };
+    },
+    async disconnect(command) {
+      return {
+        status: "disconnected",
+        rawPayload: {
+          mock: true,
+          provider: "fortnox",
+          providerConnectionId: command.providerConnectionId,
+          revokeEndpoint: "https://apps.fortnox.se/oauth-v1/revoke",
+          tokenTypeHint: "refresh_token",
+          revoked: true,
+        },
+      };
+    },
+  };
 }
 
 export function createMockIntegrationProvider(input: {
@@ -752,6 +1384,1039 @@ export function createMockIntegrationProvider(input: {
   };
 }
 
+async function requestFortnoxToken(input: {
+  fetchFn: FortnoxHttpFetch;
+  tokenUrl: string;
+  clientId: string;
+  clientSecret: string;
+  now: Date;
+  body: Record<string, string>;
+}): Promise<FortnoxTokenBundle> {
+  const response = await input.fetchFn(input.tokenUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${Buffer.from(`${input.clientId}:${input.clientSecret}`).toString(
+        "base64",
+      )}`,
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      accept: "application/json",
+    },
+    body: new URLSearchParams(input.body),
+  });
+  const payload = await parseFortnoxJsonResponse(response);
+
+  if (!response.ok) {
+    throw new Error(`Fortnox token request failed: ${fortnoxErrorSummary(payload)}`);
+  }
+
+  return fortnoxTokenBundleFromResponse(payload, input.now);
+}
+
+async function ensureFortnoxAccessToken(input: {
+  fetchFn: FortnoxHttpFetch;
+  tokenUrl: string;
+  clientId: string;
+  clientSecret: string;
+  tokenCodec: FortnoxTokenCodec;
+  token: IntegrationProviderToken;
+  providerConnectionId: string;
+  now: Date;
+}) {
+  const tokens = await input.tokenCodec.decrypt(input.token);
+  const expiresInMs = new Date(tokens.expiresAt).getTime() - input.now.getTime();
+
+  if (expiresInMs > 5 * 60_000) {
+    const health = normalizeFortnoxConnectionHealth({
+      grantedScopes: tokens.scopes,
+      expiresAt: tokens.expiresAt,
+      now: input.now,
+    });
+
+    return {
+      tokens,
+      health,
+      refreshedToken: null,
+      connectionRawPayload: null,
+    };
+  }
+
+  const refreshed = await requestFortnoxToken({
+    fetchFn: input.fetchFn,
+    tokenUrl: input.tokenUrl,
+    clientId: input.clientId,
+    clientSecret: input.clientSecret,
+    now: input.now,
+    body: {
+      grant_type: "refresh_token",
+      refresh_token: tokens.refreshToken,
+    },
+  });
+  const health = normalizeFortnoxConnectionHealth({
+    grantedScopes: refreshed.scopes,
+    expiresAt: refreshed.expiresAt,
+    now: input.now,
+  });
+
+  return {
+    tokens: refreshed,
+    health,
+    refreshedToken: await input.tokenCodec.encrypt(refreshed),
+    connectionRawPayload: {
+      provider: "fortnox",
+      providerConnectionId: input.providerConnectionId,
+      oauth: {
+        scopes: refreshed.scopes,
+        tokenType: refreshed.tokenType,
+        expiresAt: refreshed.expiresAt,
+        refreshedAt: input.now.toISOString(),
+        tokenEndpoint: input.tokenUrl,
+      },
+      health,
+    },
+  };
+}
+
+async function syncFortnoxCatalog(input: {
+  fetchFn: FortnoxHttpFetch;
+  apiBaseUrl: string;
+  providerConnectionId: string;
+  accessToken: string;
+  cursor: FortnoxSyncCursor | null;
+  maxPages: number;
+}): Promise<{
+  status: "completed" | "partial";
+  externalObjects: IntegrationProviderExternalObject[];
+  nextCursor: ProviderRawPayload | null;
+  recovery: { message: string; retryCursor: ProviderRawPayload } | null;
+  error: string | null;
+}> {
+  const externalObjects: IntegrationProviderExternalObject[] = [];
+  let remainingPages = Math.max(1, input.maxPages);
+  let resource: FortnoxSyncResource = input.cursor?.resource ?? "company";
+  let page = input.cursor?.page ?? 1;
+
+  try {
+    if (resource === "company") {
+      externalObjects.push(
+        await fetchFortnoxCompany({
+          fetchFn: input.fetchFn,
+          apiBaseUrl: input.apiBaseUrl,
+          providerConnectionId: input.providerConnectionId,
+          accessToken: input.accessToken,
+        }),
+      );
+      resource = "customer";
+      page = 1;
+    }
+
+    if (resource === "customer") {
+      while (remainingPages > 0) {
+        const customers = await fetchFortnoxPage({
+          fetchFn: input.fetchFn,
+          apiBaseUrl: input.apiBaseUrl,
+          accessToken: input.accessToken,
+          path: "customers",
+          arrayKey: "Customers",
+          page,
+        });
+        externalObjects.push(
+          ...customers.items.map((customer) =>
+            fortnoxCustomerExternalObject(customer, input.providerConnectionId),
+          ),
+        );
+        remainingPages -= 1;
+
+        if (customers.nextPage) {
+          page = customers.nextPage;
+
+          if (remainingPages === 0) {
+            return fortnoxPartialCatalogResult({
+              externalObjects,
+              resource: "customer",
+              page,
+              message: "Fortnox customer sync paused at page limit",
+            });
+          }
+        } else {
+          resource = "article";
+          page = 1;
+
+          if (remainingPages === 0) {
+            return fortnoxPartialCatalogResult({
+              externalObjects,
+              resource: "article",
+              page,
+              message: "Fortnox article sync paused at page limit",
+            });
+          }
+
+          break;
+        }
+      }
+    }
+
+    if (resource === "article") {
+      while (remainingPages > 0) {
+        const articles = await fetchFortnoxPage({
+          fetchFn: input.fetchFn,
+          apiBaseUrl: input.apiBaseUrl,
+          accessToken: input.accessToken,
+          path: "articles",
+          arrayKey: "Articles",
+          page,
+        });
+        externalObjects.push(
+          ...articles.items.map((article) =>
+            fortnoxArticleExternalObject(article, input.providerConnectionId),
+          ),
+        );
+        remainingPages -= 1;
+
+        if (articles.nextPage) {
+          page = articles.nextPage;
+
+          if (remainingPages === 0) {
+            return fortnoxPartialCatalogResult({
+              externalObjects,
+              resource: "article",
+              page,
+              message: "Fortnox article sync paused at page limit",
+            });
+          }
+        } else {
+          resource = "invoice";
+          page = 1;
+
+          if (remainingPages === 0) {
+            return fortnoxPartialCatalogResult({
+              externalObjects,
+              resource: "invoice",
+              page,
+              message: "Fortnox invoice sync paused at page limit",
+            });
+          }
+
+          break;
+        }
+      }
+    }
+
+    if (resource === "invoice") {
+      while (remainingPages > 0) {
+        const invoices = await fetchFortnoxPage({
+          fetchFn: input.fetchFn,
+          apiBaseUrl: input.apiBaseUrl,
+          accessToken: input.accessToken,
+          path: "invoices",
+          arrayKey: "Invoices",
+          page,
+        });
+        externalObjects.push(
+          ...invoices.items.map((invoice) =>
+            fortnoxInvoiceExternalObject(invoice, input.providerConnectionId),
+          ),
+        );
+        remainingPages -= 1;
+
+        if (invoices.nextPage) {
+          page = invoices.nextPage;
+
+          if (remainingPages === 0) {
+            return fortnoxPartialCatalogResult({
+              externalObjects,
+              resource: "invoice",
+              page,
+              message: "Fortnox invoice sync paused at page limit",
+            });
+          }
+        } else {
+          resource = "payment";
+          page = 1;
+
+          if (remainingPages === 0) {
+            return fortnoxPartialCatalogResult({
+              externalObjects,
+              resource: "payment",
+              page,
+              message: "Fortnox invoice payment sync paused at page limit",
+            });
+          }
+
+          break;
+        }
+      }
+    }
+
+    if (resource === "payment") {
+      while (remainingPages > 0) {
+        const payments = await fetchFortnoxPage({
+          fetchFn: input.fetchFn,
+          apiBaseUrl: input.apiBaseUrl,
+          accessToken: input.accessToken,
+          path: "invoicepayments",
+          arrayKey: "InvoicePayments",
+          page,
+        });
+        externalObjects.push(
+          ...payments.items.map((payment) =>
+            fortnoxInvoicePaymentExternalObject(payment, input.providerConnectionId),
+          ),
+        );
+        remainingPages -= 1;
+
+        if (payments.nextPage) {
+          page = payments.nextPage;
+
+          if (remainingPages === 0) {
+            return fortnoxPartialCatalogResult({
+              externalObjects,
+              resource: "payment",
+              page,
+              message: "Fortnox invoice payment sync paused at page limit",
+            });
+          }
+        } else {
+          return {
+            status: "completed",
+            externalObjects,
+            nextCursor: null,
+            recovery: null,
+            error: null,
+          };
+        }
+      }
+    }
+
+    return {
+      status: "completed",
+      externalObjects,
+      nextCursor: null,
+      recovery: null,
+      error: null,
+    };
+  } catch (error) {
+    if (externalObjects.length === 0) {
+      throw error;
+    }
+
+    return fortnoxPartialCatalogResult({
+      externalObjects,
+      resource,
+      page,
+      message: `Fortnox ${resource} sync failed; retry with returned cursor`,
+      error: error instanceof Error ? error.message : "Fortnox catalog sync failed",
+    });
+  }
+}
+
+function fortnoxPartialCatalogResult(input: {
+  externalObjects: IntegrationProviderExternalObject[];
+  resource: FortnoxSyncResource;
+  page: number;
+  message: string;
+  error?: string;
+}) {
+  const retryCursor = { resource: input.resource, page: input.page };
+
+  return {
+    status: "partial" as const,
+    externalObjects: input.externalObjects,
+    nextCursor: retryCursor,
+    recovery: {
+      message: input.message,
+      retryCursor,
+    },
+    error: input.error ?? input.message,
+  };
+}
+
+async function fetchFortnoxCompany(input: {
+  fetchFn: FortnoxHttpFetch;
+  apiBaseUrl: string;
+  providerConnectionId: string;
+  accessToken: string;
+}) {
+  const payload = await fetchFortnoxJson({
+    fetchFn: input.fetchFn,
+    apiBaseUrl: input.apiBaseUrl,
+    accessToken: input.accessToken,
+    path: "companyinformation",
+  });
+  const company = fortnoxEnvelope(payload, "CompanyInformation");
+  const organizationNumber = maybeNormalizeSwedishOrganizationNumber(
+    stringFromRecord(company, ["OrganizationNumber", "OrganisationNumber", "organizationNumber"]),
+  );
+  const providerObjectId =
+    organizationNumber ??
+    stringFromRecord(company, ["DatabaseNumber", "CompanyId", "CompanyID", "id"]) ??
+    "company";
+
+  return {
+    providerObjectType: "company",
+    providerObjectId,
+    rawPayload: {
+      provider: "fortnox",
+      providerConnectionId: input.providerConnectionId,
+      name: stringFromRecord(company, ["Name", "CompanyName", "name"]) ?? null,
+      organizationNumber,
+      sourcePayload: company,
+    },
+  };
+}
+
+async function fetchFortnoxPage(input: {
+  fetchFn: FortnoxHttpFetch;
+  apiBaseUrl: string;
+  accessToken: string;
+  path: string;
+  arrayKey: string;
+  page: number;
+}) {
+  const payload = await fetchFortnoxJson({
+    fetchFn: input.fetchFn,
+    apiBaseUrl: input.apiBaseUrl,
+    accessToken: input.accessToken,
+    path: input.path,
+    query: {
+      page: String(input.page),
+      limit: "100",
+    },
+  });
+  const items = arrayFromRecord(fortnoxEnvelope(payload, input.arrayKey), input.arrayKey);
+  const totalPages = numberFromRecord(payload, [
+    "MetaInformation.@TotalPages",
+    "MetaInformation.TotalPages",
+    "@TotalPages",
+    "TotalPages",
+  ]);
+  const nextPage = totalPages && input.page < totalPages ? input.page + 1 : null;
+
+  return { items, nextPage };
+}
+
+async function fetchFortnoxJson(input: {
+  fetchFn: FortnoxHttpFetch;
+  apiBaseUrl: string;
+  accessToken: string;
+  path: string;
+  query?: Record<string, string>;
+}) {
+  const url = new URL(input.path, `${input.apiBaseUrl.replace(/\/+$/, "")}/`);
+
+  for (const [key, value] of Object.entries(input.query ?? {})) {
+    url.searchParams.set(key, value);
+  }
+
+  const response = await input.fetchFn(url, {
+    method: "GET",
+    headers: {
+      authorization: `Bearer ${input.accessToken}`,
+      accept: "application/json",
+    },
+  });
+  const payload = await parseFortnoxJsonResponse(response);
+
+  if (!response.ok) {
+    throw new Error(`Fortnox API request failed: ${fortnoxErrorSummary(payload)}`);
+  }
+
+  return payload;
+}
+
+async function parseFortnoxJsonResponse(response: Response) {
+  const text = await response.text();
+
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text) as ProviderRawPayload;
+  } catch {
+    return { body: text };
+  }
+}
+
+function fortnoxTokenBundleFromResponse(
+  payload: ProviderRawPayload,
+  now: Date,
+): FortnoxTokenBundle {
+  const accessToken = requiredPayloadString(payload, "access_token");
+  const refreshToken = requiredPayloadString(payload, "refresh_token");
+  const expiresIn = numberFromRecord(payload, ["expires_in"]) ?? 3600;
+  const tokenType = stringFromRecord(payload, ["token_type"]);
+  const scopes = fortnoxScopesFromPayload(payload);
+
+  if (tokenType !== "bearer" && tokenType !== "Bearer") {
+    throw new Error("Fortnox token response did not include a bearer token type");
+  }
+
+  return {
+    accessToken,
+    refreshToken,
+    expiresAt: new Date(now.getTime() + expiresIn * 1000).toISOString(),
+    tokenType,
+    scopes,
+    rawPayload: {
+      provider: "fortnox",
+      scopes,
+      expiresIn,
+      tokenType,
+    },
+  };
+}
+
+function fortnoxScopesFromPayload(payload: ProviderRawPayload) {
+  const scope = payload.scope;
+
+  if (Array.isArray(scope)) {
+    return scope.filter((item): item is string => typeof item === "string");
+  }
+
+  if (typeof scope === "string") {
+    return scope.split(/\s+/).filter(Boolean);
+  }
+
+  return [];
+}
+
+function fortnoxCustomerExternalObject(
+  customer: ProviderRawPayload,
+  providerConnectionId: string,
+): IntegrationProviderExternalObject {
+  const customerNumber = requiredPayloadString(customer, "CustomerNumber", "customerNumber");
+  const organizationNumber = maybeNormalizeSwedishOrganizationNumber(
+    stringFromRecord(customer, ["OrganisationNumber", "OrganizationNumber", "organizationNumber"]),
+  );
+
+  return {
+    providerObjectType: "customer",
+    providerObjectId: normalizeFortnoxCustomerNumber(customerNumber),
+    rawPayload: {
+      provider: "fortnox",
+      providerConnectionId,
+      customerNumber,
+      name: stringFromRecord(customer, ["Name", "name"]) ?? null,
+      organizationNumber,
+      currency: stringFromRecord(customer, ["Currency", "currency"]) ?? null,
+      paymentTerms:
+        stringFromRecord(customer, ["TermsOfPayment", "TermsOfPayment.Name", "paymentTerms"]) ??
+        null,
+      sourcePayload: customer,
+    },
+  };
+}
+
+function fortnoxArticleExternalObject(
+  article: ProviderRawPayload,
+  providerConnectionId: string,
+): IntegrationProviderExternalObject {
+  const articleNumber = requiredPayloadString(article, "ArticleNumber", "articleNumber");
+
+  return {
+    providerObjectType: "article",
+    providerObjectId: normalizeFortnoxArticleNumber(articleNumber),
+    rawPayload: {
+      provider: "fortnox",
+      providerConnectionId,
+      articleNumber,
+      description: stringFromRecord(article, ["Description", "description"]) ?? null,
+      unit: stringFromRecord(article, ["Unit", "unit"]) ?? null,
+      salesPrice: numberFromRecord(article, ["SalesPrice", "salesPrice"]),
+      vat: numberFromRecord(article, ["VAT", "Vat", "vat"]),
+      sourcePayload: article,
+    },
+  };
+}
+
+function fortnoxInvoiceExternalObject(
+  invoice: ProviderRawPayload,
+  providerConnectionId: string,
+): IntegrationProviderExternalObject {
+  const documentNumber = requiredPayloadString(invoice, "DocumentNumber", "InvoiceNumber");
+  const balance = numberFromRecord(invoice, ["Balance", "balance"]);
+  const total = numberFromRecord(invoice, ["Total", "total"]);
+
+  return {
+    providerObjectType: "invoice",
+    providerObjectId: documentNumber,
+    rawPayload: {
+      provider: "fortnox",
+      providerConnectionId,
+      documentNumber,
+      customerNumber: stringFromRecord(invoice, ["CustomerNumber", "customerNumber"]) ?? null,
+      customerName: stringFromRecord(invoice, ["CustomerName", "customerName"]) ?? null,
+      invoiceDate: stringFromRecord(invoice, ["InvoiceDate", "invoiceDate"]) ?? null,
+      dueDate: stringFromRecord(invoice, ["DueDate", "dueDate"]) ?? null,
+      balance,
+      total,
+      currency: stringFromRecord(invoice, ["Currency", "currency"]) ?? null,
+      booked: booleanFromRecord(invoice, ["Booked", "booked"]),
+      cancelled: booleanFromRecord(invoice, ["Cancelled", "CancelledInvoice", "cancelled"]),
+      paymentState: balance === 0 ? "paid" : "open",
+      sourcePayload: invoice,
+    },
+  };
+}
+
+function fortnoxInvoicePaymentExternalObject(
+  payment: ProviderRawPayload,
+  providerConnectionId: string,
+): IntegrationProviderExternalObject {
+  const paymentNumber = stringFromRecord(payment, [
+    "Number",
+    "PaymentNumber",
+    "InvoicePaymentNumber",
+    "number",
+  ]);
+  const invoiceNumber = stringFromRecord(payment, [
+    "InvoiceNumber",
+    "DocumentNumber",
+    "invoiceNumber",
+  ]);
+  const providerObjectId = paymentNumber ?? `payment:${hashProviderPayload(payment)}`;
+
+  return {
+    providerObjectType: "payment",
+    providerObjectId,
+    rawPayload: {
+      provider: "fortnox",
+      providerConnectionId,
+      paymentNumber,
+      invoiceNumber,
+      amount: numberFromRecord(payment, ["Amount", "amount"]),
+      paymentDate: stringFromRecord(payment, ["PaymentDate", "paymentDate"]) ?? null,
+      currency: stringFromRecord(payment, ["Currency", "currency"]) ?? null,
+      modeOfPayment: stringFromRecord(payment, ["ModeOfPayment", "modeOfPayment"]) ?? null,
+      sourcePayload: payment,
+    },
+  };
+}
+
+function parseFortnoxSyncCursor(cursor?: ProviderRawPayload | null): FortnoxSyncCursor | null {
+  if (!cursor) {
+    return null;
+  }
+
+  const resource = cursor.resource;
+  const page = cursor.page;
+
+  if (
+    (resource === "company" ||
+      resource === "customer" ||
+      resource === "article" ||
+      resource === "invoice" ||
+      resource === "payment") &&
+    typeof page === "number" &&
+    Number.isInteger(page) &&
+    page > 0
+  ) {
+    return { resource, page };
+  }
+
+  return null;
+}
+
+function fortnoxEnvelope(payload: ProviderRawPayload, key: string): ProviderRawPayload {
+  const value = payload[key];
+
+  if (isRecord(value)) {
+    return value;
+  }
+
+  return payload;
+}
+
+function arrayFromRecord(payload: ProviderRawPayload, key: string): ProviderRawPayload[] {
+  const value = payload[key];
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(isRecord);
+}
+
+function maybeNormalizeSwedishOrganizationNumber(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return normalizeSwedishOrganizationNumber(value);
+  } catch {
+    return null;
+  }
+}
+
+function requiredPayloadString(payload: ProviderRawPayload, ...keys: string[]) {
+  const value = stringFromRecord(payload, keys);
+
+  if (!value) {
+    throw new Error(`Fortnox response is missing required field: ${keys.join(" or ")}`);
+  }
+
+  return value;
+}
+
+function stringFromRecord(payload: ProviderRawPayload, keys: readonly string[]) {
+  for (const key of keys) {
+    const value = valueFromPath(payload, key);
+
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+
+  return null;
+}
+
+function numberFromRecord(payload: ProviderRawPayload, keys: readonly string[]) {
+  for (const key of keys) {
+    const value = valueFromPath(payload, key);
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+
+    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+
+  return null;
+}
+
+function booleanFromRecord(payload: ProviderRawPayload, keys: readonly string[]) {
+  for (const key of keys) {
+    const value = valueFromPath(payload, key);
+
+    if (typeof value === "boolean") {
+      return value;
+    }
+
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+
+      if (normalized === "true") {
+        return true;
+      }
+
+      if (normalized === "false") {
+        return false;
+      }
+    }
+  }
+
+  return null;
+}
+
+function hashProviderPayload(payload: ProviderRawPayload) {
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 16);
+}
+
+function valueFromPath(payload: ProviderRawPayload, path: string): unknown {
+  let current: unknown = payload;
+
+  for (const part of path.split(".")) {
+    if (!isRecord(current)) {
+      return null;
+    }
+
+    current = current[part];
+  }
+
+  return current;
+}
+
+function fortnoxErrorSummary(payload: ProviderRawPayload) {
+  return (
+    stringFromRecord(payload, [
+      "ErrorInformation.message",
+      "ErrorInformation.Message",
+      "error_description",
+      "message",
+      "body",
+    ]) ?? "unknown Fortnox error"
+  );
+}
+
+function isRecord(value: unknown): value is ProviderRawPayload {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function mockFortnoxCompany(teamId: string) {
+  return {
+    companyId: `company_${teamId}`,
+    name: "Fortnox Demo AB",
+    organizationNumber: normalizeSwedishOrganizationNumber("556677-8899"),
+    defaultCurrency: "SEK",
+  };
+}
+
+async function fortnoxProviderConnection(input: {
+  teamId: string;
+  actorId: string;
+  idempotencyKey: string;
+  tokenCodec: FortnoxTokenCodec;
+  grantedScopes?: readonly string[];
+  licensedScopes?: readonly string[];
+  now: Date;
+  oauth: Record<string, unknown>;
+}): Promise<IntegrationProviderConnection> {
+  const tokenBundle = mockFortnoxTokenBundle({
+    teamId: input.teamId,
+    actorId: input.actorId,
+    idempotencyKey: input.idempotencyKey,
+    grantedScopes: input.grantedScopes,
+  });
+  const health = normalizeFortnoxConnectionHealth({
+    grantedScopes: tokenBundle.scopes,
+    licensedScopes: input.licensedScopes,
+    expiresAt: tokenBundle.expiresAt,
+    now: input.now,
+  });
+
+  return {
+    provider: "fortnox",
+    category: "accounting",
+    providerConnectionId: `fortnox_${input.teamId}`,
+    displayName: "Fortnox Demo AB",
+    status: "connected",
+    capabilities: ["connect", "sync", "disable"],
+    token: await input.tokenCodec.encrypt(tokenBundle),
+    rawPayload: {
+      mock: true,
+      provider: "fortnox",
+      teamId: input.teamId,
+      company: mockFortnoxCompany(input.teamId),
+      oauth: {
+        stateValidated: true,
+        scopes: ["companyinformation", "customer", "article", "invoice"],
+        tokenEndpoint: "https://apps.fortnox.se/oauth-v1/token",
+        tokenType: tokenBundle.tokenType,
+        expiresAt: tokenBundle.expiresAt,
+        ...input.oauth,
+      },
+      health,
+    },
+  };
+}
+
+function mockFortnoxTokenBundle(input: {
+  teamId: string;
+  actorId: string;
+  idempotencyKey: string;
+  grantedScopes?: readonly string[];
+}): FortnoxTokenBundle {
+  const scopes = [...(input.grantedScopes ?? fortnoxRequiredScopes)];
+
+  return {
+    accessToken: `mock_fortnox_access_${input.teamId}_${input.actorId}_${input.idempotencyKey}`,
+    refreshToken: `mock_fortnox_refresh_${input.teamId}_${input.actorId}_${input.idempotencyKey}`,
+    expiresAt: "2026-06-15T10:30:00.000Z",
+    tokenType: "Bearer",
+    scopes,
+    rawPayload: {
+      mock: true,
+      provider: "fortnox",
+      scopes,
+    },
+  };
+}
+
+async function maybeRefreshFortnoxToken(input: {
+  tokenCodec: FortnoxTokenCodec;
+  token: IntegrationProviderToken;
+  providerConnectionId: string;
+  now: Date;
+  licensedScopes?: readonly string[];
+}) {
+  const tokens = await input.tokenCodec.decrypt(input.token);
+  const expiresInMs = new Date(tokens.expiresAt).getTime() - input.now.getTime();
+
+  if (expiresInMs > 5 * 60_000) {
+    return null;
+  }
+
+  const refreshed: FortnoxTokenBundle = {
+    ...tokens,
+    accessToken: `mock_fortnox_refreshed_${tokens.refreshToken.slice(-12)}`,
+    expiresAt: new Date(input.now.getTime() + 60 * 60_000).toISOString(),
+    rawPayload: {
+      ...tokens.rawPayload,
+      refreshed: true,
+    },
+  };
+  const health = normalizeFortnoxConnectionHealth({
+    grantedScopes: refreshed.scopes,
+    licensedScopes: input.licensedScopes,
+    expiresAt: refreshed.expiresAt,
+    now: input.now,
+  });
+  const connectionRawPayload = {
+    mock: true,
+    provider: "fortnox",
+    providerConnectionId: input.providerConnectionId,
+    oauth: {
+      scopes: refreshed.scopes,
+      tokenType: refreshed.tokenType,
+      expiresAt: refreshed.expiresAt,
+      refreshedAt: input.now.toISOString(),
+      tokenEndpoint: "https://apps.fortnox.se/oauth-v1/token",
+    },
+    health,
+  };
+
+  return {
+    token: await input.tokenCodec.encrypt(refreshed),
+    connectionRawPayload,
+    health,
+  };
+}
+
+function fortnoxObjectsForSync(input: {
+  objects: readonly IntegrationProviderExternalObject[];
+  partialFailure: boolean;
+  cursor?: ProviderRawPayload | null;
+}): {
+  status: "completed" | "partial";
+  objects: IntegrationProviderExternalObject[];
+  nextCursor: ProviderRawPayload | null;
+  recovery: { message: string; retryCursor: ProviderRawPayload } | null;
+  error: string | null;
+} {
+  if (!input.partialFailure) {
+    return {
+      status: "completed",
+      objects: [...input.objects],
+      nextCursor: null,
+      recovery: null,
+      error: null,
+    };
+  }
+
+  if (input.cursor?.resumeFrom === "fortnox:article:SUPPORT") {
+    return {
+      status: "completed",
+      objects: input.objects.filter(
+        (object) =>
+          object.providerObjectType === "article" && object.providerObjectId === "SUPPORT",
+      ),
+      nextCursor: null,
+      recovery: null,
+      error: null,
+    };
+  }
+
+  const retryCursor = {
+    resumeFrom: "fortnox:article:SUPPORT",
+    objectTypesCompleted: ["company", "customer"],
+    failedObjectType: "article",
+  };
+
+  return {
+    status: "partial",
+    objects: input.objects.filter((object) => {
+      if (object.providerObjectType === "company" || object.providerObjectType === "customer") {
+        return true;
+      }
+
+      return object.providerObjectType === "article" && object.providerObjectId === "KONSULT";
+    }),
+    nextCursor: retryCursor,
+    recovery: {
+      message: "Fortnox article sync stopped after customers; retry with returned cursor",
+      retryCursor,
+    },
+    error: "Fortnox article sync partially failed",
+  };
+}
+
+function mockFortnoxCustomers() {
+  return [
+    {
+      customerNumber: "1001",
+      name: "Acme Sverige AB",
+      organizationNumber: normalizeSwedishOrganizationNumber("556111-2222"),
+      currency: "SEK",
+      paymentTerms: "30",
+    },
+    {
+      customerNumber: "1002",
+      name: "Northwind Konsult AB",
+      organizationNumber: normalizeSwedishOrganizationNumber("556333-4444"),
+      currency: "SEK",
+      paymentTerms: "15",
+    },
+  ];
+}
+
+function mockFortnoxArticles() {
+  return [
+    {
+      articleNumber: "KONSULT",
+      description: "Konsulttimme",
+      unit: "tim",
+      vatRateBasisPoints: 2_500,
+      currency: "SEK",
+    },
+    {
+      articleNumber: "SUPPORT",
+      description: "Supportavtal",
+      unit: "st",
+      vatRateBasisPoints: 2_500,
+      currency: "SEK",
+    },
+  ];
+}
+
+function mockFortnoxInvoices(): ProviderRawPayload[] {
+  return [
+    {
+      DocumentNumber: "9001",
+      CustomerNumber: "1001",
+      CustomerName: "Acme Sverige AB",
+      InvoiceDate: "2026-06-15",
+      DueDate: "2026-07-15",
+      Balance: 0,
+      Total: 250000,
+      Currency: "SEK",
+      Booked: true,
+      Cancelled: false,
+    },
+    {
+      DocumentNumber: "9002",
+      CustomerNumber: "1002",
+      CustomerName: "Nordic Supply AB",
+      InvoiceDate: "2026-06-18",
+      DueDate: "2026-07-18",
+      Balance: 125000,
+      Total: 125000,
+      Currency: "SEK",
+      Booked: true,
+      Cancelled: false,
+    },
+  ];
+}
+
+function mockFortnoxInvoicePayments(): ProviderRawPayload[] {
+  return [
+    {
+      Number: "7001",
+      InvoiceNumber: "9001",
+      Amount: 250000,
+      PaymentDate: "2026-06-20",
+      Currency: "SEK",
+      ModeOfPayment: "BG",
+    },
+  ];
+}
+
 function mockPaymentEventFromPayload(input: {
   provider: IntegrationProviderName;
   providerConnectionId: string;
@@ -778,6 +2443,36 @@ function mockPaymentEventFromPayload(input: {
     paidAt,
     method,
     rawPayload: input.rawPayload,
+  };
+}
+
+function parseFortnoxTokenBundle(value: unknown): FortnoxTokenBundle {
+  if (!value || typeof value !== "object") {
+    throw new Error("Fortnox token cannot be decrypted");
+  }
+
+  const record = value as Record<string, unknown>;
+
+  if (
+    typeof record.accessToken !== "string" ||
+    typeof record.refreshToken !== "string" ||
+    typeof record.expiresAt !== "string" ||
+    (record.tokenType !== "Bearer" && record.tokenType !== "bearer") ||
+    !Array.isArray(record.scopes)
+  ) {
+    throw new Error("Fortnox token cannot be decrypted");
+  }
+
+  return {
+    accessToken: record.accessToken,
+    refreshToken: record.refreshToken,
+    expiresAt: record.expiresAt,
+    tokenType: record.tokenType,
+    scopes: record.scopes.filter((scope): scope is string => typeof scope === "string"),
+    rawPayload:
+      record.rawPayload && typeof record.rawPayload === "object"
+        ? (record.rawPayload as ProviderRawPayload)
+        : {},
   };
 }
 

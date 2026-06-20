@@ -1,17 +1,7 @@
 import { Button } from "@dawn/ui/components/button";
 import { cn } from "@dawn/ui/lib/utils";
 import { Link, useRouterState } from "@tanstack/react-router";
-import {
-  BarChart3,
-  BriefcaseBusiness,
-  FileText,
-  Inbox,
-  LayoutGrid,
-  Settings,
-  Table2,
-  Timer,
-  Users,
-} from "lucide-react";
+import { FileText, Handshake, LayoutDashboard, Settings, Users } from "lucide-react";
 import type { ReactNode } from "react";
 
 import Header from "@/components/header";
@@ -21,15 +11,12 @@ type AppShellProps = {
 };
 
 const navItems = [
-  { label: "Overview", to: "/dashboard", icon: LayoutGrid },
-  { label: "Reports", to: "/reports", icon: BarChart3 },
-  { label: "Transactions", to: "/transactions", icon: Table2 },
-  { label: "Inbox", to: "/inbox", icon: Inbox },
-  { label: "Invoices", to: "/invoices", icon: FileText },
-  { label: "Tracker", to: "/tracker", icon: Timer },
+  { label: "Home", to: "/dashboard", icon: LayoutDashboard },
+  { label: "Deals", to: "/deals", icon: Handshake },
   { label: "Customers", to: "/customers", icon: Users },
-  { label: "Projects", to: "/projects", icon: BriefcaseBusiness },
-  { label: "Operations", to: "/operations", icon: Settings },
+  { label: "Documents", to: "/documents", icon: FileText },
+  { label: "Invoices", to: "/invoices", icon: FileText },
+  { label: "Settings", to: "/settings", icon: Settings },
 ] as const;
 
 function AppSidebar() {

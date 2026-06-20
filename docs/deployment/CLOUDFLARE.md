@@ -29,8 +29,9 @@ The baseline graph in `packages/infra/alchemy.run.ts` defines:
 
 The Worker also receives typed string bindings for `DATABASE_URL`,
 `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `POLAR_ACCESS_TOKEN`,
-`POLAR_SUCCESS_URL`, `CORS_ORIGIN`, `GMAIL_CLIENT_ID`,
-`GMAIL_CLIENT_SECRET`, `NODE_ENV`, and `ENVIRONMENT`.
+`POLAR_SUCCESS_URL`, `CORS_ORIGIN`, `FORTNOX_CLIENT_ID`,
+`FORTNOX_CLIENT_SECRET`, `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`,
+`NODE_ENV`, and `ENVIRONMENT`.
 
 ## Secrets
 
@@ -68,6 +69,18 @@ callback, so the Google OAuth client must allow both:
 
 Dawn requests Gmail read-only access through
 `https://www.googleapis.com/auth/gmail.readonly`.
+
+Optional Fortnox OAuth values:
+
+- `FORTNOX_CLIENT_ID`
+- `FORTNOX_CLIENT_SECRET`
+
+Set both values to use the credential-backed Fortnox adapter for OAuth,
+refresh-token rotation, and customer/article catalog sync. When either value is
+absent, local/test runtimes keep using the mock Fortnox adapter. The Fortnox
+OAuth redirect URI must match the redirect URL sent from the Dawn settings
+flow, and the app must request at least `companyinformation`, `customer`,
+`article`, and `invoice` scopes for the quote-to-cash slice.
 
 ## Commands
 

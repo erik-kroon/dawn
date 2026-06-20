@@ -11,6 +11,7 @@ import {
   requestDueEmailInboxSyncs,
   resolveSystemAppRequest,
   runAutomationsForOutboxEvent,
+  syncIntegration,
   syncEmailInbox,
   syncBankConnection,
   type WebhookDeliveryProvider,
@@ -33,8 +34,10 @@ import {
   createGmailEmailInboxProvider,
   createMockBankingProvider,
   createMockEmailInboxProvider,
+  createConfiguredIntegrationProviders,
   createSandboxBankingProvider,
   InboxConnector,
+  type IntegrationProvider,
 } from "@dawn/integrations";
 
 import { processAccountantPacketExportJob } from "./accountant-packet-export";
@@ -255,6 +258,25 @@ export function createDawnWorkerJobHandlers(env: DawnCloudflareBindings): DawnQu
         },
       );
     },
+    "fortnox.sync": async (message) => {
+      await syncIntegration(
+        new DrizzleDawnRepository(),
+        createWorkerIntegrationProviders(env),
+        resolveSystemAppRequest({
+          actorId: "system:fortnox-sync",
+          requestId: message.idempotencyKey,
+          teamId: message.teamId,
+        }),
+        {
+          teamId: message.teamId,
+          connectionId: message.connectionId,
+          syncMode: message.syncMode,
+          cursor: message.cursor ?? null,
+          idempotencyKey: message.idempotencyKey,
+          enforceCallerPermission: false,
+        },
+      );
+    },
     "webhook.deliver": async (message) => {
       const result = await deliverWebhooksForOutboxEvent(
         new DrizzleDawnRepository(),
@@ -345,6 +367,14 @@ function createWorkerBankingProviderRegistry(env: DawnCloudflareBindings) {
       webhookSecret: env.BETTER_AUTH_SECRET,
     }),
   ]);
+}
+
+function createWorkerIntegrationProviders(env: DawnCloudflareBindings): IntegrationProvider[] {
+  return createConfiguredIntegrationProviders({
+    fortnoxClientId: env.FORTNOX_CLIENT_ID,
+    fortnoxClientSecret: env.FORTNOX_CLIENT_SECRET,
+    tokenSecret: env.BETTER_AUTH_SECRET,
+  });
 }
 
 function createWorkerEmailInboxConnectors(env: DawnCloudflareBindings) {

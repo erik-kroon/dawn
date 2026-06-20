@@ -52,6 +52,7 @@ import {
 import { client, orpc } from "@/utils/orpc";
 
 import { ensureCurrentTeam, optionalStringSearchParam } from "../-team-routing";
+import { requireParkedSurfaceFlag } from "./-parked-surface";
 
 type InboxTab = "invoices" | "all";
 
@@ -81,6 +82,7 @@ export const Route = createFileRoute("/_auth/inbox")({
   }),
   loaderDeps: ({ search }) => ({ teamId: search.teamId }),
   loader: async ({ context, deps }) => {
+    requireParkedSurfaceFlag(deps.teamId);
     const { currentTeamId } = await ensureCurrentTeam(context, deps.teamId);
 
     if (!currentTeamId) {

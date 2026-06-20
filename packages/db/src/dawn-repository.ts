@@ -35,6 +35,7 @@ import type {
 } from "@dawn/app";
 import type {
   Account,
+  AccountContactSummary,
   Actor,
   ApiKey,
   AutomationRule,
@@ -46,8 +47,21 @@ import type {
   BusinessInsight,
   Category,
   Counterparty,
+  Contact,
+  CommercialDocument,
+  CommercialDocumentLine,
+  CommercialDocumentLineDraft,
+  CommercialDocumentVersion,
+  CommercialDocumentVersionSnapshot,
+  CommercialDocumentWithLines,
   CrmFieldSecurityPolicy,
+  CrmFieldDefinition,
+  CrmObjectTypeDefinition,
+  CrmOptionSet,
+  CrmOptionValue,
   CrmRecord,
+  CrmRecordFieldValue,
+  CrmRecordFieldValueDraft,
   CrmRecordGrant,
   Customer,
   CustomerContact,
@@ -66,6 +80,7 @@ import type {
   Organization,
   Party,
   PartyType,
+  Person,
   LedgerAccount,
   LedgerTransactionDraft,
   Product,
@@ -87,6 +102,7 @@ import type {
   InboxMatchSuggestion,
 } from "@dawn/domain";
 import {
+  calculateCommercialDocumentTotals,
   calculateInvoiceTotals,
   deriveTransactionAccountantStatus,
   ledgerDuplicateKey,
@@ -865,6 +881,42 @@ export class DrizzleDawnRepository implements DrizzleRepository {
           rawPayload: object.rawPayload,
         }
       : null;
+  }
+
+  async listProviderObjectsForTeam(input: {
+    teamId: string;
+    provider: string;
+    providerObjectTypes: readonly string[];
+  }): Promise<ProviderObjectRecord[]> {
+    if (input.providerObjectTypes.length === 0) {
+      return [];
+    }
+
+    const objects = await this.client
+      .select()
+      .from(schema.providerObject)
+      .where(
+        and(
+          eq(schema.providerObject.teamId, input.teamId),
+          eq(schema.providerObject.provider, input.provider),
+          inArray(schema.providerObject.providerObjectType, [...input.providerObjectTypes]),
+        ),
+      )
+      .orderBy(
+        asc(schema.providerObject.providerObjectType),
+        asc(schema.providerObject.providerObjectId),
+      );
+
+    return objects.map((object) => ({
+      id: object.id,
+      teamId: object.teamId,
+      provider: object.provider,
+      providerObjectType: object.providerObjectType,
+      providerObjectId: object.providerObjectId,
+      internalEntityType: object.internalEntityType,
+      internalEntityId: object.internalEntityId,
+      rawPayload: object.rawPayload,
+    }));
   }
 
   async listIntegrationConnectionSummaries(teamId: string) {
@@ -4202,6 +4254,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     entityType?: string | null;
     entityId?: string | null;
     requestId?: string | null;
+    metadata?: Record<string, string>;
   }): Promise<AuditLogEntry[]> {
     const filters = [eq(schema.auditLog.teamId, input.teamId)];
 
@@ -4219,6 +4272,12 @@ export class DrizzleDawnRepository implements DrizzleRepository {
 
     if (input.requestId) {
       filters.push(eq(schema.auditLog.requestId, input.requestId));
+    }
+
+    if (input.metadata) {
+      for (const [key, value] of Object.entries(input.metadata)) {
+        filters.push(sql`${schema.auditLog.metadata}->>${key} = ${value}`);
+      }
     }
 
     const events = await this.client
@@ -4635,6 +4694,44 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return organization ? mapOrganization(organization) : null;
   }
 
+  async listOrganizationsForDuplicateCheck(input: {
+    teamId: string;
+    legalName: string;
+    organizationNumber?: string | null;
+    limit: number;
+  }): Promise<Organization[]> {
+    const duplicateConditions: SQL[] = [
+      sql`lower(${schema.crmOrganization.legalName}) = ${input.legalName.toLocaleLowerCase(
+        "sv-SE",
+      )}`,
+    ];
+
+    if (input.organizationNumber) {
+      duplicateConditions.push(
+        eq(schema.crmOrganization.organizationNumber, input.organizationNumber),
+      );
+    }
+
+    const organizations = await this.client
+      .select()
+      .from(schema.crmOrganization)
+      .where(and(eq(schema.crmOrganization.teamId, input.teamId), or(...duplicateConditions)))
+      .orderBy(desc(schema.crmOrganization.createdAt))
+      .limit(input.limit);
+
+    return organizations.map(mapOrganization);
+  }
+
+  async getPersonForTeam(teamId: string, recordId: string): Promise<Person | null> {
+    const [person] = await this.client
+      .select()
+      .from(schema.crmPerson)
+      .where(and(eq(schema.crmPerson.teamId, teamId), eq(schema.crmPerson.recordId, recordId)))
+      .limit(1);
+
+    return person ? mapPerson(person) : null;
+  }
+
   async getLegalEntityForTeam(teamId: string, recordId: string): Promise<LegalEntity | null> {
     const [legalEntity] = await this.client
       .select()
@@ -4657,13 +4754,41 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return account ? mapAccount(account) : null;
   }
 
+  async getContactForTeam(teamId: string, recordId: string): Promise<Contact | null> {
+    const [contact] = await this.client
+      .select()
+      .from(schema.crmContact)
+      .where(and(eq(schema.crmContact.teamId, teamId), eq(schema.crmContact.recordId, recordId)))
+      .limit(1);
+
+    return contact ? mapContact(contact) : null;
+  }
+
   async listAccountsForTeam(input: {
     teamId: string;
     legalEntityId?: string | null;
     relationshipStatus?: Account["relationshipStatus"] | null;
     accountType?: Account["accountType"] | null;
+    recordIds?: readonly string[] | null;
+    organizationIds?: readonly string[] | null;
   }): Promise<Account[]> {
     const conditions: SQL[] = [eq(schema.crmAccount.teamId, input.teamId)];
+
+    if (input.recordIds) {
+      if (input.recordIds.length === 0) {
+        return [];
+      }
+
+      conditions.push(inArray(schema.crmAccount.recordId, [...input.recordIds]));
+    }
+
+    if (input.organizationIds) {
+      if (input.organizationIds.length === 0) {
+        return [];
+      }
+
+      conditions.push(inArray(schema.crmAccount.organizationId, [...input.organizationIds]));
+    }
 
     if (input.legalEntityId) {
       conditions.push(eq(schema.crmAccount.legalEntityId, input.legalEntityId));
@@ -4684,6 +4809,394 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       .orderBy(desc(schema.crmAccount.createdAt));
 
     return accounts.map(mapAccount);
+  }
+
+  async listContactsForAccount(
+    teamId: string,
+    accountId: string,
+  ): Promise<AccountContactSummary[]> {
+    const contacts = await this.client
+      .select({ contact: schema.crmContact, person: schema.crmPerson })
+      .from(schema.crmContact)
+      .innerJoin(schema.crmPerson, eq(schema.crmContact.personId, schema.crmPerson.recordId))
+      .where(and(eq(schema.crmContact.teamId, teamId), eq(schema.crmContact.accountId, accountId)))
+      .orderBy(desc(schema.crmContact.isPrimary), asc(schema.crmPerson.displayName));
+
+    return contacts.map((row) => ({
+      contact: mapContact(row.contact),
+      person: mapPerson(row.person),
+    }));
+  }
+
+  async getCrmObjectTypeDefinitionForTeam(
+    teamId: string,
+    objectTypeId: string,
+  ): Promise<CrmObjectTypeDefinition | null> {
+    const [objectType] = await this.client
+      .select()
+      .from(schema.crmObjectTypeDefinition)
+      .where(
+        and(
+          eq(schema.crmObjectTypeDefinition.teamId, teamId),
+          eq(schema.crmObjectTypeDefinition.objectTypeId, objectTypeId),
+        ),
+      )
+      .limit(1);
+
+    return objectType ? mapCrmObjectTypeDefinition(objectType) : null;
+  }
+
+  async createCrmObjectTypeDefinition(input: {
+    id: string;
+    teamId: string;
+    objectTypeId: string;
+    label: string;
+    isCustom: boolean;
+    createdByActorId: string;
+  }): Promise<CrmObjectTypeDefinition> {
+    const now = new Date();
+    const [objectType] = await this.client
+      .insert(schema.crmObjectTypeDefinition)
+      .values({
+        id: input.id,
+        teamId: input.teamId,
+        objectTypeId: input.objectTypeId,
+        label: input.label,
+        isCustom: input.isCustom,
+        createdByActorId: input.createdByActorId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!objectType) {
+      throw new Error("CRM object type definition was not created");
+    }
+
+    return mapCrmObjectTypeDefinition(objectType);
+  }
+
+  async getCrmFieldDefinitionForTeam(
+    teamId: string,
+    fieldDefinitionId: string,
+  ): Promise<CrmFieldDefinition | null> {
+    const [fieldDefinition] = await this.client
+      .select()
+      .from(schema.crmFieldDefinition)
+      .where(
+        and(
+          eq(schema.crmFieldDefinition.teamId, teamId),
+          eq(schema.crmFieldDefinition.id, fieldDefinitionId),
+        ),
+      )
+      .limit(1);
+
+    return fieldDefinition ? mapCrmFieldDefinition(fieldDefinition) : null;
+  }
+
+  async getCrmFieldDefinitionByStableKey(input: {
+    teamId: string;
+    objectTypeId: string;
+    stableKey: string;
+  }): Promise<CrmFieldDefinition | null> {
+    const [fieldDefinition] = await this.client
+      .select()
+      .from(schema.crmFieldDefinition)
+      .where(
+        and(
+          eq(schema.crmFieldDefinition.teamId, input.teamId),
+          eq(schema.crmFieldDefinition.objectTypeId, input.objectTypeId),
+          eq(schema.crmFieldDefinition.stableKey, input.stableKey),
+        ),
+      )
+      .limit(1);
+
+    return fieldDefinition ? mapCrmFieldDefinition(fieldDefinition) : null;
+  }
+
+  async createCrmFieldDefinition(input: {
+    id: string;
+    teamId: string;
+    objectTypeDefinitionId: string;
+    objectTypeId: string;
+    stableKey: string;
+    label: string;
+    fieldType: CrmFieldDefinition["fieldType"];
+    cardinality: CrmFieldDefinition["cardinality"];
+    isRequired: boolean;
+    isUnique: boolean;
+    allowedReferenceObjectTypeId: string | null;
+    createdByActorId: string;
+  }): Promise<CrmFieldDefinition> {
+    const now = new Date();
+    const [fieldDefinition] = await this.client
+      .insert(schema.crmFieldDefinition)
+      .values({
+        id: input.id,
+        teamId: input.teamId,
+        objectTypeDefinitionId: input.objectTypeDefinitionId,
+        objectTypeId: input.objectTypeId,
+        stableKey: input.stableKey,
+        label: input.label,
+        fieldType: input.fieldType,
+        cardinality: input.cardinality,
+        isRequired: input.isRequired,
+        isUnique: input.isUnique,
+        allowedReferenceObjectTypeId: input.allowedReferenceObjectTypeId,
+        createdByActorId: input.createdByActorId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!fieldDefinition) {
+      throw new Error("CRM field definition was not created");
+    }
+
+    return mapCrmFieldDefinition(fieldDefinition);
+  }
+
+  async createCrmOptionSet(input: {
+    id: string;
+    teamId: string;
+    fieldDefinitionId: string;
+    stableKey: string;
+    label: string;
+    createdByActorId: string;
+  }): Promise<CrmOptionSet> {
+    const now = new Date();
+    const [optionSet] = await this.client
+      .insert(schema.crmOptionSet)
+      .values({
+        id: input.id,
+        teamId: input.teamId,
+        fieldDefinitionId: input.fieldDefinitionId,
+        stableKey: input.stableKey,
+        label: input.label,
+        createdByActorId: input.createdByActorId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!optionSet) {
+      throw new Error("CRM option set was not created");
+    }
+
+    return mapCrmOptionSet(optionSet);
+  }
+
+  async createCrmOptionValues(
+    input: {
+      id: string;
+      teamId: string;
+      optionSetId: string;
+      stableKey: string;
+      label: string;
+      sortOrder: number;
+    }[],
+  ): Promise<CrmOptionValue[]> {
+    if (input.length === 0) {
+      return [];
+    }
+
+    const now = new Date();
+    const optionValues = await this.client
+      .insert(schema.crmOptionValue)
+      .values(
+        input.map((optionValue) => ({
+          id: optionValue.id,
+          teamId: optionValue.teamId,
+          optionSetId: optionValue.optionSetId,
+          stableKey: optionValue.stableKey,
+          label: optionValue.label,
+          sortOrder: optionValue.sortOrder,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      )
+      .returning();
+
+    return optionValues.map(mapCrmOptionValue);
+  }
+
+  async listCrmOptionValuesForField(input: {
+    teamId: string;
+    fieldDefinitionId: string;
+  }): Promise<CrmOptionValue[]> {
+    const optionValues = await this.client
+      .select({ optionValue: schema.crmOptionValue })
+      .from(schema.crmOptionValue)
+      .innerJoin(schema.crmOptionSet, eq(schema.crmOptionValue.optionSetId, schema.crmOptionSet.id))
+      .where(
+        and(
+          eq(schema.crmOptionSet.teamId, input.teamId),
+          eq(schema.crmOptionSet.fieldDefinitionId, input.fieldDefinitionId),
+        ),
+      )
+      .orderBy(asc(schema.crmOptionValue.sortOrder));
+
+    return optionValues.map((row) => mapCrmOptionValue(row.optionValue));
+  }
+
+  async upsertCrmRecordFieldValue(input: {
+    id: string;
+    teamId: string;
+    recordId: string;
+    fieldDefinitionId: string;
+    position?: number;
+    value: CrmRecordFieldValueDraft;
+    updatedByActorId: string;
+  }): Promise<CrmRecordFieldValue> {
+    const now = new Date();
+    const position = input.position ?? 0;
+    const values = {
+      id: input.id,
+      teamId: input.teamId,
+      recordId: input.recordId,
+      fieldDefinitionId: input.fieldDefinitionId,
+      position,
+      textValue: input.value.textValue,
+      integerValue: input.value.integerValue,
+      booleanValue: input.value.booleanValue,
+      dateValue: input.value.dateValue ? new Date(input.value.dateValue) : null,
+      amountMinor: input.value.amountMinor,
+      currencyCode: input.value.currencyCode,
+      optionValueId: input.value.optionValueId,
+      referenceRecordId: input.value.referenceRecordId,
+      updatedByActorId: input.updatedByActorId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const [fieldValue] = await this.client
+      .insert(schema.crmRecordFieldValue)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [
+          schema.crmRecordFieldValue.teamId,
+          schema.crmRecordFieldValue.recordId,
+          schema.crmRecordFieldValue.fieldDefinitionId,
+          schema.crmRecordFieldValue.position,
+        ],
+        set: {
+          textValue: values.textValue,
+          integerValue: values.integerValue,
+          booleanValue: values.booleanValue,
+          dateValue: values.dateValue,
+          amountMinor: values.amountMinor,
+          currencyCode: values.currencyCode,
+          optionValueId: values.optionValueId,
+          referenceRecordId: values.referenceRecordId,
+          updatedByActorId: values.updatedByActorId,
+          updatedAt: values.updatedAt,
+        },
+      })
+      .returning();
+
+    if (!fieldValue) {
+      throw new Error("CRM record field value was not written");
+    }
+
+    return mapCrmRecordFieldValue(fieldValue);
+  }
+
+  async findCrmRecordFieldValueByFieldValue(input: {
+    teamId: string;
+    fieldDefinitionId: string;
+    value: CrmRecordFieldValueDraft;
+    excludeRecordId?: string | null;
+  }): Promise<CrmRecordFieldValue | null> {
+    const conditions = [
+      eq(schema.crmRecordFieldValue.teamId, input.teamId),
+      eq(schema.crmRecordFieldValue.fieldDefinitionId, input.fieldDefinitionId),
+      ...crmRecordFieldValueConditions(input.value),
+    ];
+
+    if (input.excludeRecordId) {
+      conditions.push(ne(schema.crmRecordFieldValue.recordId, input.excludeRecordId));
+    }
+
+    const [fieldValue] = await this.client
+      .select()
+      .from(schema.crmRecordFieldValue)
+      .where(and(...conditions))
+      .limit(1);
+
+    return fieldValue ? mapCrmRecordFieldValue(fieldValue) : null;
+  }
+
+  async listRecordIdsByCrmFieldValue(input: {
+    teamId: string;
+    fieldDefinitionId: string;
+    value: CrmRecordFieldValueDraft;
+  }): Promise<string[]> {
+    const fieldValues = await this.client
+      .select({ recordId: schema.crmRecordFieldValue.recordId })
+      .from(schema.crmRecordFieldValue)
+      .where(
+        and(
+          eq(schema.crmRecordFieldValue.teamId, input.teamId),
+          eq(schema.crmRecordFieldValue.fieldDefinitionId, input.fieldDefinitionId),
+          ...crmRecordFieldValueConditions(input.value),
+        ),
+      );
+
+    return fieldValues.map((fieldValue) => fieldValue.recordId);
+  }
+
+  async incrementCrmRecordVersion(input: {
+    teamId: string;
+    recordId: string;
+    expectedVersion: number;
+    actorId: string;
+  }): Promise<CrmRecord | null> {
+    const [record] = await this.client
+      .update(schema.crmRecord)
+      .set({
+        version: input.expectedVersion + 1,
+        updatedByActorId: input.actorId,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.crmRecord.teamId, input.teamId),
+          eq(schema.crmRecord.id, input.recordId),
+          eq(schema.crmRecord.version, input.expectedVersion),
+        ),
+      )
+      .returning();
+
+    return record ? mapCrmRecord(record) : null;
+  }
+
+  async archiveCrmRecord(input: {
+    teamId: string;
+    recordId: string;
+    expectedVersion: number;
+    actorId: string;
+  }): Promise<CrmRecord | null> {
+    const now = new Date();
+    const [record] = await this.client
+      .update(schema.crmRecord)
+      .set({
+        lifecycleState: "archived",
+        version: input.expectedVersion + 1,
+        updatedByActorId: input.actorId,
+        updatedAt: now,
+        archivedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.crmRecord.teamId, input.teamId),
+          eq(schema.crmRecord.id, input.recordId),
+          eq(schema.crmRecord.version, input.expectedVersion),
+          eq(schema.crmRecord.lifecycleState, "active"),
+        ),
+      )
+      .returning();
+
+    return record ? mapCrmRecord(record) : null;
   }
 
   async getOpportunityForTeam(teamId: string, recordId: string): Promise<Opportunity | null> {
@@ -4707,6 +5220,21 @@ export class DrizzleDawnRepository implements DrizzleRepository {
           eq(schema.crmOpportunity.teamId, teamId),
           eq(schema.crmOpportunity.accountId, accountId),
           eq(schema.crmOpportunity.status, "open"),
+        ),
+      )
+      .orderBy(desc(schema.crmOpportunity.createdAt));
+
+    return opportunities.map(mapOpportunity);
+  }
+
+  async listOpportunitiesForAccount(teamId: string, accountId: string): Promise<Opportunity[]> {
+    const opportunities = await this.client
+      .select()
+      .from(schema.crmOpportunity)
+      .where(
+        and(
+          eq(schema.crmOpportunity.teamId, teamId),
+          eq(schema.crmOpportunity.accountId, accountId),
         ),
       )
       .orderBy(desc(schema.crmOpportunity.createdAt));
@@ -4802,6 +5330,68 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return mapOrganization(organization);
   }
 
+  async createPerson(input: {
+    recordId: string;
+    teamId: string;
+    givenName?: string | null;
+    familyName?: string | null;
+    displayName: string;
+    email?: string | null;
+    phoneNumber?: string | null;
+  }): Promise<Person> {
+    const now = new Date();
+    const [person] = await this.client
+      .insert(schema.crmPerson)
+      .values({
+        recordId: input.recordId,
+        teamId: input.teamId,
+        givenName: input.givenName ?? null,
+        familyName: input.familyName ?? null,
+        displayName: input.displayName,
+        email: input.email ?? null,
+        phoneNumber: input.phoneNumber ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!person) {
+      throw new Error("Person was not created");
+    }
+
+    return mapPerson(person);
+  }
+
+  async updatePerson(input: {
+    teamId: string;
+    personId: string;
+    givenName: string | null;
+    familyName: string | null;
+    displayName: string;
+    email: string | null;
+    phoneNumber: string | null;
+  }): Promise<Person | null> {
+    const [person] = await this.client
+      .update(schema.crmPerson)
+      .set({
+        givenName: input.givenName,
+        familyName: input.familyName,
+        displayName: input.displayName,
+        email: input.email,
+        phoneNumber: input.phoneNumber,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.crmPerson.teamId, input.teamId),
+          eq(schema.crmPerson.recordId, input.personId),
+        ),
+      )
+      .returning();
+
+    return person ? mapPerson(person) : null;
+  }
+
   async createLegalEntity(input: {
     recordId: string;
     teamId: string;
@@ -4880,6 +5470,98 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return mapAccount(account);
   }
 
+  async updateAccount(input: {
+    teamId: string;
+    accountId: string;
+    accountType: Account["accountType"];
+    legalEntityId: string | null;
+    relationshipStatus: Account["relationshipStatus"];
+    lifecycleStage: Account["lifecycleStage"];
+    segment: string | null;
+    territory: string | null;
+    primaryOwnerPrincipalId: string | null;
+    customerSince: string | null;
+    churnedAt: string | null;
+  }): Promise<Account | null> {
+    const [account] = await this.client
+      .update(schema.crmAccount)
+      .set({
+        accountType: input.accountType,
+        legalEntityId: input.legalEntityId,
+        relationshipStatus: input.relationshipStatus,
+        lifecycleStage: input.lifecycleStage,
+        segment: input.segment,
+        territory: input.territory,
+        primaryOwnerPrincipalId: input.primaryOwnerPrincipalId,
+        customerSince: input.customerSince ? new Date(input.customerSince) : null,
+        churnedAt: input.churnedAt ? new Date(input.churnedAt) : null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.crmAccount.teamId, input.teamId),
+          eq(schema.crmAccount.recordId, input.accountId),
+        ),
+      )
+      .returning();
+
+    return account ? mapAccount(account) : null;
+  }
+
+  async createContact(input: {
+    recordId: string;
+    teamId: string;
+    accountId: string;
+    personId: string;
+    role?: string | null;
+    isPrimary?: boolean | null;
+  }): Promise<Contact> {
+    const now = new Date();
+    const [contact] = await this.client
+      .insert(schema.crmContact)
+      .values({
+        recordId: input.recordId,
+        teamId: input.teamId,
+        accountId: input.accountId,
+        personId: input.personId,
+        role: input.role ?? null,
+        isPrimary: input.isPrimary ?? false,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!contact) {
+      throw new Error("Contact was not created");
+    }
+
+    return mapContact(contact);
+  }
+
+  async updateContact(input: {
+    teamId: string;
+    contactId: string;
+    role: string | null;
+    isPrimary: boolean;
+  }): Promise<Contact | null> {
+    const [contact] = await this.client
+      .update(schema.crmContact)
+      .set({
+        role: input.role,
+        isPrimary: input.isPrimary,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.crmContact.teamId, input.teamId),
+          eq(schema.crmContact.recordId, input.contactId),
+        ),
+      )
+      .returning();
+
+    return contact ? mapContact(contact) : null;
+  }
+
   async createOpportunity(input: {
     recordId: string;
     teamId: string;
@@ -4887,6 +5569,8 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     name: string;
     amountMinor: number;
     currencyCode: string;
+    stage: Opportunity["stage"];
+    status: Opportunity["status"];
     expectedCloseDate?: string | null;
     primaryOwnerPrincipalId?: string | null;
   }): Promise<Opportunity> {
@@ -4900,7 +5584,8 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         name: input.name,
         amountMinor: input.amountMinor,
         currencyCode: input.currencyCode,
-        status: "open",
+        status: input.status,
+        stage: input.stage,
         expectedCloseDate: input.expectedCloseDate ? new Date(input.expectedCloseDate) : null,
         primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
         wonAt: null,
@@ -4916,6 +5601,657 @@ export class DrizzleDawnRepository implements DrizzleRepository {
 
     return mapOpportunity(opportunity);
   }
+
+  async updateOpportunity(input: {
+    teamId: string;
+    opportunityId: string;
+    name: string;
+    amountMinor: number;
+    currencyCode: string;
+    expectedCloseDate: string | null;
+    primaryOwnerPrincipalId: string | null;
+  }): Promise<Opportunity | null> {
+    const [opportunity] = await this.client
+      .update(schema.crmOpportunity)
+      .set({
+        name: input.name,
+        amountMinor: input.amountMinor,
+        currencyCode: input.currencyCode,
+        expectedCloseDate: input.expectedCloseDate ? new Date(input.expectedCloseDate) : null,
+        primaryOwnerPrincipalId: input.primaryOwnerPrincipalId,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.crmOpportunity.teamId, input.teamId),
+          eq(schema.crmOpportunity.recordId, input.opportunityId),
+        ),
+      )
+      .returning();
+
+    return opportunity ? mapOpportunity(opportunity) : null;
+  }
+
+  async updateOpportunityStage(input: {
+    teamId: string;
+    opportunityId: string;
+    stage: Opportunity["stage"];
+    status: Opportunity["status"];
+    actorId: string;
+  }): Promise<Opportunity | null> {
+    const existing = await this.getOpportunityForTeam(input.teamId, input.opportunityId);
+
+    if (!existing) {
+      return null;
+    }
+
+    const now = new Date();
+    const [opportunity] = await this.client
+      .update(schema.crmOpportunity)
+      .set({
+        stage: input.stage,
+        status: input.status,
+        wonAt:
+          input.status === "won"
+            ? existing.wonAt
+              ? new Date(existing.wonAt)
+              : now
+            : existing.wonAt
+              ? new Date(existing.wonAt)
+              : null,
+        lostAt:
+          input.stage === "lost"
+            ? existing.lostAt
+              ? new Date(existing.lostAt)
+              : now
+            : existing.lostAt
+              ? new Date(existing.lostAt)
+              : null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.crmOpportunity.teamId, input.teamId),
+          eq(schema.crmOpportunity.recordId, input.opportunityId),
+        ),
+      )
+      .returning();
+
+    return opportunity ? mapOpportunity(opportunity) : null;
+  }
+
+  async getCommercialDocumentForTeam(
+    teamId: string,
+    documentId: string,
+  ): Promise<CommercialDocumentWithLines | null> {
+    const [document] = await this.client
+      .select()
+      .from(schema.commercialDocument)
+      .where(
+        and(
+          eq(schema.commercialDocument.teamId, teamId),
+          eq(schema.commercialDocument.id, documentId),
+        ),
+      )
+      .limit(1);
+
+    if (!document) {
+      return null;
+    }
+
+    const lines = await this.client
+      .select()
+      .from(schema.commercialDocumentLine)
+      .where(eq(schema.commercialDocumentLine.documentId, document.id))
+      .orderBy(asc(schema.commercialDocumentLine.sortOrder));
+
+    return mapCommercialDocumentWithLines(document, lines);
+  }
+
+  async listCommercialDocumentsForOpportunity(
+    teamId: string,
+    opportunityId: string,
+  ): Promise<CommercialDocumentWithLines[]> {
+    const documents = await this.client
+      .select()
+      .from(schema.commercialDocument)
+      .where(
+        and(
+          eq(schema.commercialDocument.teamId, teamId),
+          eq(schema.commercialDocument.opportunityId, opportunityId),
+        ),
+      )
+      .orderBy(desc(schema.commercialDocument.updatedAt));
+    const documentIds = documents.map((document) => document.id);
+    const lines =
+      documentIds.length === 0
+        ? []
+        : await this.client
+            .select()
+            .from(schema.commercialDocumentLine)
+            .where(inArray(schema.commercialDocumentLine.documentId, documentIds))
+            .orderBy(asc(schema.commercialDocumentLine.sortOrder));
+
+    return documents.map((document) =>
+      mapCommercialDocumentWithLines(
+        document,
+        lines.filter((line) => line.documentId === document.id),
+      ),
+    );
+  }
+
+  async getLatestCommercialDocumentVersionForTeam(
+    teamId: string,
+    documentId: string,
+  ): Promise<CommercialDocumentVersion | null> {
+    const [version] = await this.client
+      .select()
+      .from(schema.commercialDocumentVersion)
+      .where(
+        and(
+          eq(schema.commercialDocumentVersion.teamId, teamId),
+          eq(schema.commercialDocumentVersion.documentId, documentId),
+        ),
+      )
+      .orderBy(desc(schema.commercialDocumentVersion.versionNumber))
+      .limit(1);
+
+    return version ? mapCommercialDocumentVersion(version) : null;
+  }
+
+  async getCommercialDocumentVersionForTeam(
+    teamId: string,
+    versionId: string,
+  ): Promise<CommercialDocumentVersion | null> {
+    const [version] = await this.client
+      .select()
+      .from(schema.commercialDocumentVersion)
+      .where(
+        and(
+          eq(schema.commercialDocumentVersion.teamId, teamId),
+          eq(schema.commercialDocumentVersion.id, versionId),
+        ),
+      )
+      .limit(1);
+
+    return version ? mapCommercialDocumentVersion(version) : null;
+  }
+
+  async createCommercialDocument(input: {
+    documentId: string;
+    teamId: string;
+    accountId: string;
+    opportunityId: string;
+    documentType: CommercialDocument["documentType"];
+    title: string;
+    currency: string;
+    validUntil?: string | null;
+    paymentTerms?: string | null;
+    termsVersion: string;
+    templateId?: string | null;
+    recipientEmail?: string | null;
+    scope?: string | null;
+    lines: CommercialDocumentLineDraft[];
+    createdByActorId: string;
+  }): Promise<CommercialDocumentWithLines> {
+    const now = new Date();
+    const [document] = await this.client
+      .insert(schema.commercialDocument)
+      .values({
+        id: input.documentId,
+        teamId: input.teamId,
+        accountId: input.accountId,
+        opportunityId: input.opportunityId,
+        documentType: input.documentType,
+        title: input.title,
+        status: "draft",
+        currency: input.currency,
+        validUntil: input.validUntil ? new Date(input.validUntil) : null,
+        paymentTerms: input.paymentTerms ?? null,
+        termsVersion: input.termsVersion,
+        templateId: input.templateId ?? null,
+        recipientEmail: input.recipientEmail ?? null,
+        scope: input.scope ?? null,
+        activeVersionId: null,
+        recipientAccessTokenHash: null,
+        recipientAccessTokenExpiresAt: null,
+        sentAt: null,
+        viewedAt: null,
+        declinedAt: null,
+        declineReason: null,
+        createdByActorId: input.createdByActorId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!document) {
+      throw new Error("Commercial document was not created");
+    }
+
+    await this.insertCommercialDocumentLines({
+      teamId: input.teamId,
+      documentId: input.documentId,
+      currency: input.currency,
+      lines: input.lines,
+    });
+
+    return (
+      (await this.getCommercialDocumentForTeam(input.teamId, input.documentId)) ??
+      mapCommercialDocumentWithLines(document, [])
+    );
+  }
+
+  async updateCommercialDocumentDraft(input: {
+    documentId: string;
+    teamId: string;
+    accountId: string;
+    opportunityId: string;
+    documentType: CommercialDocument["documentType"];
+    title: string;
+    currency: string;
+    validUntil?: string | null;
+    paymentTerms?: string | null;
+    termsVersion: string;
+    templateId?: string | null;
+    recipientEmail?: string | null;
+    scope?: string | null;
+    lines: CommercialDocumentLineDraft[];
+  }): Promise<CommercialDocumentWithLines> {
+    const [document] = await this.client
+      .update(schema.commercialDocument)
+      .set({
+        documentType: input.documentType,
+        title: input.title,
+        currency: input.currency,
+        validUntil: input.validUntil ? new Date(input.validUntil) : null,
+        paymentTerms: input.paymentTerms ?? null,
+        termsVersion: input.termsVersion,
+        templateId: input.templateId ?? null,
+        recipientEmail: input.recipientEmail ?? null,
+        scope: input.scope ?? null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.commercialDocument.teamId, input.teamId),
+          eq(schema.commercialDocument.id, input.documentId),
+          eq(schema.commercialDocument.status, "draft"),
+        ),
+      )
+      .returning();
+
+    if (!document) {
+      throw new Error("Commercial document draft was not updated");
+    }
+
+    await this.client
+      .delete(schema.commercialDocumentLine)
+      .where(eq(schema.commercialDocumentLine.documentId, input.documentId));
+    await this.insertCommercialDocumentLines({
+      teamId: input.teamId,
+      documentId: input.documentId,
+      currency: input.currency,
+      lines: input.lines,
+    });
+
+    return (
+      (await this.getCommercialDocumentForTeam(input.teamId, input.documentId)) ??
+      mapCommercialDocumentWithLines(document, [])
+    );
+  }
+
+  async finalizeCommercialDocument(input: {
+    teamId: string;
+    documentId: string;
+    versionId: string;
+    versionNumber: number;
+    snapshot: CommercialDocumentVersionSnapshot;
+    pdfObjectKey: string;
+    pdfBodyBase64: string;
+    pdfSha256: string;
+    byteSize: number;
+    finalizedByActorId: string;
+  }): Promise<{ document: CommercialDocumentWithLines; version: CommercialDocumentVersion }> {
+    const [claimedDocument] = await this.client
+      .update(schema.commercialDocument)
+      .set({
+        status: "finalised",
+        activeVersionId: input.versionId,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.commercialDocument.teamId, input.teamId),
+          eq(schema.commercialDocument.id, input.documentId),
+          eq(schema.commercialDocument.status, "draft"),
+        ),
+      )
+      .returning();
+
+    if (!claimedDocument) {
+      throw new Error("Commercial document was already finalised");
+    }
+
+    const [version] = await this.client
+      .insert(schema.commercialDocumentVersion)
+      .values({
+        id: input.versionId,
+        teamId: input.teamId,
+        documentId: input.documentId,
+        versionNumber: input.versionNumber,
+        status: "finalised",
+        snapshot: input.snapshot,
+        pdfObjectKey: input.pdfObjectKey,
+        pdfBodyBase64: input.pdfBodyBase64,
+        pdfSha256: input.pdfSha256,
+        byteSize: input.byteSize,
+        finalizedByActorId: input.finalizedByActorId,
+      })
+      .returning();
+
+    if (!version) {
+      throw new Error("Commercial document version was not created");
+    }
+
+    const document = await this.getCommercialDocumentForTeam(input.teamId, input.documentId);
+
+    if (!document) {
+      throw new Error("Commercial document disappeared during finalisation");
+    }
+
+    return { document, version: mapCommercialDocumentVersion(version) };
+  }
+
+  async reviseCommercialDocument(input: {
+    documentId: string;
+    teamId: string;
+    accountId: string;
+    opportunityId: string;
+    documentType: CommercialDocument["documentType"];
+    title: string;
+    currency: string;
+    validUntil?: string | null;
+    paymentTerms?: string | null;
+    termsVersion: string;
+    templateId?: string | null;
+    recipientEmail?: string | null;
+    scope?: string | null;
+    lines: CommercialDocumentLineDraft[];
+  }): Promise<{
+    document: CommercialDocumentWithLines;
+    supersededVersion: CommercialDocumentVersion | null;
+  }> {
+    const existing = await this.getCommercialDocumentForTeam(input.teamId, input.documentId);
+    const activeVersionId = existing?.activeVersionId ?? null;
+    let supersededVersion: CommercialDocumentVersion | null = null;
+
+    if (activeVersionId) {
+      const [version] = await this.client
+        .update(schema.commercialDocumentVersion)
+        .set({ status: "superseded" })
+        .where(
+          and(
+            eq(schema.commercialDocumentVersion.teamId, input.teamId),
+            eq(schema.commercialDocumentVersion.id, activeVersionId),
+          ),
+        )
+        .returning();
+      supersededVersion = version ? mapCommercialDocumentVersion(version) : null;
+    }
+
+    const [document] = await this.client
+      .update(schema.commercialDocument)
+      .set({
+        documentType: input.documentType,
+        title: input.title,
+        status: "draft",
+        currency: input.currency,
+        validUntil: input.validUntil ? new Date(input.validUntil) : null,
+        paymentTerms: input.paymentTerms ?? null,
+        termsVersion: input.termsVersion,
+        templateId: input.templateId ?? null,
+        recipientEmail: input.recipientEmail ?? null,
+        scope: input.scope ?? null,
+        activeVersionId: null,
+        recipientAccessTokenHash: null,
+        recipientAccessTokenExpiresAt: null,
+        sentAt: null,
+        viewedAt: null,
+        declinedAt: null,
+        declineReason: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.commercialDocument.teamId, input.teamId),
+          eq(schema.commercialDocument.id, input.documentId),
+        ),
+      )
+      .returning();
+
+    if (!document) {
+      throw new Error("Commercial document revision was not created");
+    }
+
+    await this.client
+      .delete(schema.commercialDocumentLine)
+      .where(eq(schema.commercialDocumentLine.documentId, input.documentId));
+    await this.insertCommercialDocumentLines({
+      teamId: input.teamId,
+      documentId: input.documentId,
+      currency: input.currency,
+      lines: input.lines,
+    });
+
+    return {
+      document:
+        (await this.getCommercialDocumentForTeam(input.teamId, input.documentId)) ??
+        mapCommercialDocumentWithLines(document, []),
+      supersededVersion,
+    };
+  }
+
+  async sendCommercialDocument(input: {
+    teamId: string;
+    documentId: string;
+    recipientEmail: string;
+    recipientAccessTokenHash: string;
+    recipientAccessTokenExpiresAt: string;
+    sentAt: string;
+  }): Promise<CommercialDocumentWithLines> {
+    await this.client
+      .update(schema.commercialDocument)
+      .set({
+        status: "sent",
+        recipientEmail: input.recipientEmail,
+        recipientAccessTokenHash: input.recipientAccessTokenHash,
+        recipientAccessTokenExpiresAt: new Date(input.recipientAccessTokenExpiresAt),
+        sentAt: new Date(input.sentAt),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.commercialDocument.teamId, input.teamId),
+          eq(schema.commercialDocument.id, input.documentId),
+        ),
+      );
+
+    const document = await this.getCommercialDocumentForTeam(input.teamId, input.documentId);
+
+    if (!document) {
+      throw new Error("Commercial document disappeared during send");
+    }
+
+    return document;
+  }
+
+  async getCommercialDocumentByRecipientAccessTokenHash(input: {
+    accessTokenHash: string;
+  }): Promise<{
+    document: CommercialDocumentWithLines;
+    version: CommercialDocumentVersion;
+  } | null> {
+    const [document] = await this.client
+      .select()
+      .from(schema.commercialDocument)
+      .where(eq(schema.commercialDocument.recipientAccessTokenHash, input.accessTokenHash))
+      .limit(1);
+
+    if (!document?.activeVersionId) {
+      return null;
+    }
+
+    const fullDocument = await this.getCommercialDocumentForTeam(document.teamId, document.id);
+    const version = await this.getCommercialDocumentVersionForTeam(
+      document.teamId,
+      document.activeVersionId,
+    );
+
+    return fullDocument && version ? { document: fullDocument, version } : null;
+  }
+
+  async markCommercialDocumentViewed(input: {
+    teamId: string;
+    documentId: string;
+    viewedAt: string;
+  }): Promise<CommercialDocumentWithLines> {
+    await this.client
+      .update(schema.commercialDocument)
+      .set({
+        status: "viewed",
+        viewedAt: new Date(input.viewedAt),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.commercialDocument.teamId, input.teamId),
+          eq(schema.commercialDocument.id, input.documentId),
+        ),
+      );
+
+    const document = await this.getCommercialDocumentForTeam(input.teamId, input.documentId);
+
+    if (!document) {
+      throw new Error("Commercial document disappeared during recipient view");
+    }
+
+    return document;
+  }
+
+  async declineCommercialDocument(input: {
+    teamId: string;
+    documentId: string;
+    declinedAt: string;
+    reason?: string | null;
+  }): Promise<CommercialDocumentWithLines> {
+    await this.client
+      .update(schema.commercialDocument)
+      .set({
+        status: "declined",
+        declinedAt: new Date(input.declinedAt),
+        declineReason: input.reason ?? null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.commercialDocument.teamId, input.teamId),
+          eq(schema.commercialDocument.id, input.documentId),
+        ),
+      );
+
+    const document = await this.getCommercialDocumentForTeam(input.teamId, input.documentId);
+
+    if (!document) {
+      throw new Error("Commercial document disappeared during decline");
+    }
+
+    return document;
+  }
+
+  private async insertCommercialDocumentLines(input: {
+    teamId: string;
+    documentId: string;
+    currency: string;
+    lines: CommercialDocumentLineDraft[];
+  }) {
+    const calculated = calculateCommercialDocumentTotals({
+      currency: input.currency,
+      lines: input.lines,
+    });
+    const values = input.lines.map((line, index) => ({
+      id: crypto.randomUUID(),
+      teamId: input.teamId,
+      documentId: input.documentId,
+      source: line.source,
+      provider: line.provider ?? null,
+      providerConnectionId: line.providerConnectionId ?? null,
+      providerObjectId: line.providerObjectId ?? null,
+      providerObjectRecordId: line.providerObjectRecordId ?? null,
+      articleNumber: line.articleNumber ?? null,
+      description: line.description,
+      unit: line.unit ?? null,
+      quantityMilli: line.quantityMilli,
+      unitPriceMinor: line.unitPrice.amountMinor,
+      currency: line.unitPrice.currency,
+      discountBasisPoints: line.discountBasisPoints ?? 0,
+      vatRateBasisPoints: line.vatRateBasisPoints ?? 0,
+      subtotalMinor: calculated.lines[index]?.subtotal.amountMinor ?? 0,
+      discountMinor: calculated.lines[index]?.discount.amountMinor ?? 0,
+      vatMinor: calculated.lines[index]?.vat.amountMinor ?? 0,
+      totalMinor: calculated.lines[index]?.total.amountMinor ?? 0,
+      snapshot: line.snapshot ?? null,
+      sortOrder: index,
+    }));
+
+    if (values.length > 0) {
+      await this.client.insert(schema.commercialDocumentLine).values(values);
+    }
+  }
+}
+
+function crmRecordFieldValueConditions(value: CrmRecordFieldValueDraft): SQL[] {
+  if (value.textValue !== null) {
+    return [eq(schema.crmRecordFieldValue.textValue, value.textValue)];
+  }
+
+  if (value.integerValue !== null) {
+    return [eq(schema.crmRecordFieldValue.integerValue, value.integerValue)];
+  }
+
+  if (value.booleanValue !== null) {
+    return [eq(schema.crmRecordFieldValue.booleanValue, value.booleanValue)];
+  }
+
+  if (value.dateValue !== null) {
+    return [eq(schema.crmRecordFieldValue.dateValue, new Date(value.dateValue))];
+  }
+
+  if (value.amountMinor !== null && value.currencyCode !== null) {
+    return [
+      eq(schema.crmRecordFieldValue.amountMinor, value.amountMinor),
+      eq(schema.crmRecordFieldValue.currencyCode, value.currencyCode),
+    ];
+  }
+
+  if (value.optionValueId !== null) {
+    return [eq(schema.crmRecordFieldValue.optionValueId, value.optionValueId)];
+  }
+
+  if (value.referenceRecordId !== null) {
+    return [eq(schema.crmRecordFieldValue.referenceRecordId, value.referenceRecordId)];
+  }
+
+  return [
+    isNull(schema.crmRecordFieldValue.textValue),
+    isNull(schema.crmRecordFieldValue.integerValue),
+    isNull(schema.crmRecordFieldValue.booleanValue),
+    isNull(schema.crmRecordFieldValue.dateValue),
+    isNull(schema.crmRecordFieldValue.amountMinor),
+    isNull(schema.crmRecordFieldValue.currencyCode),
+    isNull(schema.crmRecordFieldValue.optionValueId),
+    isNull(schema.crmRecordFieldValue.referenceRecordId),
+  ];
 }
 
 function mapCategory(category: typeof schema.transactionCategory.$inferSelect): Category {
@@ -5809,6 +7145,92 @@ function mapCrmRecordGrant(grant: typeof schema.crmRecordGrant.$inferSelect): Cr
   };
 }
 
+function mapCrmObjectTypeDefinition(
+  objectType: typeof schema.crmObjectTypeDefinition.$inferSelect,
+): CrmObjectTypeDefinition {
+  return {
+    id: objectType.id,
+    teamId: objectType.teamId,
+    objectTypeId: objectType.objectTypeId,
+    label: objectType.label,
+    isCustom: objectType.isCustom,
+    createdByActorId: objectType.createdByActorId,
+    createdAt: objectType.createdAt.toISOString(),
+    updatedAt: objectType.updatedAt.toISOString(),
+  };
+}
+
+function mapCrmFieldDefinition(
+  fieldDefinition: typeof schema.crmFieldDefinition.$inferSelect,
+): CrmFieldDefinition {
+  return {
+    id: fieldDefinition.id,
+    teamId: fieldDefinition.teamId,
+    objectTypeDefinitionId: fieldDefinition.objectTypeDefinitionId,
+    objectTypeId: fieldDefinition.objectTypeId,
+    stableKey: fieldDefinition.stableKey,
+    label: fieldDefinition.label,
+    fieldType: fieldDefinition.fieldType as CrmFieldDefinition["fieldType"],
+    cardinality: fieldDefinition.cardinality as CrmFieldDefinition["cardinality"],
+    isRequired: fieldDefinition.isRequired,
+    isUnique: fieldDefinition.isUnique,
+    allowedReferenceObjectTypeId: fieldDefinition.allowedReferenceObjectTypeId,
+    createdByActorId: fieldDefinition.createdByActorId,
+    createdAt: fieldDefinition.createdAt.toISOString(),
+    updatedAt: fieldDefinition.updatedAt.toISOString(),
+  };
+}
+
+function mapCrmOptionSet(optionSet: typeof schema.crmOptionSet.$inferSelect): CrmOptionSet {
+  return {
+    id: optionSet.id,
+    teamId: optionSet.teamId,
+    fieldDefinitionId: optionSet.fieldDefinitionId,
+    stableKey: optionSet.stableKey,
+    label: optionSet.label,
+    createdByActorId: optionSet.createdByActorId,
+    createdAt: optionSet.createdAt.toISOString(),
+    updatedAt: optionSet.updatedAt.toISOString(),
+  };
+}
+
+function mapCrmOptionValue(optionValue: typeof schema.crmOptionValue.$inferSelect): CrmOptionValue {
+  return {
+    id: optionValue.id,
+    teamId: optionValue.teamId,
+    optionSetId: optionValue.optionSetId,
+    stableKey: optionValue.stableKey,
+    label: optionValue.label,
+    sortOrder: optionValue.sortOrder,
+    isActive: optionValue.isActive,
+    createdAt: optionValue.createdAt.toISOString(),
+    updatedAt: optionValue.updatedAt.toISOString(),
+  };
+}
+
+function mapCrmRecordFieldValue(
+  fieldValue: typeof schema.crmRecordFieldValue.$inferSelect,
+): CrmRecordFieldValue {
+  return {
+    id: fieldValue.id,
+    teamId: fieldValue.teamId,
+    recordId: fieldValue.recordId,
+    fieldDefinitionId: fieldValue.fieldDefinitionId,
+    position: fieldValue.position,
+    textValue: fieldValue.textValue,
+    integerValue: fieldValue.integerValue,
+    booleanValue: fieldValue.booleanValue,
+    dateValue: fieldValue.dateValue?.toISOString() ?? null,
+    amountMinor: fieldValue.amountMinor,
+    currencyCode: fieldValue.currencyCode,
+    optionValueId: fieldValue.optionValueId,
+    referenceRecordId: fieldValue.referenceRecordId,
+    updatedByActorId: fieldValue.updatedByActorId,
+    createdAt: fieldValue.createdAt.toISOString(),
+    updatedAt: fieldValue.updatedAt.toISOString(),
+  };
+}
+
 function mapCrmFieldSecurityPolicy(
   policy: typeof schema.crmFieldSecurityPolicy.$inferSelect,
 ): CrmFieldSecurityPolicy {
@@ -5847,6 +7269,20 @@ function mapOrganization(organization: typeof schema.crmOrganization.$inferSelec
   };
 }
 
+function mapPerson(person: typeof schema.crmPerson.$inferSelect): Person {
+  return {
+    recordId: person.recordId,
+    teamId: person.teamId,
+    givenName: person.givenName,
+    familyName: person.familyName,
+    displayName: person.displayName,
+    email: person.email,
+    phoneNumber: person.phoneNumber,
+    createdAt: person.createdAt.toISOString(),
+    updatedAt: person.updatedAt.toISOString(),
+  };
+}
+
 function mapLegalEntity(legalEntity: typeof schema.crmLegalEntity.$inferSelect): LegalEntity {
   return {
     recordId: legalEntity.recordId,
@@ -5882,6 +7318,19 @@ function mapAccount(account: typeof schema.crmAccount.$inferSelect): Account {
   };
 }
 
+function mapContact(contact: typeof schema.crmContact.$inferSelect): Contact {
+  return {
+    recordId: contact.recordId,
+    teamId: contact.teamId,
+    accountId: contact.accountId,
+    personId: contact.personId,
+    role: contact.role,
+    isPrimary: contact.isPrimary,
+    createdAt: contact.createdAt.toISOString(),
+    updatedAt: contact.updatedAt.toISOString(),
+  };
+}
+
 function mapOpportunity(opportunity: typeof schema.crmOpportunity.$inferSelect): Opportunity {
   return {
     recordId: opportunity.recordId,
@@ -5891,11 +7340,116 @@ function mapOpportunity(opportunity: typeof schema.crmOpportunity.$inferSelect):
     amountMinor: opportunity.amountMinor,
     currencyCode: opportunity.currencyCode,
     status: opportunity.status as Opportunity["status"],
+    stage: opportunity.stage as Opportunity["stage"],
     expectedCloseDate: opportunity.expectedCloseDate?.toISOString() ?? null,
     primaryOwnerPrincipalId: opportunity.primaryOwnerPrincipalId,
     wonAt: opportunity.wonAt?.toISOString() ?? null,
     lostAt: opportunity.lostAt?.toISOString() ?? null,
     createdAt: opportunity.createdAt.toISOString(),
     updatedAt: opportunity.updatedAt.toISOString(),
+  };
+}
+
+function mapCommercialDocumentWithLines(
+  document: typeof schema.commercialDocument.$inferSelect,
+  lines: (typeof schema.commercialDocumentLine.$inferSelect)[],
+): CommercialDocumentWithLines {
+  const mappedLines = lines.map(mapCommercialDocumentLine);
+  const totals = {
+    subtotal: {
+      amountMinor: mappedLines.reduce((total, line) => total + line.totals.subtotal.amountMinor, 0),
+      currency: document.currency,
+    },
+    discount: {
+      amountMinor: mappedLines.reduce((total, line) => total + line.totals.discount.amountMinor, 0),
+      currency: document.currency,
+    },
+    vat: {
+      amountMinor: mappedLines.reduce((total, line) => total + line.totals.vat.amountMinor, 0),
+      currency: document.currency,
+    },
+    total: {
+      amountMinor: mappedLines.reduce((total, line) => total + line.totals.total.amountMinor, 0),
+      currency: document.currency,
+    },
+  };
+
+  return {
+    id: document.id,
+    teamId: document.teamId,
+    accountId: document.accountId,
+    opportunityId: document.opportunityId,
+    documentType: document.documentType as CommercialDocument["documentType"],
+    title: document.title,
+    status: document.status as CommercialDocument["status"],
+    currency: document.currency,
+    validUntil: document.validUntil?.toISOString() ?? null,
+    paymentTerms: document.paymentTerms,
+    termsVersion: document.termsVersion,
+    templateId: document.templateId,
+    recipientEmail: document.recipientEmail,
+    scope: document.scope,
+    activeVersionId: document.activeVersionId,
+    recipientAccessTokenHash: document.recipientAccessTokenHash,
+    recipientAccessTokenExpiresAt: document.recipientAccessTokenExpiresAt?.toISOString() ?? null,
+    sentAt: document.sentAt?.toISOString() ?? null,
+    viewedAt: document.viewedAt?.toISOString() ?? null,
+    declinedAt: document.declinedAt?.toISOString() ?? null,
+    declineReason: document.declineReason,
+    createdByActorId: document.createdByActorId,
+    createdAt: document.createdAt.toISOString(),
+    updatedAt: document.updatedAt.toISOString(),
+    lines: mappedLines,
+    totals,
+  };
+}
+
+function mapCommercialDocumentLine(
+  line: typeof schema.commercialDocumentLine.$inferSelect,
+): CommercialDocumentLine {
+  return {
+    id: line.id,
+    teamId: line.teamId,
+    documentId: line.documentId,
+    sortOrder: line.sortOrder,
+    source: line.source as CommercialDocumentLine["source"],
+    provider: line.provider,
+    providerConnectionId: line.providerConnectionId,
+    providerObjectId: line.providerObjectId,
+    providerObjectRecordId: line.providerObjectRecordId,
+    articleNumber: line.articleNumber,
+    description: line.description,
+    unit: line.unit,
+    quantityMilli: line.quantityMilli,
+    unitPrice: { amountMinor: line.unitPriceMinor, currency: line.currency },
+    discountBasisPoints: line.discountBasisPoints,
+    vatRateBasisPoints: line.vatRateBasisPoints,
+    snapshot: line.snapshot,
+    totals: {
+      subtotal: { amountMinor: line.subtotalMinor, currency: line.currency },
+      discount: { amountMinor: line.discountMinor, currency: line.currency },
+      vat: { amountMinor: line.vatMinor, currency: line.currency },
+      total: { amountMinor: line.totalMinor, currency: line.currency },
+    },
+    createdAt: line.createdAt.toISOString(),
+  };
+}
+
+function mapCommercialDocumentVersion(
+  version: typeof schema.commercialDocumentVersion.$inferSelect,
+): CommercialDocumentVersion {
+  return {
+    id: version.id,
+    teamId: version.teamId,
+    documentId: version.documentId,
+    versionNumber: version.versionNumber,
+    status: version.status as CommercialDocumentVersion["status"],
+    snapshot: version.snapshot as CommercialDocumentVersionSnapshot,
+    pdfObjectKey: version.pdfObjectKey,
+    pdfBodyBase64: version.pdfBodyBase64,
+    pdfSha256: version.pdfSha256,
+    byteSize: version.byteSize,
+    finalizedByActorId: version.finalizedByActorId,
+    createdAt: version.createdAt.toISOString(),
   };
 }

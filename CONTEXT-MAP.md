@@ -1,10 +1,12 @@
 # Context Map
 
-Use this file to route quickly through the repo. The current codebase is a starter; the target package layout is described in `docs/PRD.md`.
+Use this file to route quickly through the repo. The active product direction is Dawn quote-to-cash: a Fortnox-native Swedish B2B flow from account/contact and deal to quote or contract, TIC BankID signing, Fortnox invoice, and timeline follow-up.
 
-For the detailed B2B CRM backend and data-model end-state, use `docs/product/CRM-BACKEND-DATA-MODEL-PRD.md`. It is the source of truth for CRM-specific records, metadata extensions, customer graph modeling, sales pipelines, contracts, integrations, audit/history, workflows, reporting, AI recommendations, and GDPR lifecycle rules.
+For the focused product PRD, use `docs/product/FORTNOX-SALES-OS-PRD.md`.
 
-For executable CRM implementation slices, use `docs/work/CRM-BACKEND-VERTICAL-SLICES.md`.
+For executable Fortnox/TIC sales-flow work, use `docs/work/FORTNOX-SALES-OS-VERTICAL-SLICES.md`.
+
+For durable architecture decisions, use `docs/adr/`.
 
 ## Current Repo Map
 
@@ -54,6 +56,18 @@ Look here for:
 
 Target direction: this package becomes transport contracts and route schemas. It should call application use cases rather than database queries directly.
 
+### `packages/app`
+
+Application use cases and repository ports.
+
+Look here for:
+
+- Quote-to-cash behavior to add: Fortnox connection, account/contact/deal, quote/commercial document, TIC signing, trust checks, and Fortnox invoice handoff.
+- Existing reusable modules: `packages/app/src/crm.ts`, `packages/app/src/billing.ts`, `packages/app/src/documents-inbox.ts`, `packages/app/src/integrations.ts`, `packages/app/src/automation.ts`.
+- Parked product modules: banking ledger/accountant handoff, projects/time, assistant, public API/developer platform.
+
+Keep business behavior here, not in routes, workers, UI components, or provider adapters.
+
 ### `packages/auth`
 
 Better Auth configuration and payment plugin integration.
@@ -72,7 +86,7 @@ Drizzle/Postgres schema and database entrypoint.
 Look here for:
 
 - Database client: `packages/db/src/index.ts`
-- Current auth schema: `packages/db/src/schema`
+- Schemas: `packages/db/src/schema/core.ts`, `packages/db/src/schema/crm.ts`, `packages/db/src/schema/auth.ts`
 - Drizzle config: `packages/db/drizzle.config.ts`
 
 Target direction: schema, migrations, repository primitives, transaction helpers, outbox persistence, audit log, and idempotency state.
@@ -112,15 +126,15 @@ UI component direction:
 - Check coss primitive docs and particle examples through that skill instead of inventing APIs.
 - Existing shadcn-style aliases/components are starter context and may be migrated over time.
 
-## Target Packages To Add
+## Shared Package Direction
 
-- `packages/domain`: pure entities, value objects, financial math, domain events, invariants, state machines.
-- `packages/app`: use cases, authorization, transactions, idempotency, audit, outbox writes, provider port calls.
-- `packages/jobs`: job names, queue names, payload schemas, retry/idempotency policy.
-- `packages/integrations`: provider adapter contracts and implementations, including registry/enrichment providers such as TIC.io behind app-owned import/prospecting use cases.
-- `packages/sync`: TanStack DB collection definitions, sync protocol, cursor/conflict policies.
-- `packages/ai`: TanStack AI runtime, tools, prompts, permissions, retrieval, evals.
-- `apps/worker`: queue/workflow consumers and scheduled job execution.
+- `packages/domain`: pure entities, value objects, financial math, domain events, invariants, and state machines.
+- `packages/app`: use cases, authorization, transactions, idempotency, audit, outbox writes, and provider port calls.
+- `packages/jobs`: job names, queue names, payload schemas, retry policy, and idempotency policy.
+- `packages/integrations`: provider adapter contracts and implementations, including Fortnox and TIC behind app-owned use cases.
+- `packages/sync`: TanStack DB collection definitions, sync protocol, cursor policy, and conflict policy.
+- `packages/ai`: AI runtime, tools, prompts, permissions, retrieval, and evals. User-facing copilot remains parked for MVP.
+- Worker execution currently routes through `apps/server/src/worker-runtime.ts`; add a separate `apps/worker` only when deployment/runtime boundaries require it.
 
 ## Reference Repo Map
 
@@ -142,10 +156,9 @@ Use Midday to understand product surface and provider workflows. Do not copy its
 
 ## When To Inspect Next
 
-- For product requirements: start with `docs/PRD.md`.
-- For CRM backend/data-model requirements: use `docs/product/CRM-BACKEND-DATA-MODEL-PRD.md`.
-- For CRM backend execution slices: use `docs/work/CRM-BACKEND-VERTICAL-SLICES.md`.
+- For product requirements: start with `docs/product/FORTNOX-SALES-OS-PRD.md`.
+- For active implementation slices: use `docs/work/FORTNOX-SALES-OS-VERTICAL-SLICES.md`.
 - For terminology: start with `CONTEXT.md`.
 - For implementation location: start with this file.
 - For decisions: check `docs/adr/`.
-- For agent workflow conventions: check `docs/agents/`.
+- For agent workflow conventions: check `AGENTS.md`.

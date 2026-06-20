@@ -9,11 +9,15 @@ import {
   commitCsvTransactionImport,
   completeBankConnection,
   completeEmailInboxOAuth,
+  completeFortnoxOAuth,
   connectEmailInboxFromProviderToken,
   createLedgerCounterparty,
   connectIntegration,
+  createCommercialDocument,
+  createDeterministicCommercialDocumentPdfRenderer,
   createDeterministicInvoicePdfRenderer,
   createEmailInboxOAuthStateCodec,
+  createFortnoxOAuthStateCodec,
   createBankConnectionSession,
   createBankingProviderRegistry,
   connectMockBankConnection,
@@ -21,6 +25,7 @@ import {
   createCustomer,
   createDocumentDownload,
   createDocumentUpload,
+  createFortnoxAuthorizationUrl,
   createAccountantPacketDownload,
   createAutomationRule,
   createDraftInvoice,
@@ -34,13 +39,17 @@ import {
   createTransactionTag,
   createTeam,
   createWebhookSubscription,
+  declineCommercialDocumentByRecipient,
   disableIntegration,
+  disconnectFortnox,
   disconnectBankConnection,
   dismissInboxItem,
   createEmailInboxAuthorizationUrl,
   generateInboxMatchSuggestions,
+  getCommercialDocumentPdf,
   getAssistantConversation,
   exportAccountingIntegration,
+  finalizeCommercialDocument,
   recordPaymentProviderEvent,
   inviteTeamMember,
   correctDocumentExtraction,
@@ -53,6 +62,7 @@ import {
   listDocuments,
   listInboxItems,
   listAccountantPacketExportHistory,
+  listFortnoxCatalog,
   listIntegrationWorkspace,
   listLedgerSummary,
   listBusinessReport,
@@ -64,6 +74,7 @@ import {
   listTransactionSyncCollection,
   listTransactionReviewWorkspace,
   previewCsvTransactionImport,
+  previewCommercialDocumentPdf,
   suggestCsvTransactionImportMapping,
   previewOAuthConsent,
   previewInvoicePdf,
@@ -75,11 +86,13 @@ import {
   requestAccountantPacketExport,
   reviewTransaction,
   revokeAccountantPacketExport,
+  reviseCommercialDocument,
   sendAccountantPacketEmail,
   requestTeamDataDeletion,
   requestTeamDataExport,
   grantOAuthConsent,
   runAutomationsForOutboxEvent,
+  sendCommercialDocument,
   sendInvoice,
   sendInvoiceReminder,
   sendAssistantMessage,
@@ -89,11 +102,15 @@ import {
   syncBankConnection,
   createLedgerTransferPair,
   updateTransactionAccountantStatus,
+  updateCommercialDocumentDraft,
+  viewCommercialDocumentByRecipient,
   type DawnRepository,
   type AccountantPacketAttachmentResolver,
   type DocumentExtractionFields,
   type DocumentUrlSigner,
   type EmailInboxOAuthStateCodec,
+  type FortnoxOAuthStateCodec,
+  type CommercialDocumentPdfRenderer,
   type InvoicePdfRenderer,
   type TransactionImportPayloadStorage,
   updateEmailInboxSettings,
@@ -110,7 +127,7 @@ import { env } from "@dawn/env/server";
 import {
   createMockBankingProvider,
   createSandboxBankingProvider,
-  createMockIntegrationProviders,
+  createConfiguredIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
   type AccountantPacketEmailDeliveryProvider,
   type BankingProvider,
@@ -121,12 +138,26 @@ import {
   type InvoiceEmailDeliveryProvider,
 } from "@dawn/integrations";
 import {
+  archiveAccount as archiveCrmAccount,
+  archiveContact as archiveCrmContact,
+  archiveOpportunity as archiveCrmOpportunity,
   createAccount as createCrmAccount,
+  createContact as createCrmContact,
+  createFieldDefinition as createCrmFieldDefinition,
   createLegalEntity as createCrmLegalEntity,
+  createObjectTypeDefinition as createCrmObjectTypeDefinition,
   createOrganization as createCrmOrganization,
   createOpportunity as createCrmOpportunity,
   getAccountSummary as getCrmAccountSummary,
+  linkAccountProviderCustomer as linkCrmAccountProviderCustomer,
+  listAccountTimeline as listCrmAccountTimeline,
   listAccounts as listCrmAccounts,
+  setRecordFieldValue as setCrmRecordFieldValue,
+  suggestAccountDuplicates as suggestCrmAccountDuplicates,
+  updateAccount as updateCrmAccount,
+  updateContact as updateCrmContact,
+  updateOpportunity as updateCrmOpportunity,
+  updateOpportunityStage as updateCrmOpportunityStage,
 } from "@dawn/app";
 import { z } from "zod";
 
@@ -142,12 +173,14 @@ export type AppRouterDependencies = {
   integrationProviders: readonly IntegrationProvider[];
   emailInboxConnectors: readonly InboxConnector[];
   emailInboxOAuthStateCodec?: EmailInboxOAuthStateCodec;
+  fortnoxOAuthStateCodec?: FortnoxOAuthStateCodec;
   googleAuthAccountTokensForUser?: (userId: string) => Promise<GoogleAuthAccountTokens | null>;
   documentUrlSigner: DocumentUrlSigner;
   accountantPacketAttachmentResolver?: AccountantPacketAttachmentResolver;
   accountantPacketEmailDeliveryProvider?: AccountantPacketEmailDeliveryProvider;
   transactionImportPayloadStorage?: TransactionImportPayloadStorage;
   csvTransactionMappingProvider?: CsvTransactionMappingSuggestionProvider;
+  commercialDocumentPdfRenderer?: CommercialDocumentPdfRenderer;
   invoicePdfRenderer: InvoicePdfRenderer;
   invoiceEmailDeliveryProvider: InvoiceEmailDeliveryProvider;
 };
@@ -401,6 +434,7 @@ const syncBankConnectionInput = z.object({
 const disconnectBankConnectionInput = syncBankConnectionInput;
 
 const integrationProviderInput = z.enum([
+  "fortnox",
   "mock-accounting",
   "mock-payments",
   "mock-messaging",
@@ -424,6 +458,8 @@ const connectIntegrationInput = z.object({
 const syncIntegrationInput = z.object({
   teamId: z.string().min(1),
   connectionId: z.string().min(1),
+  syncMode: z.enum(["initial", "incremental"]).optional(),
+  cursor: z.record(z.string(), z.unknown()).nullable().optional(),
   idempotencyKey: z.string().min(1),
 });
 
@@ -451,6 +487,24 @@ const sendIntegrationEmailInput = syncIntegrationInput.extend({
 const disableIntegrationInput = z.object({
   teamId: z.string().min(1),
   connectionId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const fortnoxCatalogInput = z.object({
+  teamId: z.string().min(1),
+  connectionId: z.string().min(1),
+});
+
+const createFortnoxAuthorizationUrlInput = z.object({
+  teamId: z.string().min(1),
+  redirectUrl: z.url(),
+});
+
+const completeFortnoxOAuthInput = z.object({
+  teamId: z.string().min(1),
+  code: z.string().min(1),
+  redirectUrl: z.url(),
+  state: z.string().min(1),
   idempotencyKey: z.string().min(1),
 });
 
@@ -728,14 +782,310 @@ const crmCreateAccountInput = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+const crmUpdateAccountInput = z.object({
+  teamId: z.string().min(1),
+  accountId: z.string().min(1),
+  accountType: z
+    .enum(["prospect", "customer", "partner", "supplier", "former_customer"])
+    .optional(),
+  legalEntityId: z.string().nullable().optional(),
+  relationshipStatus: z.enum(["active", "churned", "inactive"]).optional(),
+  lifecycleStage: z
+    .enum(["new", "qualified", "active", "growth", "at_risk", "churned", "inactive"])
+    .nullable()
+    .optional(),
+  segment: z.string().nullable().optional(),
+  territory: z.string().nullable().optional(),
+  primaryOwnerPrincipalId: z.string().nullable().optional(),
+  customerSince: z.iso.datetime().nullable().optional(),
+  churnedAt: z.iso.datetime().nullable().optional(),
+  expectedRecordVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmSuggestAccountDuplicatesInput = z.object({
+  teamId: z.string().min(1),
+  legalName: z.string().min(1),
+  organizationNumber: z.string().nullable().optional(),
+  limit: z.number().int().min(1).max(25).nullable().optional(),
+});
+
+const crmCreateContactInput = z.object({
+  teamId: z.string().min(1),
+  accountId: z.string().min(1),
+  givenName: z.string().nullable().optional(),
+  familyName: z.string().nullable().optional(),
+  displayName: z.string().nullable().optional(),
+  email: z.string().nullable().optional(),
+  phoneNumber: z.string().nullable().optional(),
+  role: z.string().nullable().optional(),
+  isPrimary: z.boolean().nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmUpdateContactInput = z.object({
+  teamId: z.string().min(1),
+  contactId: z.string().min(1),
+  givenName: z.string().nullable().optional(),
+  familyName: z.string().nullable().optional(),
+  displayName: z.string().nullable().optional(),
+  email: z.string().nullable().optional(),
+  phoneNumber: z.string().nullable().optional(),
+  role: z.string().nullable().optional(),
+  isPrimary: z.boolean().nullable().optional(),
+  expectedRecordVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmLinkAccountFortnoxCustomerInput = z.object({
+  teamId: z.string().min(1),
+  accountId: z.string().min(1),
+  connectionId: z.string().min(1),
+  providerCustomerId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 const crmCreateOpportunityInput = z.object({
   teamId: z.string().min(1),
   accountId: z.string().min(1),
   name: z.string().min(1),
   amountMinor: z.number().int(),
   currencyCode: z.string().regex(/^[A-Z]{3}$/),
+  stage: z
+    .enum([
+      "new",
+      "qualified",
+      "proposal_preparation",
+      "proposal_sent",
+      "negotiation",
+      "won_pending_invoice",
+      "won",
+      "lost",
+      "archived",
+    ])
+    .nullable()
+    .optional(),
   expectedCloseDate: z.iso.datetime().nullable().optional(),
   primaryOwnerPrincipalId: z.string().nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmUpdateOpportunityInput = z.object({
+  teamId: z.string().min(1),
+  opportunityId: z.string().min(1),
+  name: z.string().min(1).optional(),
+  amountMinor: z.number().int().optional(),
+  currencyCode: z
+    .string()
+    .regex(/^[A-Z]{3}$/)
+    .optional(),
+  expectedCloseDate: z.iso.datetime().nullable().optional(),
+  primaryOwnerPrincipalId: z.string().nullable().optional(),
+  expectedRecordVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmUpdateOpportunityStageInput = z.object({
+  teamId: z.string().min(1),
+  opportunityId: z.string().min(1),
+  stage: z.enum([
+    "new",
+    "qualified",
+    "proposal_preparation",
+    "proposal_sent",
+    "negotiation",
+    "won_pending_invoice",
+    "won",
+    "lost",
+    "archived",
+  ]),
+  expectedRecordVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmArchiveAccountInput = z.object({
+  teamId: z.string().min(1),
+  accountId: z.string().min(1),
+  expectedRecordVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmArchiveContactInput = z.object({
+  teamId: z.string().min(1),
+  contactId: z.string().min(1),
+  expectedRecordVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmArchiveOpportunityInput = z.object({
+  teamId: z.string().min(1),
+  opportunityId: z.string().min(1),
+  expectedRecordVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1),
+});
+
+const commercialDocumentLineInput = z.object({
+  source: z.enum(["fortnox_article", "freeform"]),
+  provider: z.string().nullable().optional(),
+  providerConnectionId: z.string().nullable().optional(),
+  providerObjectId: z.string().nullable().optional(),
+  providerObjectRecordId: z.string().nullable().optional(),
+  articleNumber: z.string().nullable().optional(),
+  description: z.string().min(1),
+  unit: z.string().nullable().optional(),
+  quantityMilli: z.number().int().positive(),
+  unitPrice: z.object({
+    amountMinor: z.number().int(),
+    currency: z.string().regex(/^[A-Z]{3}$/),
+  }),
+  discountBasisPoints: z.number().int().min(0).max(10_000).nullable().optional(),
+  vatRateBasisPoints: z.number().int().min(0).max(10_000).nullable().optional(),
+});
+
+const commercialDocumentCreateInput = z.object({
+  teamId: z.string().min(1),
+  opportunityId: z.string().min(1),
+  documentType: z.enum(["quote", "contract"]).nullable().optional(),
+  title: z.string().min(1),
+  currency: z
+    .string()
+    .regex(/^[A-Z]{3}$/)
+    .nullable()
+    .optional(),
+  validUntil: z.iso.datetime().nullable().optional(),
+  paymentTerms: z.string().nullable().optional(),
+  termsVersion: z.string().min(1),
+  templateId: z.string().nullable().optional(),
+  recipientEmail: z.email().nullable().optional(),
+  scope: z.string().nullable().optional(),
+  lines: z.array(commercialDocumentLineInput).min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const commercialDocumentUpdateInput = z.object({
+  teamId: z.string().min(1),
+  documentId: z.string().min(1),
+  documentType: z.enum(["quote", "contract"]).optional(),
+  title: z.string().min(1).optional(),
+  currency: z
+    .string()
+    .regex(/^[A-Z]{3}$/)
+    .optional(),
+  validUntil: z.iso.datetime().nullable().optional(),
+  paymentTerms: z.string().nullable().optional(),
+  termsVersion: z.string().min(1).optional(),
+  templateId: z.string().nullable().optional(),
+  recipientEmail: z.email().nullable().optional(),
+  scope: z.string().nullable().optional(),
+  lines: z.array(commercialDocumentLineInput).min(1).optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const commercialDocumentIdempotentInput = z.object({
+  teamId: z.string().min(1),
+  documentId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const commercialDocumentPdfInput = z.object({
+  teamId: z.string().min(1),
+  documentId: z.string().min(1),
+  versionId: z.string().nullable().optional(),
+});
+
+const commercialDocumentSendInput = z.object({
+  teamId: z.string().min(1),
+  documentId: z.string().min(1),
+  recipientEmail: z.email().nullable().optional(),
+  expiresAt: z.iso.datetime().nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const commercialDocumentRecipientInput = z.object({
+  accessToken: z.string().min(1),
+});
+
+const commercialDocumentRecipientDeclineInput = z.object({
+  accessToken: z.string().min(1),
+  reason: z.string().max(2_000).nullable().optional(),
+});
+
+const crmFieldValueInput = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("text"),
+    value: z.string(),
+  }),
+  z.object({
+    type: z.literal("integer"),
+    value: z.number().int(),
+  }),
+  z.object({
+    type: z.literal("boolean"),
+    value: z.boolean(),
+  }),
+  z.object({
+    type: z.literal("date"),
+    value: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal("money"),
+    amountMinor: z.number().int(),
+    currencyCode: z.string().regex(/^[A-Z]{3}$/),
+  }),
+  z.object({
+    type: z.literal("single_option"),
+    optionValueId: z.string().nullable().optional(),
+    stableKey: z.string().nullable().optional(),
+  }),
+  z.object({
+    type: z.literal("record_reference"),
+    recordId: z.string().min(1),
+  }),
+]);
+
+const crmCreateObjectTypeDefinitionInput = z.object({
+  teamId: z.string().min(1),
+  objectTypeId: z.string().min(1),
+  label: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmCreateFieldDefinitionInput = z.object({
+  teamId: z.string().min(1),
+  objectTypeId: z.string().min(1),
+  stableKey: z.string().min(1),
+  label: z.string().min(1),
+  fieldType: z.enum([
+    "text",
+    "integer",
+    "boolean",
+    "date",
+    "money",
+    "single_option",
+    "record_reference",
+  ]),
+  cardinality: z.enum(["single", "many"]).nullable().optional(),
+  isRequired: z.boolean().nullable().optional(),
+  isUnique: z.boolean().nullable().optional(),
+  allowedReferenceObjectTypeId: z.string().nullable().optional(),
+  options: z
+    .array(
+      z.object({
+        stableKey: z.string().min(1),
+        label: z.string().min(1),
+        sortOrder: z.number().int().min(0).nullable().optional(),
+      }),
+    )
+    .optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmSetRecordFieldValueInput = z.object({
+  teamId: z.string().min(1),
+  recordId: z.string().min(1),
+  fieldDefinitionId: z.string().min(1),
+  value: crmFieldValueInput,
+  expectedRecordVersion: z.number().int().positive(),
   idempotencyKey: z.string().min(1),
 });
 
@@ -744,12 +1094,25 @@ const crmAccountSummaryInput = z.object({
   accountId: z.string().min(1),
 });
 
+const crmAccountTimelineInput = z.object({
+  teamId: z.string().min(1),
+  accountId: z.string().min(1),
+  limit: z.number().int().min(1).max(100).nullable().optional(),
+});
+
 const crmListAccountsInput = z.object({
   teamId: z.string().min(1),
   legalEntityId: z.string().nullable().optional(),
   relationshipStatus: z.enum(["active", "churned", "inactive"]).nullable().optional(),
   accountType: z
     .enum(["prospect", "customer", "partner", "supplier", "former_customer"])
+    .nullable()
+    .optional(),
+  customFieldFilter: z
+    .object({
+      fieldDefinitionId: z.string().min(1),
+      value: crmFieldValueInput,
+    })
     .nullable()
     .optional(),
 });
@@ -895,9 +1258,17 @@ function createDefaultDependencies(): AppRouterDependencies {
         webhookSecret: env.BETTER_AUTH_SECRET,
       }),
     ],
-    integrationProviders: createMockIntegrationProviders(),
+    integrationProviders: createConfiguredIntegrationProviders({
+      fortnoxClientId: env.FORTNOX_CLIENT_ID,
+      fortnoxClientSecret: env.FORTNOX_CLIENT_SECRET,
+      tokenSecret: env.BETTER_AUTH_SECRET,
+    }),
     emailInboxConnectors: createDefaultEmailInboxConnectors(env),
     emailInboxOAuthStateCodec: createEmailInboxOAuthStateCodec({
+      secret: env.BETTER_AUTH_SECRET,
+      allowedRedirectOrigins: [env.CORS_ORIGIN],
+    }),
+    fortnoxOAuthStateCodec: createFortnoxOAuthStateCodec({
       secret: env.BETTER_AUTH_SECRET,
       allowedRedirectOrigins: [env.CORS_ORIGIN],
     }),
@@ -906,6 +1277,7 @@ function createDefaultDependencies(): AppRouterDependencies {
       baseUrl: env.BETTER_AUTH_URL,
       secret: env.BETTER_AUTH_SECRET,
     }),
+    commercialDocumentPdfRenderer: createDeterministicCommercialDocumentPdfRenderer(),
     invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
     invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
   };
@@ -955,7 +1327,12 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
       secret: env.BETTER_AUTH_SECRET,
       allowedRedirectOrigins: [env.CORS_ORIGIN],
     }),
+    fortnoxOAuthStateCodec = createFortnoxOAuthStateCodec({
+      secret: env.BETTER_AUTH_SECRET,
+      allowedRedirectOrigins: [env.CORS_ORIGIN],
+    }),
     googleAuthAccountTokensForUser = getGoogleAuthAccountTokensForUser,
+    commercialDocumentPdfRenderer = createDeterministicCommercialDocumentPdfRenderer(),
     invoiceEmailDeliveryProvider,
     invoicePdfRenderer,
     dawnRepository,
@@ -1643,6 +2020,36 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             mapAppError(error);
           }
         }),
+      createFortnoxAuthorizationUrl: protectedProcedure
+        .input(createFortnoxAuthorizationUrlInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createFortnoxAuthorizationUrl(
+              dawnRepository,
+              integrationProviders,
+              fortnoxOAuthStateCodec,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      completeFortnoxOAuth: protectedProcedure
+        .input(completeFortnoxOAuthInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await completeFortnoxOAuth(
+              dawnRepository,
+              integrationProviders,
+              fortnoxOAuthStateCodec,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
       sync: protectedProcedure.input(syncIntegrationInput).handler(async ({ context, input }) => {
         try {
           return await syncIntegration(
@@ -1717,6 +2124,33 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
           try {
             return await disableIntegration(
               dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      fortnoxCatalog: protectedProcedure
+        .input(fortnoxCatalogInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listFortnoxCatalog(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      disconnectFortnox: protectedProcedure
+        .input(disableIntegrationInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await disconnectFortnox(
+              dawnRepository,
+              integrationProviders,
               appRequestFromSession(context, { teamId: input.teamId }),
               input,
             );
@@ -2028,6 +2462,61 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         }),
     },
     crm: {
+      createObjectTypeDefinition: protectedProcedure
+        .input(crmCreateObjectTypeDefinitionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createCrmObjectTypeDefinition(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createFieldDefinition: protectedProcedure
+        .input(crmCreateFieldDefinitionInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createCrmFieldDefinition(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                cardinality: input.cardinality ?? "single",
+                isRequired: input.isRequired ?? false,
+                isUnique: input.isUnique ?? false,
+                allowedReferenceObjectTypeId: input.allowedReferenceObjectTypeId ?? null,
+                options: input.options ?? [],
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      setRecordFieldValue: protectedProcedure
+        .input(crmSetRecordFieldValueInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await setCrmRecordFieldValue(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
       createOrganization: protectedProcedure
         .input(crmCreateOrganizationInput)
         .handler(async ({ context, input }) => {
@@ -2101,6 +2590,117 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             mapAppError(error);
           }
         }),
+      updateAccount: protectedProcedure
+        .input(crmUpdateAccountInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await updateCrmAccount(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                legalEntityId: input.legalEntityId,
+                lifecycleStage: input.lifecycleStage,
+                segment: input.segment,
+                territory: input.territory,
+                primaryOwnerPrincipalId: input.primaryOwnerPrincipalId,
+                customerSince: input.customerSince,
+                churnedAt: input.churnedAt,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      suggestAccountDuplicates: protectedProcedure
+        .input(crmSuggestAccountDuplicatesInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await suggestCrmAccountDuplicates(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              {
+                ...input,
+                organizationNumber: input.organizationNumber ?? null,
+                limit: input.limit ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createContact: protectedProcedure
+        .input(crmCreateContactInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createCrmContact(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                givenName: input.givenName ?? null,
+                familyName: input.familyName ?? null,
+                displayName: input.displayName ?? null,
+                email: input.email ?? null,
+                phoneNumber: input.phoneNumber ?? null,
+                role: input.role ?? null,
+                isPrimary: input.isPrimary ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      updateContact: protectedProcedure
+        .input(crmUpdateContactInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await updateCrmContact(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                givenName: input.givenName,
+                familyName: input.familyName,
+                displayName: input.displayName,
+                email: input.email,
+                phoneNumber: input.phoneNumber,
+                role: input.role,
+                isPrimary: input.isPrimary,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      linkAccountFortnoxCustomer: protectedProcedure
+        .input(crmLinkAccountFortnoxCustomerInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await linkCrmAccountProviderCustomer(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                provider: "fortnox",
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
       createOpportunity: protectedProcedure
         .input(crmCreateOpportunityInput)
         .handler(async ({ context, input }) => {
@@ -2113,9 +2713,97 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
               }),
               {
                 ...input,
+                stage: input.stage ?? null,
                 expectedCloseDate: input.expectedCloseDate ?? null,
                 primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
               },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      updateOpportunity: protectedProcedure
+        .input(crmUpdateOpportunityInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await updateCrmOpportunity(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                name: input.name,
+                amountMinor: input.amountMinor,
+                currencyCode: input.currencyCode,
+                expectedCloseDate: input.expectedCloseDate,
+                primaryOwnerPrincipalId: input.primaryOwnerPrincipalId,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      updateOpportunityStage: protectedProcedure
+        .input(crmUpdateOpportunityStageInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await updateCrmOpportunityStage(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      archiveAccount: protectedProcedure
+        .input(crmArchiveAccountInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await archiveCrmAccount(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      archiveContact: protectedProcedure
+        .input(crmArchiveContactInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await archiveCrmContact(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      archiveOpportunity: protectedProcedure
+        .input(crmArchiveOpportunityInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await archiveCrmOpportunity(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              input,
             );
           } catch (error) {
             mapAppError(error);
@@ -2134,6 +2822,22 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             mapAppError(error);
           }
         }),
+      accountTimeline: protectedProcedure
+        .input(crmAccountTimelineInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listCrmAccountTimeline(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              {
+                ...input,
+                limit: input.limit ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
       listAccounts: protectedProcedure
         .input(crmListAccountsInput)
         .handler(async ({ context, input }) => {
@@ -2146,8 +2850,156 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 legalEntityId: input.legalEntityId ?? null,
                 relationshipStatus: input.relationshipStatus ?? null,
                 accountType: input.accountType ?? null,
+                customFieldFilter: input.customFieldFilter ?? null,
               },
             );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    commercialDocuments: {
+      create: protectedProcedure
+        .input(commercialDocumentCreateInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createCommercialDocument(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                documentType: input.documentType ?? null,
+                currency: input.currency ?? null,
+                validUntil: input.validUntil ?? null,
+                paymentTerms: input.paymentTerms ?? null,
+                templateId: input.templateId ?? null,
+                recipientEmail: input.recipientEmail ?? null,
+                scope: input.scope ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      updateDraft: protectedProcedure
+        .input(commercialDocumentUpdateInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await updateCommercialDocumentDraft(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      previewPdf: protectedProcedure
+        .input(commercialDocumentPdfInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await previewCommercialDocumentPdf(
+              dawnRepository,
+              commercialDocumentPdfRenderer,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      finalize: protectedProcedure
+        .input(commercialDocumentIdempotentInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await finalizeCommercialDocument(
+              dawnRepository,
+              commercialDocumentPdfRenderer,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      getPdf: protectedProcedure
+        .input(commercialDocumentPdfInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await getCommercialDocumentPdf(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              {
+                ...input,
+                versionId: input.versionId ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      revise: protectedProcedure
+        .input(commercialDocumentUpdateInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await reviseCommercialDocument(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      send: protectedProcedure
+        .input(commercialDocumentSendInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await sendCommercialDocument(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                recipientEmail: input.recipientEmail ?? null,
+                expiresAt: input.expiresAt ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      recipientView: publicProcedure
+        .input(commercialDocumentRecipientInput)
+        .handler(async ({ input }) => {
+          try {
+            return await viewCommercialDocumentByRecipient(dawnRepository, input);
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      recipientDecline: publicProcedure
+        .input(commercialDocumentRecipientDeclineInput)
+        .handler(async ({ input }) => {
+          try {
+            return await declineCommercialDocumentByRecipient(dawnRepository, {
+              ...input,
+              reason: input.reason ?? null,
+            });
           } catch (error) {
             mapAppError(error);
           }

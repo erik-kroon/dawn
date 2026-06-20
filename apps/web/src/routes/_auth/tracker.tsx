@@ -34,6 +34,7 @@ import { useProjectSync } from "@/sync/projects";
 import { orpc } from "@/utils/orpc";
 
 import { ensureCurrentTeam, optionalStringSearchParam } from "../-team-routing";
+import { requireParkedSurfaceFlag } from "./-parked-surface";
 
 type CalendarView = "week" | "month";
 
@@ -54,6 +55,7 @@ export const Route = createFileRoute("/_auth/tracker")({
   }),
   loaderDeps: ({ search }) => ({ teamId: search.teamId }),
   loader: async ({ context, deps }) => {
+    requireParkedSurfaceFlag(deps.teamId);
     const { currentTeamId } = await ensureCurrentTeam(context, deps.teamId);
 
     if (!currentTeamId) {

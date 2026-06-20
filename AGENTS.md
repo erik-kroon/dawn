@@ -1,16 +1,17 @@
 # Agent Guidance
 
-This repo is building Dawn: a Cloudflare-first business operating system inspired by Midday, but with a cleaner application/domain architecture. Read this file first, then use the linked context docs.
+This repo is building Dawn. The active product focus is now a Fortnox-native quote-to-cash CRM: a Cloudflare-first Swedish B2B sales flow for account/contact -> deal -> quote/contract -> TIC BankID signing/trust check -> Fortnox invoice -> payment timeline. The product sells Fortnox-first, but shared architecture should stay accounting-provider-native so Spiris/eAccounting can be proven later without rewriting the commercial core. The broader business-OS code remains reusable infrastructure or parked product surface. Read this file first, then use the linked context docs.
 
 ## Source Of Truth
 
-- Product end-state: `docs/PRD.md`
+- Active product PRD: `docs/product/FORTNOX-SALES-OS-PRD.md`
+- Active product slices: `docs/work/FORTNOX-SALES-OS-VERTICAL-SLICES.md`
 - Domain terms and concepts: `CONTEXT.md`
 - Codebase routing map: `CONTEXT-MAP.md`
 - Architecture decisions: `docs/adr/`
-- Agent workflow notes: `docs/agents/`
-- Skill development posture: `docs/agents/SKILL-DEVELOPMENT-POSTURE.md`
 - Reference product clone: `ref/midday` is read-only reference material and is ignored by git.
+
+For the first beta, do not make generic CRM metadata, banking ledger, accountant handoff, projects/time, public API/developer platform, AI copilot, generic automation builder, email/OCR parity, or Spiris/Visma parity blockers for product work.
 
 ## Architecture Posture
 
@@ -58,6 +59,6 @@ This repo is building Dawn: a Cloudflare-first business operating system inspire
 
 - Do not edit `ref/midday` unless the user explicitly asks; use it for comparison only.
 - Do not introduce a second agent entrypoint unless this file is intentionally replaced.
-- Keep repo context docs durable and short. Put detailed product scope in `docs/PRD.md`; put decisions in ADRs.
+- Keep repo context docs durable and short. Put detailed product scope in `docs/product/FORTNOX-SALES-OS-PRD.md`; put decisions in ADRs.
 - When adding a major architecture decision, add or update an ADR before spreading the decision across code.
-- If implementation touches financial state, permissions, sync, jobs, AI tools, or provider adapters, check `docs/PRD.md` and `CONTEXT.md` first.
+- If implementation touches financial state, permissions, sync, jobs, AI tools, or provider adapters, check the active Fortnox PRD, `CONTEXT.md`, and ADRs first.

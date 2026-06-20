@@ -73,6 +73,8 @@ function localBindings(server: Bun.Server<BunWebSocketData>): LocalBindings {
     BETTER_AUTH_SECRET: env.BETTER_AUTH_SECRET,
     POLAR_ACCESS_TOKEN: env.POLAR_ACCESS_TOKEN ?? "",
     POLAR_SUCCESS_URL: env.POLAR_SUCCESS_URL ?? "",
+    FORTNOX_CLIENT_ID: env.FORTNOX_CLIENT_ID,
+    FORTNOX_CLIENT_SECRET: env.FORTNOX_CLIENT_SECRET,
     ...(googleOAuthCredentials
       ? {
           GMAIL_CLIENT_ID: googleOAuthCredentials.clientId,

@@ -38,6 +38,7 @@ import { useTransactionSync } from "@/sync/transactions";
 import { orpc } from "@/utils/orpc";
 
 import { ensureCurrentTeam, optionalStringSearchParam } from "../-team-routing";
+import { requireParkedSurfaceFlag } from "./-parked-surface";
 
 type TransactionTab = "all" | "review";
 type TransactionQueueFilter =
@@ -126,6 +127,7 @@ export const Route = createFileRoute("/_auth/transactions")({
   }),
   loaderDeps: ({ search }) => ({ teamId: search.teamId }),
   loader: async ({ context, deps }) => {
+    requireParkedSurfaceFlag(deps.teamId);
     const { currentTeamId } = await ensureCurrentTeam(context, deps.teamId);
 
     if (!currentTeamId) {

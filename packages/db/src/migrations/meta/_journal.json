@@ -218,6 +218,34 @@
       "when": 1781602400000,
       "tag": "0030_crm_legal_entities_account_roles",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1781603600000,
+      "tag": "0031_crm_metadata_extensions_tracer",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1781604800000,
+      "tag": "0032_crm_opportunity_deal_stage",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1781606000000,
+      "tag": "0033_crm_account_contacts",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1781607200000,
+      "tag": "0034_commercial_documents_quote_builder",
+      "breakpoints": true
     }
   ]
 }

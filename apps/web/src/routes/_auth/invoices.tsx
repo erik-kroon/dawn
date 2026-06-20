@@ -18,7 +18,7 @@ export const Route = createFileRoute("/_auth/invoices")({
 function InvoicesRoute() {
   return (
     <PlannedSurface
-      description="Invoices will connect customers, line items, payments, reminders, and accounting exports inside the authenticated workspace."
+      description="Invoices will show the Fortnox invoice projection linked to signed commercial documents, payment state, sync health, and recovery actions."
       icon={FileTextIcon}
       title="Invoices"
     />

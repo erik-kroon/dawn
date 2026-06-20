@@ -29,6 +29,7 @@ import type {
 } from "./banking-ledger";
 import type { AccountantPacketRepository as AccountantPacketUseCaseRepository } from "./accountant-packet";
 import type { BillingRepository } from "./billing";
+import type { CommercialDocumentRepository } from "./commercial-documents";
 import type { DocumentsInboxUseCaseRepository } from "./documents-inbox";
 import type { ProjectReportingUseCaseRepository } from "./projects-reporting";
 import type { OperationsRepository } from "./operations";
@@ -36,6 +37,7 @@ import type { AssistantUseCaseRepository } from "./assistant";
 import type { AutomationUseCaseRepository } from "./automation";
 import type { DeveloperUseCaseRepository } from "./developer";
 import type { EmailInboxUseCaseRepository } from "./email-inbox";
+import type { FortnoxUseCaseRepository } from "./fortnox";
 import type { IntegrationUseCaseRepository } from "./integrations";
 import type { CrmRepository } from "./crm";
 
@@ -44,10 +46,12 @@ export * from "./automation";
 export * from "./accountant-packet";
 export * from "./banking-ledger";
 export * from "./billing";
+export * from "./commercial-documents";
 export * from "./crm";
 export * from "./developer";
 export * from "./documents-inbox";
 export * from "./email-inbox";
+export * from "./fortnox";
 export * from "./integrations";
 export * from "./operations";
 export * from "./projects-reporting";
@@ -285,11 +289,13 @@ export type DawnRepository = BankingUseCaseRepository &
   LedgerRepository &
   DocumentsInboxUseCaseRepository &
   BillingRepository &
+  CommercialDocumentRepository &
   ProjectReportingUseCaseRepository &
   AssistantUseCaseRepository &
   AutomationUseCaseRepository &
   DeveloperUseCaseRepository &
   EmailInboxUseCaseRepository &
+  FortnoxUseCaseRepository &
   IntegrationUseCaseRepository &
   OperationsRepository &
   CrmRepository;

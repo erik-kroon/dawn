@@ -2,15 +2,19 @@ import { describe, expect, test } from "bun:test";
 import { call } from "@orpc/server";
 import {
   completeDocumentUpload,
+  createDeterministicCommercialDocumentPdfRenderer,
   createDeterministicDocumentExtractor,
   createDeterministicInvoicePdfRenderer,
   createEmailInboxOAuthStateCodec,
+  createFortnoxOAuthStateCodec,
   runStoredDocumentExtraction,
 } from "@dawn/app";
 import { MemoryAppRepository } from "@dawn/app/testkit/memory-repository";
 import type { GoogleAuthAccountTokens } from "@dawn/auth";
+import { calculateCommercialDocumentTotals } from "@dawn/domain";
 import type {
   Account,
+  AccountContactSummary,
   ApiKey,
   AutomationRule,
   AutomationRun,
@@ -19,8 +23,20 @@ import type {
   AssistantThread,
   AssistantToolCall,
   BusinessInsight,
+  CommercialDocument,
+  CommercialDocumentLine,
+  CommercialDocumentLineDraft,
+  CommercialDocumentVersion,
+  CommercialDocumentWithLines,
+  CrmFieldDefinition,
+  Contact,
   CrmFieldSecurityPolicy,
+  CrmObjectTypeDefinition,
+  CrmOptionSet,
+  CrmOptionValue,
   CrmRecord,
+  CrmRecordFieldValue,
+  CrmRecordFieldValueDraft,
   CrmRecordGrant,
   Customer,
   CustomerContact,
@@ -38,6 +54,7 @@ import type {
   Organization,
   Party,
   PartyType,
+  Person,
   Product,
   Project,
   ProjectMember,
@@ -135,17 +152,31 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
   hardNegatives: HardNegativeTransactionMatch[] = [];
   attachments: { transactionId: string; documentId: string }[] = [];
   providerObjects = new Map<string, Record<string, unknown>>();
+  providerObjectMappings = new Map<
+    string,
+    { internalEntityType?: string | null; internalEntityId?: string | null }
+  >();
   syncRuns: ProviderSyncRun[] = [];
   teams = new Map<string, string>();
   users = new Map<string, { email: string; name: string }>();
   crmRecords = new Map<string, CrmRecord>();
   crmParties = new Map<string, Party>();
   crmOrganizations = new Map<string, Organization>();
+  crmPeople = new Map<string, Person>();
   crmLegalEntities = new Map<string, LegalEntity>();
   crmAccounts = new Map<string, Account>();
+  crmContacts = new Map<string, Contact>();
   crmOpportunities = new Map<string, Opportunity>();
+  crmObjectTypeDefinitions = new Map<string, CrmObjectTypeDefinition>();
+  crmFieldDefinitions = new Map<string, CrmFieldDefinition>();
+  crmOptionSets = new Map<string, CrmOptionSet>();
+  crmOptionValues = new Map<string, CrmOptionValue>();
+  crmRecordFieldValues = new Map<string, CrmRecordFieldValue>();
   crmRecordGrants: CrmRecordGrant[] = [];
   crmFieldSecurityPolicies: CrmFieldSecurityPolicy[] = [];
+  commercialDocuments = new Map<string, CommercialDocument>();
+  commercialDocumentLines = new Map<string, CommercialDocumentLine[]>();
+  commercialDocumentVersions = new Map<string, CommercialDocumentVersion>();
 
   async withTransaction<T>(callback: (repository: DawnRepository) => Promise<T>): Promise<T> {
     return callback(this);
@@ -172,7 +203,9 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
   }) {
     this.auditEvents.push({
       id: `audit_${this.auditEvents.length + 1}`,
-      occurredAt: new Date().toISOString(),
+      occurredAt: new Date(
+        Date.parse("2026-06-15T10:00:00.000Z") + this.auditEvents.length * 1000,
+      ).toISOString(),
       ...input,
     });
   }
@@ -188,6 +221,7 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     entityType?: string | null;
     entityId?: string | null;
     requestId?: string | null;
+    metadata?: Record<string, string>;
   }) {
     return this.auditEvents
       .filter((event) => event.teamId === input.teamId)
@@ -195,6 +229,12 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       .filter((event) => !input.entityType || event.entityType === input.entityType)
       .filter((event) => !input.entityId || event.entityId === input.entityId)
       .filter((event) => !input.requestId || event.requestId === input.requestId)
+      .filter(
+        (event) =>
+          !input.metadata ||
+          Object.entries(input.metadata).every(([key, value]) => event.metadata[key] === value),
+      )
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
       .slice(0, input.limit);
   }
 
@@ -395,27 +435,56 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
   }
 
   async upsertProviderObject(input: Parameters<DawnRepository["upsertProviderObject"]>[0]) {
-    this.providerObjects.set(
-      `${input.provider}:${input.providerObjectType}:${input.providerObjectId}`,
-      input.rawPayload,
-    );
+    const key = `${input.provider}:${input.providerObjectType}:${input.providerObjectId}`;
+    this.providerObjects.set(key, input.rawPayload);
+    this.providerObjectMappings.set(key, {
+      internalEntityType: input.internalEntityType ?? null,
+      internalEntityId: input.internalEntityId ?? null,
+    });
   }
 
   async getProviderObjectForTeam(input: Parameters<DawnRepository["getProviderObjectForTeam"]>[0]) {
-    const rawPayload = this.providerObjects.get(
-      `${input.provider}:${input.providerObjectType}:${input.providerObjectId}`,
-    );
+    const key = `${input.provider}:${input.providerObjectType}:${input.providerObjectId}`;
+    const rawPayload = this.providerObjects.get(key);
+    const mapping = this.providerObjectMappings.get(key);
 
     return rawPayload
       ? {
-          id: `${input.provider}:${input.providerObjectType}:${input.providerObjectId}`,
+          id: key,
           teamId: input.teamId,
           provider: input.provider,
           providerObjectType: input.providerObjectType,
           providerObjectId: input.providerObjectId,
+          internalEntityType: mapping?.internalEntityType ?? null,
+          internalEntityId: mapping?.internalEntityId ?? null,
           rawPayload,
         }
       : null;
+  }
+
+  async listProviderObjectsForTeam(input: {
+    teamId: string;
+    provider: string;
+    providerObjectTypes: readonly string[];
+  }) {
+    return [...this.providerObjects.entries()]
+      .map(([key, rawPayload]) => {
+        const [provider, providerObjectType, ...providerObjectIdParts] = key.split(":");
+        const mapping = this.providerObjectMappings.get(key);
+
+        return {
+          id: key,
+          teamId: input.teamId,
+          provider: provider ?? "",
+          providerObjectType: providerObjectType ?? "",
+          providerObjectId: providerObjectIdParts.join(":"),
+          internalEntityType: mapping?.internalEntityType ?? null,
+          internalEntityId: mapping?.internalEntityId ?? null,
+          rawPayload,
+        };
+      })
+      .filter((object) => object.provider === input.provider)
+      .filter((object) => input.providerObjectTypes.includes(object.providerObjectType));
   }
 
   async listDocuments(teamId: string) {
@@ -2284,6 +2353,12 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       : null;
   }
 
+  async getPersonForTeam(teamId: string, recordId: string) {
+    return this.crmPeople.get(recordId)?.teamId === teamId
+      ? (this.crmPeople.get(recordId) ?? null)
+      : null;
+  }
+
   async getLegalEntityForTeam(teamId: string, recordId: string) {
     return this.crmLegalEntities.get(recordId)?.teamId === teamId
       ? (this.crmLegalEntities.get(recordId) ?? null)
@@ -2329,19 +2404,307 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       : null;
   }
 
+  async listOrganizationsForDuplicateCheck(input: {
+    teamId: string;
+    legalName: string;
+    organizationNumber?: string | null;
+    limit: number;
+  }) {
+    const legalNameKey = input.legalName.trim().toLocaleLowerCase("sv-SE");
+
+    return [...this.crmOrganizations.values()]
+      .filter(
+        (organization) =>
+          organization.teamId === input.teamId &&
+          ((input.organizationNumber &&
+            organization.organizationNumber === input.organizationNumber) ||
+            organization.legalName.trim().toLocaleLowerCase("sv-SE") === legalNameKey),
+      )
+      .slice(0, input.limit);
+  }
+
+  async getContactForTeam(teamId: string, recordId: string) {
+    return this.crmContacts.get(recordId)?.teamId === teamId
+      ? (this.crmContacts.get(recordId) ?? null)
+      : null;
+  }
+
   async listAccountsForTeam(input: {
     teamId: string;
     legalEntityId?: string | null;
     relationshipStatus?: Account["relationshipStatus"] | null;
     accountType?: Account["accountType"] | null;
+    recordIds?: readonly string[] | null;
+    organizationIds?: readonly string[] | null;
   }) {
     return [...this.crmAccounts.values()].filter(
       (account) =>
         account.teamId === input.teamId &&
+        (!input.recordIds || input.recordIds.includes(account.recordId)) &&
+        (!input.organizationIds || input.organizationIds.includes(account.organizationId)) &&
         (!input.legalEntityId || account.legalEntityId === input.legalEntityId) &&
         (!input.relationshipStatus || account.relationshipStatus === input.relationshipStatus) &&
         (!input.accountType || account.accountType === input.accountType),
     );
+  }
+
+  async listContactsForAccount(
+    teamId: string,
+    accountId: string,
+  ): Promise<AccountContactSummary[]> {
+    return [...this.crmContacts.values()]
+      .filter((contact) => contact.teamId === teamId && contact.accountId === accountId)
+      .sort((left, right) => Number(right.isPrimary) - Number(left.isPrimary))
+      .map((contact) => ({
+        contact,
+        person: this.crmPeople.get(contact.personId)!,
+      }));
+  }
+
+  async getCrmObjectTypeDefinitionForTeam(teamId: string, objectTypeId: string) {
+    return (
+      [...this.crmObjectTypeDefinitions.values()].find(
+        (objectType) => objectType.teamId === teamId && objectType.objectTypeId === objectTypeId,
+      ) ?? null
+    );
+  }
+
+  async createCrmObjectTypeDefinition(input: {
+    id: string;
+    teamId: string;
+    objectTypeId: string;
+    label: string;
+    isCustom: boolean;
+    createdByActorId: string;
+  }) {
+    const now = new Date().toISOString();
+    const objectType: CrmObjectTypeDefinition = {
+      ...input,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.crmObjectTypeDefinitions.set(objectType.id, objectType);
+    return objectType;
+  }
+
+  async getCrmFieldDefinitionForTeam(teamId: string, fieldDefinitionId: string) {
+    const fieldDefinition = this.crmFieldDefinitions.get(fieldDefinitionId);
+    return fieldDefinition?.teamId === teamId ? fieldDefinition : null;
+  }
+
+  async getCrmFieldDefinitionByStableKey(input: {
+    teamId: string;
+    objectTypeId: string;
+    stableKey: string;
+  }) {
+    return (
+      [...this.crmFieldDefinitions.values()].find(
+        (fieldDefinition) =>
+          fieldDefinition.teamId === input.teamId &&
+          fieldDefinition.objectTypeId === input.objectTypeId &&
+          fieldDefinition.stableKey === input.stableKey,
+      ) ?? null
+    );
+  }
+
+  async createCrmFieldDefinition(input: {
+    id: string;
+    teamId: string;
+    objectTypeDefinitionId: string;
+    objectTypeId: string;
+    stableKey: string;
+    label: string;
+    fieldType: CrmFieldDefinition["fieldType"];
+    cardinality: CrmFieldDefinition["cardinality"];
+    isRequired: boolean;
+    isUnique: boolean;
+    allowedReferenceObjectTypeId: string | null;
+    createdByActorId: string;
+  }) {
+    const now = new Date().toISOString();
+    const fieldDefinition: CrmFieldDefinition = {
+      ...input,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.crmFieldDefinitions.set(fieldDefinition.id, fieldDefinition);
+    return fieldDefinition;
+  }
+
+  async createCrmOptionSet(input: {
+    id: string;
+    teamId: string;
+    fieldDefinitionId: string;
+    stableKey: string;
+    label: string;
+    createdByActorId: string;
+  }) {
+    const now = new Date().toISOString();
+    const optionSet: CrmOptionSet = {
+      ...input,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.crmOptionSets.set(optionSet.id, optionSet);
+    return optionSet;
+  }
+
+  async createCrmOptionValues(
+    input: {
+      id: string;
+      teamId: string;
+      optionSetId: string;
+      stableKey: string;
+      label: string;
+      sortOrder: number;
+    }[],
+  ) {
+    const now = new Date().toISOString();
+    const optionValues = input.map((optionValue) => ({
+      ...optionValue,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+    }));
+
+    for (const optionValue of optionValues) {
+      this.crmOptionValues.set(optionValue.id, optionValue);
+    }
+
+    return optionValues;
+  }
+
+  async listCrmOptionValuesForField(input: { teamId: string; fieldDefinitionId: string }) {
+    const optionSet = [...this.crmOptionSets.values()].find(
+      (set) => set.teamId === input.teamId && set.fieldDefinitionId === input.fieldDefinitionId,
+    );
+
+    if (!optionSet) {
+      return [];
+    }
+
+    return [...this.crmOptionValues.values()]
+      .filter(
+        (optionValue) =>
+          optionValue.teamId === input.teamId && optionValue.optionSetId === optionSet.id,
+      )
+      .sort((left, right) => left.sortOrder - right.sortOrder);
+  }
+
+  async upsertCrmRecordFieldValue(input: {
+    id: string;
+    teamId: string;
+    recordId: string;
+    fieldDefinitionId: string;
+    position?: number;
+    value: CrmRecordFieldValueDraft;
+    updatedByActorId: string;
+  }) {
+    const existing = [...this.crmRecordFieldValues.values()].find(
+      (fieldValue) =>
+        fieldValue.teamId === input.teamId &&
+        fieldValue.recordId === input.recordId &&
+        fieldValue.fieldDefinitionId === input.fieldDefinitionId &&
+        fieldValue.position === (input.position ?? 0),
+    );
+    const now = new Date().toISOString();
+    const fieldValue: CrmRecordFieldValue = {
+      id: existing?.id ?? input.id,
+      teamId: input.teamId,
+      recordId: input.recordId,
+      fieldDefinitionId: input.fieldDefinitionId,
+      position: input.position ?? 0,
+      ...input.value,
+      updatedByActorId: input.updatedByActorId,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.crmRecordFieldValues.set(fieldValue.id, fieldValue);
+    return fieldValue;
+  }
+
+  async findCrmRecordFieldValueByFieldValue(input: {
+    teamId: string;
+    fieldDefinitionId: string;
+    value: CrmRecordFieldValueDraft;
+    excludeRecordId?: string | null;
+  }) {
+    return (
+      [...this.crmRecordFieldValues.values()].find(
+        (fieldValue) =>
+          fieldValue.teamId === input.teamId &&
+          fieldValue.fieldDefinitionId === input.fieldDefinitionId &&
+          fieldValue.recordId !== input.excludeRecordId &&
+          crmFieldValueMatches(fieldValue, input.value),
+      ) ?? null
+    );
+  }
+
+  async listRecordIdsByCrmFieldValue(input: {
+    teamId: string;
+    fieldDefinitionId: string;
+    value: CrmRecordFieldValueDraft;
+  }) {
+    return [...this.crmRecordFieldValues.values()]
+      .filter(
+        (fieldValue) =>
+          fieldValue.teamId === input.teamId &&
+          fieldValue.fieldDefinitionId === input.fieldDefinitionId &&
+          crmFieldValueMatches(fieldValue, input.value),
+      )
+      .map((fieldValue) => fieldValue.recordId);
+  }
+
+  async incrementCrmRecordVersion(input: {
+    teamId: string;
+    recordId: string;
+    expectedVersion: number;
+    actorId: string;
+  }) {
+    const record = this.crmRecords.get(input.recordId);
+
+    if (!record || record.teamId !== input.teamId || record.version !== input.expectedVersion) {
+      return null;
+    }
+
+    const updated: CrmRecord = {
+      ...record,
+      version: record.version + 1,
+      updatedByActorId: input.actorId,
+      updatedAt: new Date().toISOString(),
+    };
+    this.crmRecords.set(updated.id, updated);
+    return updated;
+  }
+
+  async archiveCrmRecord(input: {
+    teamId: string;
+    recordId: string;
+    expectedVersion: number;
+    actorId: string;
+  }) {
+    const record = this.crmRecords.get(input.recordId);
+
+    if (
+      !record ||
+      record.teamId !== input.teamId ||
+      record.version !== input.expectedVersion ||
+      record.lifecycleState !== "active"
+    ) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    const updated: CrmRecord = {
+      ...record,
+      lifecycleState: "archived",
+      version: record.version + 1,
+      updatedByActorId: input.actorId,
+      updatedAt: now,
+      archivedAt: now,
+    };
+    this.crmRecords.set(updated.id, updated);
+    return updated;
   }
 
   async getOpportunityForTeam(teamId: string, recordId: string) {
@@ -2357,6 +2720,317 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
         opportunity.accountId === accountId &&
         opportunity.status === "open",
     );
+  }
+
+  async listOpportunitiesForAccount(teamId: string, accountId: string) {
+    return [...this.crmOpportunities.values()].filter(
+      (opportunity) => opportunity.teamId === teamId && opportunity.accountId === accountId,
+    );
+  }
+
+  async getCommercialDocumentForTeam(teamId: string, documentId: string) {
+    const document = this.commercialDocuments.get(documentId);
+    return document?.teamId === teamId ? this.commercialDocumentWithLines(document) : null;
+  }
+
+  async listCommercialDocumentsForOpportunity(teamId: string, opportunityId: string) {
+    return [...this.commercialDocuments.values()]
+      .filter((document) => document.teamId === teamId && document.opportunityId === opportunityId)
+      .map((document) => this.commercialDocumentWithLines(document));
+  }
+
+  async getLatestCommercialDocumentVersionForTeam(teamId: string, documentId: string) {
+    return (
+      [...this.commercialDocumentVersions.values()]
+        .filter((version) => version.teamId === teamId && version.documentId === documentId)
+        .sort((left, right) => right.versionNumber - left.versionNumber)[0] ?? null
+    );
+  }
+
+  async getCommercialDocumentVersionForTeam(teamId: string, versionId: string) {
+    const version = this.commercialDocumentVersions.get(versionId);
+    return version?.teamId === teamId ? version : null;
+  }
+
+  async createCommercialDocument(input: Parameters<DawnRepository["createCommercialDocument"]>[0]) {
+    const now = new Date().toISOString();
+    const document: CommercialDocument = {
+      id: input.documentId,
+      teamId: input.teamId,
+      accountId: input.accountId,
+      opportunityId: input.opportunityId,
+      documentType: input.documentType,
+      title: input.title,
+      status: "draft",
+      currency: input.currency,
+      validUntil: input.validUntil ?? null,
+      paymentTerms: input.paymentTerms ?? null,
+      termsVersion: input.termsVersion,
+      templateId: input.templateId ?? null,
+      recipientEmail: input.recipientEmail ?? null,
+      scope: input.scope ?? null,
+      activeVersionId: null,
+      recipientAccessTokenHash: null,
+      recipientAccessTokenExpiresAt: null,
+      sentAt: null,
+      viewedAt: null,
+      declinedAt: null,
+      declineReason: null,
+      createdByActorId: input.createdByActorId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.commercialDocuments.set(document.id, document);
+    this.commercialDocumentLines.set(
+      document.id,
+      this.buildCommercialDocumentLines(document, input.lines),
+    );
+    return this.commercialDocumentWithLines(document);
+  }
+
+  async updateCommercialDocumentDraft(
+    input: Parameters<DawnRepository["updateCommercialDocumentDraft"]>[0],
+  ) {
+    const current = this.commercialDocuments.get(input.documentId);
+
+    if (!current || current.teamId !== input.teamId || current.status !== "draft") {
+      throw new Error("Commercial document draft was not updated");
+    }
+
+    const document: CommercialDocument = {
+      ...current,
+      documentType: input.documentType,
+      title: input.title,
+      currency: input.currency,
+      validUntil: input.validUntil ?? null,
+      paymentTerms: input.paymentTerms ?? null,
+      termsVersion: input.termsVersion,
+      templateId: input.templateId ?? null,
+      recipientEmail: input.recipientEmail ?? null,
+      scope: input.scope ?? null,
+      updatedAt: new Date().toISOString(),
+    };
+    this.commercialDocuments.set(document.id, document);
+    this.commercialDocumentLines.set(
+      document.id,
+      this.buildCommercialDocumentLines(document, input.lines),
+    );
+    return this.commercialDocumentWithLines(document);
+  }
+
+  async finalizeCommercialDocument(
+    input: Parameters<DawnRepository["finalizeCommercialDocument"]>[0],
+  ) {
+    const current = this.commercialDocuments.get(input.documentId);
+
+    if (!current || current.teamId !== input.teamId || current.status !== "draft") {
+      throw new Error("Commercial document was not finalized");
+    }
+
+    const version: CommercialDocumentVersion = {
+      id: input.versionId,
+      teamId: input.teamId,
+      documentId: input.documentId,
+      versionNumber: input.versionNumber,
+      status: "finalised",
+      snapshot: input.snapshot,
+      pdfObjectKey: input.pdfObjectKey,
+      pdfBodyBase64: input.pdfBodyBase64,
+      pdfSha256: input.pdfSha256,
+      byteSize: input.byteSize,
+      finalizedByActorId: input.finalizedByActorId,
+      createdAt: new Date().toISOString(),
+    };
+    const document: CommercialDocument = {
+      ...current,
+      status: "finalised",
+      activeVersionId: version.id,
+      updatedAt: new Date().toISOString(),
+    };
+    this.commercialDocumentVersions.set(version.id, version);
+    this.commercialDocuments.set(document.id, document);
+
+    return { document: this.commercialDocumentWithLines(document), version };
+  }
+
+  async reviseCommercialDocument(input: Parameters<DawnRepository["reviseCommercialDocument"]>[0]) {
+    const current = this.commercialDocuments.get(input.documentId);
+
+    if (!current || current.teamId !== input.teamId) {
+      throw new Error("Commercial document was not revised");
+    }
+
+    const activeVersion = current.activeVersionId
+      ? this.commercialDocumentVersions.get(current.activeVersionId)
+      : null;
+    const supersededVersion = activeVersion
+      ? { ...activeVersion, status: "superseded" as const }
+      : null;
+
+    if (supersededVersion) {
+      this.commercialDocumentVersions.set(supersededVersion.id, supersededVersion);
+    }
+
+    const document: CommercialDocument = {
+      ...current,
+      documentType: input.documentType,
+      title: input.title,
+      status: "draft",
+      currency: input.currency,
+      validUntil: input.validUntil ?? null,
+      paymentTerms: input.paymentTerms ?? null,
+      termsVersion: input.termsVersion,
+      templateId: input.templateId ?? null,
+      recipientEmail: input.recipientEmail ?? null,
+      scope: input.scope ?? null,
+      activeVersionId: null,
+      recipientAccessTokenHash: null,
+      recipientAccessTokenExpiresAt: null,
+      sentAt: null,
+      viewedAt: null,
+      declinedAt: null,
+      declineReason: null,
+      updatedAt: new Date().toISOString(),
+    };
+    this.commercialDocuments.set(document.id, document);
+    this.commercialDocumentLines.set(
+      document.id,
+      this.buildCommercialDocumentLines(document, input.lines),
+    );
+
+    return { document: this.commercialDocumentWithLines(document), supersededVersion };
+  }
+
+  async sendCommercialDocument(input: Parameters<DawnRepository["sendCommercialDocument"]>[0]) {
+    const current = this.commercialDocuments.get(input.documentId);
+
+    if (!current || current.teamId !== input.teamId) {
+      throw new Error("Commercial document was not sent");
+    }
+
+    const document: CommercialDocument = {
+      ...current,
+      status: "sent",
+      recipientEmail: input.recipientEmail,
+      recipientAccessTokenHash: input.recipientAccessTokenHash,
+      recipientAccessTokenExpiresAt: input.recipientAccessTokenExpiresAt,
+      sentAt: input.sentAt,
+      updatedAt: input.sentAt,
+    };
+    this.commercialDocuments.set(document.id, document);
+    return this.commercialDocumentWithLines(document);
+  }
+
+  async getCommercialDocumentByRecipientAccessTokenHash(
+    input: Parameters<DawnRepository["getCommercialDocumentByRecipientAccessTokenHash"]>[0],
+  ) {
+    const document = [...this.commercialDocuments.values()].find(
+      (candidate) => candidate.recipientAccessTokenHash === input.accessTokenHash,
+    );
+
+    if (!document?.activeVersionId) {
+      return null;
+    }
+
+    const version = this.commercialDocumentVersions.get(document.activeVersionId);
+    return version ? { document: this.commercialDocumentWithLines(document), version } : null;
+  }
+
+  async markCommercialDocumentViewed(
+    input: Parameters<DawnRepository["markCommercialDocumentViewed"]>[0],
+  ) {
+    const current = this.commercialDocuments.get(input.documentId);
+
+    if (!current || current.teamId !== input.teamId) {
+      throw new Error("Commercial document was not viewed");
+    }
+
+    const document: CommercialDocument = {
+      ...current,
+      status: "viewed",
+      viewedAt: input.viewedAt,
+      updatedAt: input.viewedAt,
+    };
+    this.commercialDocuments.set(document.id, document);
+    return this.commercialDocumentWithLines(document);
+  }
+
+  async declineCommercialDocument(
+    input: Parameters<DawnRepository["declineCommercialDocument"]>[0],
+  ) {
+    const current = this.commercialDocuments.get(input.documentId);
+
+    if (!current || current.teamId !== input.teamId) {
+      throw new Error("Commercial document was not declined");
+    }
+
+    const document: CommercialDocument = {
+      ...current,
+      status: "declined",
+      declinedAt: input.declinedAt,
+      declineReason: input.reason ?? null,
+      updatedAt: input.declinedAt,
+    };
+    this.commercialDocuments.set(document.id, document);
+    return this.commercialDocumentWithLines(document);
+  }
+
+  private buildCommercialDocumentLines(
+    document: CommercialDocument,
+    lines: readonly CommercialDocumentLineDraft[],
+  ) {
+    const calculated = calculateCommercialDocumentTotals({
+      currency: document.currency,
+      lines,
+    });
+
+    return lines.map(
+      (line, index): CommercialDocumentLine => ({
+        id: `line_${document.id}_${index}`,
+        teamId: document.teamId,
+        documentId: document.id,
+        source: line.source,
+        provider: line.provider ?? null,
+        providerConnectionId: line.providerConnectionId ?? null,
+        providerObjectId: line.providerObjectId ?? null,
+        providerObjectRecordId: line.providerObjectRecordId ?? null,
+        articleNumber: line.articleNumber ?? null,
+        description: line.description,
+        unit: line.unit ?? null,
+        quantityMilli: line.quantityMilli,
+        unitPrice: line.unitPrice,
+        discountBasisPoints: line.discountBasisPoints ?? 0,
+        vatRateBasisPoints: line.vatRateBasisPoints ?? 0,
+        snapshot: line.snapshot ?? null,
+        sortOrder: index,
+        totals: calculated.lines[index]!,
+        createdAt: new Date().toISOString(),
+      }),
+    );
+  }
+
+  private commercialDocumentWithLines(document: CommercialDocument): CommercialDocumentWithLines {
+    const lines = this.commercialDocumentLines.get(document.id) ?? [];
+    const totals = {
+      subtotal: {
+        amountMinor: lines.reduce((total, line) => total + line.totals.subtotal.amountMinor, 0),
+        currency: document.currency,
+      },
+      discount: {
+        amountMinor: lines.reduce((total, line) => total + line.totals.discount.amountMinor, 0),
+        currency: document.currency,
+      },
+      vat: {
+        amountMinor: lines.reduce((total, line) => total + line.totals.vat.amountMinor, 0),
+        currency: document.currency,
+      },
+      total: {
+        amountMinor: lines.reduce((total, line) => total + line.totals.total.amountMinor, 0),
+        currency: document.currency,
+      },
+    };
+
+    return { ...document, lines, totals };
   }
 
   async createCrmRecord(input: {
@@ -2425,6 +3099,60 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     return organization;
   }
 
+  async createPerson(input: {
+    recordId: string;
+    teamId: string;
+    givenName?: string | null;
+    familyName?: string | null;
+    displayName: string;
+    email?: string | null;
+    phoneNumber?: string | null;
+  }): Promise<Person> {
+    const now = new Date().toISOString();
+    const person: Person = {
+      recordId: input.recordId,
+      teamId: input.teamId,
+      givenName: input.givenName ?? null,
+      familyName: input.familyName ?? null,
+      displayName: input.displayName,
+      email: input.email ?? null,
+      phoneNumber: input.phoneNumber ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.crmPeople.set(person.recordId, person);
+    return person;
+  }
+
+  async updatePerson(input: {
+    teamId: string;
+    personId: string;
+    givenName: string | null;
+    familyName: string | null;
+    displayName: string;
+    email: string | null;
+    phoneNumber: string | null;
+  }): Promise<Person | null> {
+    const person = this.crmPeople.get(input.personId);
+
+    if (!person || person.teamId !== input.teamId) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    const updated: Person = {
+      ...person,
+      givenName: input.givenName,
+      familyName: input.familyName,
+      displayName: input.displayName,
+      email: input.email,
+      phoneNumber: input.phoneNumber,
+      updatedAt: now,
+    };
+    this.crmPeople.set(updated.recordId, updated);
+    return updated;
+  }
+
   async createLegalEntity(input: {
     recordId: string;
     teamId: string;
@@ -2489,6 +3217,89 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     return account;
   }
 
+  async updateAccount(input: {
+    teamId: string;
+    accountId: string;
+    accountType: Account["accountType"];
+    legalEntityId: string | null;
+    relationshipStatus: Account["relationshipStatus"];
+    lifecycleStage: Account["lifecycleStage"];
+    segment: string | null;
+    territory: string | null;
+    primaryOwnerPrincipalId: string | null;
+    customerSince: string | null;
+    churnedAt: string | null;
+  }): Promise<Account | null> {
+    const account = this.crmAccounts.get(input.accountId);
+
+    if (!account || account.teamId !== input.teamId) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    const updated: Account = {
+      ...account,
+      accountType: input.accountType,
+      legalEntityId: input.legalEntityId,
+      relationshipStatus: input.relationshipStatus,
+      lifecycleStage: input.lifecycleStage,
+      segment: input.segment,
+      territory: input.territory,
+      primaryOwnerPrincipalId: input.primaryOwnerPrincipalId,
+      customerSince: input.customerSince,
+      churnedAt: input.churnedAt,
+      updatedAt: now,
+    };
+    this.crmAccounts.set(updated.recordId, updated);
+    return updated;
+  }
+
+  async createContact(input: {
+    recordId: string;
+    teamId: string;
+    accountId: string;
+    personId: string;
+    role?: string | null;
+    isPrimary?: boolean | null;
+  }): Promise<Contact> {
+    const now = new Date().toISOString();
+    const contact: Contact = {
+      recordId: input.recordId,
+      teamId: input.teamId,
+      accountId: input.accountId,
+      personId: input.personId,
+      role: input.role ?? null,
+      isPrimary: input.isPrimary ?? false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.crmContacts.set(contact.recordId, contact);
+    return contact;
+  }
+
+  async updateContact(input: {
+    teamId: string;
+    contactId: string;
+    role: string | null;
+    isPrimary: boolean;
+  }): Promise<Contact | null> {
+    const contact = this.crmContacts.get(input.contactId);
+
+    if (!contact || contact.teamId !== input.teamId) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    const updated: Contact = {
+      ...contact,
+      role: input.role,
+      isPrimary: input.isPrimary,
+      updatedAt: now,
+    };
+    this.crmContacts.set(updated.recordId, updated);
+    return updated;
+  }
+
   async createOpportunity(input: {
     recordId: string;
     teamId: string;
@@ -2496,6 +3307,8 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     name: string;
     amountMinor: number;
     currencyCode: string;
+    stage: Opportunity["stage"];
+    status: Opportunity["status"];
     expectedCloseDate?: string | null;
     primaryOwnerPrincipalId?: string | null;
   }): Promise<Opportunity> {
@@ -2507,7 +3320,8 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       name: input.name,
       amountMinor: input.amountMinor,
       currencyCode: input.currencyCode,
-      status: "open",
+      status: input.status,
+      stage: input.stage,
       expectedCloseDate: input.expectedCloseDate ?? null,
       primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
       wonAt: null,
@@ -2518,6 +3332,74 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     this.crmOpportunities.set(opportunity.recordId, opportunity);
     return opportunity;
   }
+
+  async updateOpportunity(input: {
+    teamId: string;
+    opportunityId: string;
+    name: string;
+    amountMinor: number;
+    currencyCode: string;
+    expectedCloseDate: string | null;
+    primaryOwnerPrincipalId: string | null;
+  }): Promise<Opportunity | null> {
+    const opportunity = this.crmOpportunities.get(input.opportunityId);
+
+    if (!opportunity || opportunity.teamId !== input.teamId) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    const updated: Opportunity = {
+      ...opportunity,
+      name: input.name,
+      amountMinor: input.amountMinor,
+      currencyCode: input.currencyCode,
+      expectedCloseDate: input.expectedCloseDate,
+      primaryOwnerPrincipalId: input.primaryOwnerPrincipalId,
+      updatedAt: now,
+    };
+    this.crmOpportunities.set(updated.recordId, updated);
+    return updated;
+  }
+
+  async updateOpportunityStage(input: {
+    teamId: string;
+    opportunityId: string;
+    stage: Opportunity["stage"];
+    status: Opportunity["status"];
+    actorId: string;
+  }): Promise<Opportunity | null> {
+    const now = new Date().toISOString();
+    const opportunity = this.crmOpportunities.get(input.opportunityId);
+
+    if (!opportunity || opportunity.teamId !== input.teamId) {
+      return null;
+    }
+
+    const updated: Opportunity = {
+      ...opportunity,
+      stage: input.stage,
+      status: input.status,
+      wonAt: input.status === "won" ? (opportunity.wonAt ?? now) : (opportunity.wonAt ?? null),
+      lostAt: input.stage === "lost" ? (opportunity.lostAt ?? now) : (opportunity.lostAt ?? null),
+      updatedAt: now,
+    };
+    this.crmOpportunities.set(updated.recordId, updated);
+    return updated;
+  }
+}
+
+function crmFieldValueMatches(fieldValue: CrmRecordFieldValue, expected: CrmRecordFieldValueDraft) {
+  return (
+    fieldValue.textValue === expected.textValue &&
+    fieldValue.integerValue === expected.integerValue &&
+    fieldValue.booleanValue === expected.booleanValue &&
+    fieldValue.dateValue === expected.dateValue &&
+    fieldValue.amountMinor === expected.amountMinor &&
+    fieldValue.currencyCode === expected.currencyCode &&
+    fieldValue.optionValueId === expected.optionValueId &&
+    fieldValue.referenceRecordId === expected.referenceRecordId
+  );
 }
 
 function calculateFixtureInvoiceTotals(input: {
@@ -2622,7 +3504,13 @@ async function createTestRouter(
       allowedRedirectOrigins: ["http://localhost:3001"],
       now: () => new Date("2026-06-15T10:00:00.000Z"),
     }),
+    fortnoxOAuthStateCodec: createFortnoxOAuthStateCodec({
+      secret: "test_fortnox_oauth_state_secret",
+      allowedRedirectOrigins: ["http://localhost:3001"],
+      now: () => new Date("2026-06-15T10:00:00.000Z"),
+    }),
     documentUrlSigner: testDocumentUrlSigner,
+    commercialDocumentPdfRenderer: createDeterministicCommercialDocumentPdfRenderer(),
     invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
     invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
   });
@@ -3489,6 +4377,7 @@ describe("appRouter", () => {
       {
         teamId: "team_1",
         legalName: "Acme AB",
+        organizationNumber: "556123-4567",
         idempotencyKey: "crm_org_1",
       },
       context,
@@ -3504,7 +4393,7 @@ describe("appRouter", () => {
       },
       context,
     );
-    await call(
+    const account = await call(
       router.crm.createAccount,
       {
         teamId: "team_1",
@@ -3516,6 +4405,107 @@ describe("appRouter", () => {
         segment: "mid-market",
         territory: "SE",
         idempotencyKey: "crm_account_1",
+      },
+      context,
+    );
+    const duplicates = await call(
+      router.crm.suggestAccountDuplicates,
+      {
+        teamId: "team_1",
+        legalName: "ACME AB",
+        organizationNumber: "556 123 4567",
+      },
+      context,
+    );
+    const contact = await call(
+      router.crm.createContact,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+        givenName: "Ada",
+        familyName: "Buyer",
+        email: "ADA@ACME.test",
+        role: "CFO",
+        isPrimary: true,
+        idempotencyKey: "crm_contact_1",
+      },
+      context,
+    );
+    repository.integrationConnections.set("fortnox_connection_1", {
+      id: "fortnox_connection_1",
+      teamId: "team_1",
+      category: "accounting",
+      provider: "fortnox",
+      providerConnectionId: "fortnox:team_1",
+      displayName: "Fortnox Demo AB",
+      status: "connected",
+      capabilities: ["sync", "disconnect"],
+      tokenKeyId: "fortnox-token",
+      tokenLastFour: "1234",
+      tokenCiphertext: "encrypted",
+      rawPayload: {},
+      lastSyncAt: null,
+      lastError: null,
+      disabledAt: null,
+      createdByActorId: "user_1",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    repository.providerObjects.set("fortnox:customer:1001", {
+      integrationConnectionId: "fortnox_connection_1",
+      providerConnectionId: "fortnox:team_1",
+      customerNumber: "1001",
+      name: "Acme AB",
+    });
+    const fortnoxMapping = await call(
+      router.crm.linkAccountFortnoxCustomer,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+        connectionId: "fortnox_connection_1",
+        providerCustomerId: "1001",
+        idempotencyKey: "crm_fortnox_customer_link_1",
+      },
+      context,
+    );
+    const opportunity = await call(
+      router.crm.createOpportunity,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+        name: "Implementation package",
+        amountMinor: 250_000,
+        currencyCode: "SEK",
+        stage: "qualified",
+        expectedCloseDate: "2026-09-01T00:00:00.000Z",
+        idempotencyKey: "crm_opportunity_1",
+      },
+      context,
+    );
+    const summary = await call(
+      router.crm.accountSummary,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+      },
+      context,
+    );
+    const staged = await call(
+      router.crm.updateOpportunityStage,
+      {
+        teamId: "team_1",
+        opportunityId: opportunity.opportunity.recordId,
+        stage: "proposal_sent",
+        expectedRecordVersion: 1,
+        idempotencyKey: "crm_opportunity_stage_1",
+      },
+      context,
+    );
+    const timeline = await call(
+      router.crm.accountTimeline,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
       },
       context,
     );
@@ -3552,6 +4542,68 @@ describe("appRouter", () => {
       segment: "mid-market",
       territory: "SE",
     });
+    expect(duplicates.suggestions).toHaveLength(1);
+    expect(duplicates.suggestions[0]).toMatchObject({
+      account: { recordId: account.account.recordId, accountType: "customer" },
+      organization: {
+        recordId: organization.organization.recordId,
+        legalName: "Acme AB",
+        organizationNumber: "5561234567",
+      },
+      matchReasons: ["organization_number", "legal_name"],
+    });
+    expect(opportunity.opportunity).toMatchObject({
+      accountId: account.account.recordId,
+      stage: "qualified",
+      status: "open",
+      amountMinor: 250_000,
+      currencyCode: "SEK",
+    });
+    expect(contact).toMatchObject({
+      person: { displayName: "Ada Buyer", email: "ada@acme.test" },
+      contact: { accountId: account.account.recordId, role: "CFO", isPrimary: true },
+    });
+    expect(fortnoxMapping).toMatchObject({
+      account: { recordId: account.account.recordId },
+      providerObject: {
+        provider: "fortnox",
+        providerObjectType: "customer",
+        providerObjectId: "1001",
+        internalEntityType: "account",
+        internalEntityId: account.account.recordId,
+      },
+    });
+    expect(summary.contacts).toEqual([
+      {
+        contact: expect.objectContaining({
+          recordId: contact.contact.recordId,
+          accountId: account.account.recordId,
+          role: "CFO",
+          isPrimary: true,
+        }),
+        person: expect.objectContaining({
+          recordId: contact.person.recordId,
+          displayName: "Ada Buyer",
+          email: "ada@acme.test",
+        }),
+      },
+    ]);
+    expect(staged).toMatchObject({
+      opportunity: { stage: "proposal_sent", status: "open" },
+      record: { version: 2 },
+    });
+    expect(timeline.entries.map((entry) => entry.action)).toEqual([
+      "crm.opportunity.stage_updated",
+      "crm.opportunity.created",
+      "crm.account.provider_customer.linked",
+      "crm.contact.created",
+      "crm.account.created",
+    ]);
+    expect(
+      timeline.entries.find((entry) => entry.action === "crm.account.provider_customer.linked"),
+    ).toMatchObject({
+      details: { provider: "fortnox", providerObjectType: "customer", providerObjectId: "1001" },
+    });
     expect(repository.outboxEvents).toMatchObject([
       { type: "crm.organization.created" },
       { type: "crm.legal_entity.created" },
@@ -3562,8 +4614,531 @@ describe("appRouter", () => {
           organizationId: organization.organization.recordId,
         },
       },
+      {
+        type: "crm.contact.created",
+        payload: { displayName: "Ada Buyer", email: "ada@acme.test", isPrimary: true },
+      },
+      {
+        type: "crm.account.provider_customer.linked",
+        payload: { provider: "fortnox", providerObjectId: "1001" },
+      },
+      {
+        type: "crm.opportunity.created",
+        payload: { stage: "qualified", status: "open" },
+      },
+      {
+        type: "crm.opportunity.stage_updated",
+        payload: { stage: "proposal_sent", status: "open", recordVersion: 2 },
+      },
       { type: "crm.account.created" },
     ]);
+
+    const archivedContact = await call(
+      router.crm.archiveContact,
+      {
+        teamId: "team_1",
+        contactId: contact.contact.recordId,
+        expectedRecordVersion: 1,
+        idempotencyKey: "crm_contact_archive_1",
+      },
+      context,
+    );
+    const archivedOpportunity = await call(
+      router.crm.archiveOpportunity,
+      {
+        teamId: "team_1",
+        opportunityId: opportunity.opportunity.recordId,
+        expectedRecordVersion: 2,
+        idempotencyKey: "crm_opportunity_archive_1",
+      },
+      context,
+    );
+    const archivedAccount = await call(
+      router.crm.archiveAccount,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+        expectedRecordVersion: 1,
+        idempotencyKey: "crm_account_archive_1",
+      },
+      context,
+    );
+
+    expect(archivedContact).toMatchObject({
+      contact: { recordId: contact.contact.recordId },
+      record: { lifecycleState: "archived", version: 2 },
+    });
+    expect(archivedOpportunity).toMatchObject({
+      opportunity: {
+        recordId: opportunity.opportunity.recordId,
+        stage: "archived",
+        status: "lost",
+      },
+      record: { lifecycleState: "archived", version: 3 },
+    });
+    expect(archivedAccount).toMatchObject({
+      account: { recordId: account.account.recordId },
+      record: { lifecycleState: "archived", version: 2 },
+    });
+  });
+
+  test("runs commercial document quote lifecycle through protected and recipient routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    repository.providerObjects.set("fortnox:article:KONSULT", {
+      articleNumber: "KONSULT",
+      description: "Fortnox consulting article",
+      unit: "h",
+      vat: 25,
+      sourcePayload: { ArticleNumber: "KONSULT", Description: "Immutable article snapshot" },
+    });
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+    const recipientContext = { context: createUnauthenticatedApiTestContext() };
+    const organization = await call(
+      router.crm.createOrganization,
+      {
+        teamId: "team_1",
+        legalName: "Acme AB",
+        idempotencyKey: "quote_org_1",
+      },
+      context,
+    );
+    const account = await call(
+      router.crm.createAccount,
+      {
+        teamId: "team_1",
+        organizationId: organization.organization.recordId,
+        accountType: "customer",
+        idempotencyKey: "quote_account_1",
+      },
+      context,
+    );
+    const opportunity = await call(
+      router.crm.createOpportunity,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+        name: "Implementation package",
+        amountMinor: 250_000,
+        currencyCode: "SEK",
+        stage: "proposal_preparation",
+        idempotencyKey: "quote_opportunity_1",
+      },
+      context,
+    );
+
+    const created = await call(
+      router.commercialDocuments.create,
+      {
+        teamId: "team_1",
+        opportunityId: opportunity.opportunity.recordId,
+        title: "Quote for implementation package",
+        validUntil: "2026-07-20T00:00:00.000Z",
+        paymentTerms: "30 dagar",
+        termsVersion: "2026.1",
+        recipientEmail: "buyer@example.com",
+        scope: "Implementation and rollout",
+        lines: [
+          {
+            source: "fortnox_article",
+            providerObjectId: "KONSULT",
+            description: "Consulting",
+            quantityMilli: 3_000,
+            unitPrice: { amountMinor: 12_500, currency: "SEK" },
+          },
+        ],
+        idempotencyKey: "quote_create_1",
+      },
+      context,
+    );
+    const preview = await call(
+      router.commercialDocuments.previewPdf,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+      },
+      context,
+    );
+    const finalized = await call(
+      router.commercialDocuments.finalize,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        idempotencyKey: "quote_finalize_1",
+      },
+      context,
+    );
+    const downloaded = await call(
+      router.commercialDocuments.getPdf,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+      },
+      context,
+    );
+    const sent = await call(
+      router.commercialDocuments.send,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        idempotencyKey: "quote_send_1",
+      },
+      context,
+    );
+    const viewed = await call(
+      router.commercialDocuments.recipientView,
+      {
+        accessToken: sent.recipientAccessToken,
+      },
+      recipientContext,
+    );
+    const declined = await call(
+      router.commercialDocuments.recipientDecline,
+      {
+        accessToken: sent.recipientAccessToken,
+        reason: "Budget paused",
+      },
+      recipientContext,
+    );
+    const declinedAgain = await call(
+      router.commercialDocuments.recipientDecline,
+      {
+        accessToken: sent.recipientAccessToken,
+        reason: "Different reason",
+      },
+      recipientContext,
+    );
+    const revised = await call(
+      router.commercialDocuments.revise,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        title: "Revised quote for implementation package",
+        lines: [
+          {
+            source: "freeform",
+            description: "Reduced implementation package",
+            quantityMilli: 1_000,
+            unitPrice: { amountMinor: 20_000, currency: "SEK" },
+            vatRateBasisPoints: 2_500,
+          },
+        ],
+        idempotencyKey: "quote_revise_1",
+      },
+      context,
+    );
+    const refinalized = await call(
+      router.commercialDocuments.finalize,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        idempotencyKey: "quote_finalize_2",
+      },
+      context,
+    );
+    const timeline = await call(
+      router.crm.accountTimeline,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+      },
+      context,
+    );
+
+    expect(created.document).toMatchObject({
+      opportunityId: opportunity.opportunity.recordId,
+      status: "draft",
+      currency: "SEK",
+    });
+    expect(created.document.lines[0]).toMatchObject({
+      provider: "fortnox",
+      providerObjectId: "KONSULT",
+      providerObjectRecordId: "fortnox:article:KONSULT",
+      articleNumber: "KONSULT",
+      snapshot: {
+        provider: "fortnox",
+        providerObjectType: "article",
+        providerObjectId: "KONSULT",
+      },
+    });
+    expect(Buffer.from(preview.pdf.bodyBase64, "base64").toString("utf8")).toStartWith("%PDF-1.4");
+    expect(finalized.version).toMatchObject({
+      documentId: created.document.id,
+      versionNumber: 1,
+      status: "finalised",
+    });
+    expect(downloaded.version.id).toBe(finalized.version.id);
+    expect(downloaded.pdf.bodyBase64).toBe(preview.pdf.bodyBase64);
+    expect(typeof sent.recipientAccessToken).toBe("string");
+    expect(sent.recipientAccessToken.length).toBeGreaterThan(0);
+    expect(
+      repository.commercialDocuments.get(created.document.id)?.recipientAccessTokenHash,
+    ).not.toBe(sent.recipientAccessToken);
+    expect(viewed).toMatchObject({
+      viewed: true,
+      document: { status: "viewed" },
+      version: { id: finalized.version.id },
+    });
+    expect(viewed.pdf.bodyBase64).toBe(downloaded.pdf.bodyBase64);
+    expect(declined).toMatchObject({
+      declined: true,
+      document: { status: "declined", declineReason: "Budget paused" },
+    });
+    expect(declinedAgain).toMatchObject({
+      declined: false,
+      document: { status: "declined", declineReason: "Budget paused" },
+    });
+    expect(revised).toMatchObject({
+      document: {
+        status: "draft",
+        activeVersionId: null,
+        title: "Revised quote for implementation package",
+      },
+      supersededVersion: {
+        id: finalized.version.id,
+        status: "superseded",
+      },
+    });
+    expect(refinalized.version).toMatchObject({
+      documentId: created.document.id,
+      versionNumber: 2,
+      status: "finalised",
+    });
+    expect(
+      timeline.entries
+        .filter((entry) => entry.action.startsWith("commercial_document."))
+        .map((entry) => entry.action),
+    ).toEqual([
+      "commercial_document.finalised",
+      "commercial_document.revised",
+      "commercial_document.declined",
+      "commercial_document.viewed",
+      "commercial_document.sent",
+      "commercial_document.finalised",
+      "commercial_document.created",
+    ]);
+    expect(
+      timeline.entries.find(
+        (entry) =>
+          entry.action === "commercial_document.finalised" && entry.details.versionNumber === 2,
+      ),
+    ).toMatchObject({
+      entityId: created.document.id,
+      details: {
+        documentId: created.document.id,
+        accountId: account.account.recordId,
+        opportunityId: opportunity.opportunity.recordId,
+        opportunityName: "Implementation package",
+        documentType: "quote",
+        title: "Revised quote for implementation package",
+        status: "finalised",
+        versionId: refinalized.version.id,
+        versionNumber: 2,
+      },
+    });
+    expect(
+      timeline.entries.find((entry) => entry.action === "commercial_document.declined"),
+    ).toMatchObject({
+      entityId: created.document.id,
+      details: {
+        documentId: created.document.id,
+        status: "declined",
+        reason: "Budget paused",
+      },
+    });
+    expect(repository.outboxEvents.map((event) => event.type)).toContain(
+      "commercial_document.declined",
+    );
+  });
+
+  test("creates CRM metadata, writes a typed value, and filters accounts through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "admin");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
+    const organization = await call(
+      router.crm.createOrganization,
+      {
+        teamId: "team_1",
+        legalName: "Acme AB",
+        idempotencyKey: "crm_metadata_org_1",
+      },
+      context,
+    );
+    const account = await call(
+      router.crm.createAccount,
+      {
+        teamId: "team_1",
+        organizationId: organization.organization.recordId,
+        accountType: "customer",
+        idempotencyKey: "crm_metadata_account_1",
+      },
+      context,
+    );
+    const field = await call(
+      router.crm.createFieldDefinition,
+      {
+        teamId: "team_1",
+        objectTypeId: "account",
+        stableKey: "customer_tier",
+        label: "Customer tier",
+        fieldType: "single_option",
+        options: [
+          { stableKey: "gold", label: "Gold" },
+          { stableKey: "silver", label: "Silver" },
+        ],
+        idempotencyKey: "crm_metadata_field_1",
+      },
+      context,
+    );
+    const setValue = await call(
+      router.crm.setRecordFieldValue,
+      {
+        teamId: "team_1",
+        recordId: account.account.recordId,
+        fieldDefinitionId: field.fieldDefinition.id,
+        value: { type: "single_option", stableKey: "gold" },
+        expectedRecordVersion: 1,
+        idempotencyKey: "crm_metadata_set_1",
+      },
+      context,
+    );
+    const filtered = await call(
+      router.crm.listAccounts,
+      {
+        teamId: "team_1",
+        customFieldFilter: {
+          fieldDefinitionId: field.fieldDefinition.id,
+          value: { type: "single_option", stableKey: "gold" },
+        },
+      },
+      context,
+    );
+
+    expect(field.optionValues.map((option) => option.stableKey)).toEqual(["gold", "silver"]);
+    expect(setValue.record.version).toBe(2);
+    expect(filtered.accounts).toHaveLength(1);
+    expect(filtered.accounts[0]?.recordId).toBe(account.account.recordId);
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "crm.record_field_value.set",
+    });
+  });
+
+  test("updates CRM account, contact, and opportunity through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+    const organization = await call(
+      router.crm.createOrganization,
+      {
+        teamId: "team_1",
+        legalName: "Acme AB",
+        idempotencyKey: "crm_update_org_1",
+      },
+      context,
+    );
+    const account = await call(
+      router.crm.createAccount,
+      {
+        teamId: "team_1",
+        organizationId: organization.organization.recordId,
+        idempotencyKey: "crm_update_account_create_1",
+      },
+      context,
+    );
+    const contact = await call(
+      router.crm.createContact,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+        givenName: "Ada",
+        familyName: "Buyer",
+        email: "ada@acme.test",
+        role: "CFO",
+        idempotencyKey: "crm_update_contact_create_1",
+      },
+      context,
+    );
+    const opportunity = await call(
+      router.crm.createOpportunity,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+        name: "Implementation package",
+        amountMinor: 250_000,
+        currencyCode: "SEK",
+        idempotencyKey: "crm_update_opportunity_create_1",
+      },
+      context,
+    );
+
+    const updatedAccount = await call(
+      router.crm.updateAccount,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+        accountType: "customer",
+        lifecycleStage: "growth",
+        segment: "mid-market",
+        expectedRecordVersion: 1,
+        idempotencyKey: "crm_update_account_1",
+      },
+      context,
+    );
+    const updatedContact = await call(
+      router.crm.updateContact,
+      {
+        teamId: "team_1",
+        contactId: contact.contact.recordId,
+        familyName: "Signer",
+        email: "signer@acme.test",
+        role: "Signer",
+        isPrimary: true,
+        expectedRecordVersion: 1,
+        idempotencyKey: "crm_update_contact_1",
+      },
+      context,
+    );
+    const updatedOpportunity = await call(
+      router.crm.updateOpportunity,
+      {
+        teamId: "team_1",
+        opportunityId: opportunity.opportunity.recordId,
+        name: "Implementation and rollout",
+        amountMinor: 325_000,
+        currencyCode: "SEK",
+        expectedCloseDate: "2026-09-01T00:00:00.000Z",
+        expectedRecordVersion: 1,
+        idempotencyKey: "crm_update_opportunity_1",
+      },
+      context,
+    );
+
+    expect(updatedAccount).toMatchObject({
+      account: { accountType: "customer", lifecycleStage: "growth", segment: "mid-market" },
+      record: { version: 2 },
+    });
+    expect(updatedContact).toMatchObject({
+      person: { displayName: "Ada Signer", email: "signer@acme.test" },
+      contact: { role: "Signer", isPrimary: true },
+      record: { version: 2 },
+    });
+    expect(updatedOpportunity).toMatchObject({
+      opportunity: {
+        name: "Implementation and rollout",
+        amountMinor: 325_000,
+        expectedCloseDate: "2026-09-01T00:00:00.000Z",
+      },
+      record: { version: 2 },
+    });
+    expect(repository.outboxEvents.at(-3)).toMatchObject({ type: "crm.account.updated" });
+    expect(repository.outboxEvents.at(-2)).toMatchObject({ type: "crm.contact.updated" });
+    expect(repository.outboxEvents.at(-1)).toMatchObject({ type: "crm.opportunity.updated" });
   });
 
   test("returns report overview metrics with drilldown sources through protected routes", async () => {
@@ -4574,6 +6149,36 @@ describe("appRouter", () => {
     const context = { context: testContext({ id: "user_1", email: "admin@example.com" }) };
 
     const catalog = await call(router.integrations.list, { teamId: "team_1" }, context);
+    const fortnoxAuthorization = await call(
+      router.integrations.createFortnoxAuthorizationUrl,
+      {
+        teamId: "team_1",
+        redirectUrl: "http://localhost:3001/settings",
+      },
+      context,
+    );
+    const connectedFortnox = await call(
+      router.integrations.completeFortnoxOAuth,
+      {
+        teamId: "team_1",
+        code: "fortnox_authorization_code_1234",
+        redirectUrl: "http://localhost:3001/settings",
+        state: fortnoxAuthorization.state,
+        idempotencyKey: "integration_connect_fortnox_1",
+      },
+      context,
+    );
+    const replayedFortnoxCallback = await call(
+      router.integrations.completeFortnoxOAuth,
+      {
+        teamId: "team_1",
+        code: "fortnox_authorization_code_1234",
+        redirectUrl: "http://localhost:3001/settings",
+        state: fortnoxAuthorization.state,
+        idempotencyKey: "integration_connect_fortnox_1",
+      },
+      context,
+    );
     const connected = await call(
       router.integrations.connect,
       {
@@ -4670,6 +6275,23 @@ describe("appRouter", () => {
       },
       context,
     );
+    const syncedFortnox = await call(
+      router.integrations.sync,
+      {
+        teamId: "team_1",
+        connectionId: connectedFortnox.connection.id,
+        idempotencyKey: "integration_sync_fortnox_1",
+      },
+      context,
+    );
+    const fortnoxCatalog = await call(
+      router.integrations.fortnoxCatalog,
+      {
+        teamId: "team_1",
+        connectionId: connectedFortnox.connection.id,
+      },
+      context,
+    );
     const exportedTransactions = await call(
       router.integrations.exportAccounting,
       {
@@ -4741,13 +6363,31 @@ describe("appRouter", () => {
       },
       context,
     );
+    const disconnectedFortnox = await call(
+      router.integrations.disconnectFortnox,
+      {
+        teamId: "team_1",
+        connectionId: connectedFortnox.connection.id,
+        idempotencyKey: "integration_disconnect_fortnox_1",
+      },
+      context,
+    );
 
-    expect(catalog.providers.map((provider) => provider.category)).toEqual([
-      "accounting",
-      "payments",
-      "messaging",
-      "email",
-    ]);
+    expect(catalog.providers.map((provider) => provider.provider)).toContain("fortnox");
+    expect(new URL(fortnoxAuthorization.authorizationUrl).searchParams.get("response_type")).toBe(
+      "code",
+    );
+    expect(connectedFortnox.connection).toMatchObject({
+      provider: "fortnox",
+      rawPayload: {
+        oauth: {
+          source: "authorization_code",
+          stateValidated: true,
+          authorizationCodeLastFour: "1234",
+        },
+      },
+    });
+    expect(replayedFortnoxCallback).toMatchObject({ replayed: true });
     expect(connected.connection).toMatchObject({
       provider: "mock-accounting",
       status: "connected",
@@ -4759,6 +6399,18 @@ describe("appRouter", () => {
         ?.tokenCiphertext.includes("mock_secret"),
     ).toBe(false);
     expect(synced.syncRun).toMatchObject({ status: "completed", recordsSynced: 3 });
+    expect(syncedFortnox.syncRun).toMatchObject({ status: "completed", recordsSynced: 8 });
+    expect(fortnoxCatalog).toMatchObject({
+      company: { providerObjectId: "5566778899" },
+    });
+    expect(fortnoxCatalog.customers.map((customer) => customer.providerObjectId)).toEqual([
+      "1001",
+      "1002",
+    ]);
+    expect(fortnoxCatalog.articles.map((article) => article.providerObjectId)).toEqual([
+      "KONSULT",
+      "SUPPORT",
+    ]);
     expect(exportedTransactions.syncRun).toMatchObject({
       status: "completed",
       recordsSynced: 1,
@@ -4781,8 +6433,10 @@ describe("appRouter", () => {
       syncRun: { status: "completed", recordsSynced: 1 },
     });
     expect(disabled.connection.status).toBe("disabled");
+    expect(disconnectedFortnox.connection.status).toBe("disabled");
     expect(repository.invoicePayments).toHaveLength(1);
-    expect(repository.integrationSyncRuns).toHaveLength(6);
+    expect(repository.integrationSyncRuns).toHaveLength(7);
+    expect(repository.providerObjects).toHaveLength(8);
   });
 
   test("manages email inbox OAuth, settings, and sync requests through protected routes", async () => {

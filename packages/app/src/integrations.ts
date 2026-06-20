@@ -11,7 +11,9 @@ import type {
   IntegrationPaymentEvent,
   IntegrationProvider,
   IntegrationProviderCapability,
+  IntegrationProviderExternalObject,
   IntegrationProviderName,
+  IntegrationProviderToken,
 } from "@dawn/integrations";
 
 import type { BillingRepository } from "./billing";
@@ -55,6 +57,9 @@ export type SyncIntegrationCommand = {
   teamId: string;
   connectionId: string;
   idempotencyKey: string;
+  enforceCallerPermission?: boolean;
+  syncMode?: "initial" | "incremental";
+  cursor?: Record<string, unknown> | null;
 };
 
 export type SyncIntegrationResult = {
@@ -134,6 +139,13 @@ export type IntegrationRepository = {
     teamId: string,
     connectionId: string,
   ): Promise<IntegrationConnection | null>;
+  getIntegrationConnectionSecretsForTeam(
+    teamId: string,
+    connectionId: string,
+  ): Promise<{
+    token: IntegrationProviderToken;
+    rawPayload: Record<string, unknown>;
+  } | null>;
   upsertIntegrationConnection(input: {
     connectionId: string;
     teamId: string;
@@ -168,6 +180,23 @@ export type IntegrationRepository = {
     status: IntegrationConnection["status"];
     lastError?: string | null;
   }): Promise<IntegrationConnection>;
+  updateIntegrationConnectionTokenAndRawPayload(input: {
+    connectionId: string;
+    token?: IntegrationProviderToken | null;
+    rawPayload: Record<string, unknown>;
+    status?: IntegrationConnection["status"];
+    lastError?: string | null;
+    lastSyncAt?: Date | null;
+  }): Promise<IntegrationConnection>;
+  upsertProviderObject(input: {
+    teamId: string;
+    provider: string;
+    providerObjectType: string;
+    providerObjectId: string;
+    internalEntityType?: string | null;
+    internalEntityId?: string | null;
+    rawPayload: Record<string, unknown>;
+  }): Promise<void>;
   disableIntegrationConnection(input: {
     connectionId: string;
     disabledAt: Date;
@@ -316,16 +345,20 @@ export async function syncIntegration(
 
     assertCommandTeamMatchesContext(context, command.teamId, "Integration not found");
 
-    await resolveTeamAccess(
-      integrationRepository,
-      { ...context, teamId: command.teamId },
-      "integrations.write",
-      "You cannot sync integrations for this team",
-    );
+    if (command.enforceCallerPermission !== false) {
+      await resolveTeamAccess(
+        integrationRepository,
+        { ...context, teamId: command.teamId },
+        "integrations.write",
+        "You cannot sync integrations for this team",
+      );
+    }
 
     const fingerprint = JSON.stringify({
       teamId: command.teamId,
       connectionId: command.connectionId,
+      syncMode: command.syncMode ?? null,
+      cursor: command.cursor ?? null,
     });
     const replayed = await integrationRepository.getIdempotencyResult(
       command.teamId,
@@ -354,6 +387,15 @@ export async function syncIntegration(
       throw new AppError("NOT_FOUND", "Integration not found");
     }
 
+    const secrets = await integrationRepository.getIntegrationConnectionSecretsForTeam(
+      command.teamId,
+      connection.id,
+    );
+
+    if (!secrets) {
+      throw new AppError("NOT_FOUND", "Integration not found");
+    }
+
     const provider = requireIntegrationProvider(providers, connection.provider);
     const syncRun = await integrationRepository.createIntegrationSyncRun({
       syncRunId: crypto.randomUUID(),
@@ -367,20 +409,50 @@ export async function syncIntegration(
       const synced = await provider.sync({
         teamId: command.teamId,
         providerConnectionId: connection.providerConnectionId,
+        token: secrets.token,
+        rawPayload: secrets.rawPayload,
+        syncMode: command.syncMode,
+        cursor: command.cursor ?? null,
+      });
+      await persistProviderExternalObjects(integrationRepository, {
+        teamId: command.teamId,
+        provider: connection.provider,
+        providerConnectionId: connection.providerConnectionId,
+        integrationConnectionId: connection.id,
+        objects: synced.externalObjects ?? [],
       });
       const completedSyncRun = await integrationRepository.finishIntegrationSyncRun({
         syncRunId: syncRun.id,
         status: synced.status,
         recordsSynced: synced.recordsSynced,
-        error: null,
+        error:
+          synced.status === "partial"
+            ? (synced.error ?? "Integration sync partially completed")
+            : null,
         rawPayload: synced.rawPayload,
       });
+      const nextConnectionStatus = synced.status === "partial" ? "error" : "connected";
+      const nextLastError =
+        synced.status === "partial"
+          ? (synced.error ?? synced.recovery?.message ?? "Integration sync partially completed")
+          : null;
       const syncedConnection = await integrationRepository.markIntegrationConnectionSynced({
         connectionId: connection.id,
         syncedAt: new Date(completedSyncRun.completedAt ?? completedSyncRun.startedAt),
-        status: "connected",
-        lastError: null,
+        status: nextConnectionStatus,
+        lastError: nextLastError,
       });
+      const refreshedConnection =
+        synced.refreshedToken || synced.connectionRawPayload
+          ? await integrationRepository.updateIntegrationConnectionTokenAndRawPayload({
+              connectionId: connection.id,
+              token: synced.refreshedToken ?? null,
+              rawPayload: synced.connectionRawPayload ?? secrets.rawPayload,
+              status: nextConnectionStatus,
+              lastError: nextLastError,
+              lastSyncAt: new Date(completedSyncRun.completedAt ?? completedSyncRun.startedAt),
+            })
+          : syncedConnection;
 
       await integrationRepository.appendAuditEvent({
         teamId: command.teamId,
@@ -392,7 +464,9 @@ export async function syncIntegration(
         metadata: {
           provider: connection.provider,
           category: connection.category,
+          status: completedSyncRun.status,
           recordsSynced: completedSyncRun.recordsSynced,
+          recovery: synced.recovery ?? null,
         },
       });
 
@@ -406,12 +480,14 @@ export async function syncIntegration(
           connectionId: connection.id,
           provider: connection.provider,
           category: connection.category,
+          status: completedSyncRun.status,
           recordsSynced: completedSyncRun.recordsSynced,
+          recovery: synced.recovery ?? null,
         },
       });
 
       const result = {
-        connection: syncedConnection,
+        connection: refreshedConnection,
         syncRun: completedSyncRun,
         replayed: false,
       };
@@ -459,6 +535,34 @@ export async function syncIntegration(
       return result;
     }
   });
+}
+
+async function persistProviderExternalObjects(
+  repository: IntegrationUseCaseRepository,
+  input: {
+    teamId: string;
+    provider: string;
+    providerConnectionId: string;
+    integrationConnectionId: string;
+    objects: readonly IntegrationProviderExternalObject[];
+  },
+) {
+  for (const object of input.objects) {
+    await repository.upsertProviderObject({
+      teamId: input.teamId,
+      provider: input.provider,
+      providerObjectType: object.providerObjectType,
+      providerObjectId: object.providerObjectId,
+      internalEntityType: object.internalEntityType ?? null,
+      internalEntityId: object.internalEntityId ?? null,
+      rawPayload: {
+        ...object.rawPayload,
+        provider: input.provider,
+        providerConnectionId: input.providerConnectionId,
+        integrationConnectionId: input.integrationConnectionId,
+      },
+    });
+  }
 }
 
 export async function exportAccountingIntegration(

@@ -340,6 +340,47 @@ describe("job contracts", () => {
     ]);
   });
 
+  test("maps Fortnox connection events to initial sync jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "integration.connected",
+        payload: {
+          connectionId: "conn_fortnox_1",
+          provider: "fortnox",
+          category: "accounting",
+        },
+      }),
+    ).toEqual([
+      {
+        type: "outbox.dispatch",
+        outboxEventId: "outbox_1",
+        teamId: "team_1",
+        eventType: "integration.connected",
+        version: 1,
+        attempt: 1,
+        idempotencyKey: "outbox:outbox_1:attempt:1",
+      },
+      {
+        type: "fortnox.sync",
+        teamId: "team_1",
+        connectionId: "conn_fortnox_1",
+        provider: "fortnox",
+        syncMode: "initial",
+        sourceOutboxEventId: "outbox_1",
+        idempotencyKey: "fortnox:initial-sync:outbox_1:conn_fortnox_1",
+      },
+      {
+        type: "automation.run",
+        teamId: "team_1",
+        sourceOutboxEventId: "outbox_1",
+        eventType: "integration.connected",
+        idempotencyKey: "automation:run:outbox_1",
+      },
+      webhookDeliveryJob("integration.connected"),
+    ]);
+  });
+
   test("maps document upload outbox events to extraction jobs", () => {
     expect(
       outboxEventToQueueMessages({
@@ -689,6 +730,7 @@ describe("job contracts", () => {
       "insights.weekly.generate": record("insights.weekly.generate"),
       "automation.run": record("automation.run"),
       "bank.sync": record("bank.sync"),
+      "fortnox.sync": record("fortnox.sync"),
       "webhook.deliver": record("webhook.deliver"),
       "team_data.export": record("team_data.export"),
       "accountant_packet.export": record("accountant_packet.export"),

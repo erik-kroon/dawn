@@ -50,6 +50,7 @@ describe("Dawn worker runtime", () => {
       "automation.run",
       "bank.sync",
       "document.extract",
+      "fortnox.sync",
       "inbox.match_bidirectional_batch",
       "inbox.match_suggestions",
       "inbox.provider.sync",

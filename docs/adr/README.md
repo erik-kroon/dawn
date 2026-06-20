@@ -55,5 +55,6 @@ The initial PRD decisions are recorded here:
 - [0010: Trigger.dev Is An Exception Behind Job Contracts](0010-trigger-dev-is-an-exception-behind-job-contracts.md)
 - [0011: Public API Is Versioned, Scoped, And Use-Case Backed](0011-public-api-is-versioned-scoped-and-use-case-backed.md)
 - [0012: Auth And Registry Providers Are Boundary Layers](0012-auth-and-registry-providers-are-boundary-layers.md)
+- [0013: Product Scope Is Fortnox-Native Quote-To-Cash](0013-product-scope-is-fortnox-native-quote-to-cash.md)
 
 Do not create ADRs that merely restate code. ADRs should capture decisions, tradeoffs, and consequences.

@@ -18,7 +18,7 @@ export const Route = createFileRoute("/_auth/customers")({
 function CustomersRoute() {
   return (
     <PlannedSurface
-      description="Customers will give the team one place for customer records, billing context, project links, and account history."
+      description="Customers will hold account records, contacts, Fortnox customer mappings, open deals, signed documents, invoice state, trust context, and timeline history."
       icon={UsersIcon}
       title="Customers"
     />

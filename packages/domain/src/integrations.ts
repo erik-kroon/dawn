@@ -22,7 +22,7 @@ export type IntegrationConnection = {
   updatedAt: string;
 };
 
-export type IntegrationSyncRunStatus = "running" | "completed" | "failed";
+export type IntegrationSyncRunStatus = "running" | "completed" | "partial" | "failed";
 
 export type IntegrationSyncRun = {
   id: string;

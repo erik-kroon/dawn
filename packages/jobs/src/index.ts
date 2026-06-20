@@ -134,6 +134,17 @@ export const bankSyncJobSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+export const fortnoxSyncJobSchema = z.object({
+  type: z.literal("fortnox.sync"),
+  teamId: z.string().min(1),
+  connectionId: z.string().min(1),
+  provider: z.literal("fortnox"),
+  syncMode: z.enum(["initial", "incremental"]),
+  cursor: z.record(z.string(), z.unknown()).nullable().optional(),
+  sourceOutboxEventId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
 export const webhookDeliveryJobSchema = z.object({
   type: z.literal("webhook.deliver"),
   teamId: z.string().min(1),
@@ -183,6 +194,7 @@ export const dawnQueueMessageSchema = z.discriminatedUnion("type", [
   weeklyInsightGenerationJobSchema,
   automationRunJobSchema,
   bankSyncJobSchema,
+  fortnoxSyncJobSchema,
   webhookDeliveryJobSchema,
   teamDataExportJobSchema,
   accountantPacketExportJobSchema,
@@ -201,6 +213,7 @@ export type RecurringInvoiceGenerationJob = z.infer<typeof recurringInvoiceGener
 export type WeeklyInsightGenerationJob = z.infer<typeof weeklyInsightGenerationJobSchema>;
 export type AutomationRunJob = z.infer<typeof automationRunJobSchema>;
 export type BankSyncJob = z.infer<typeof bankSyncJobSchema>;
+export type FortnoxSyncJob = z.infer<typeof fortnoxSyncJobSchema>;
 export type WebhookDeliveryJob = z.infer<typeof webhookDeliveryJobSchema>;
 export type TeamDataExportJob = z.infer<typeof teamDataExportJobSchema>;
 export type AccountantPacketExportJob = z.infer<typeof accountantPacketExportJobSchema>;
@@ -255,6 +268,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
   const weeklyInsightJob = createWeeklyInsightGenerationJob(event);
   const automationJob = createAutomationRunJob(event);
   const bankSyncJob = createBankSyncJob(event);
+  const fortnoxSyncJob = createFortnoxSyncJob(event);
   const webhookJob = createWebhookDeliveryJob(event);
   const exportJob = createTeamDataExportJob(event);
   const accountantPacketExportJob = createAccountantPacketExportJob(event);
@@ -270,6 +284,7 @@ export function outboxEventToQueueMessages(event: OutboxEventForJob): DawnQueueM
     recurringInvoiceJob,
     weeklyInsightJob,
     bankSyncJob,
+    fortnoxSyncJob,
     exportJob,
     accountantPacketExportJob,
     deletionJob,
@@ -532,6 +547,26 @@ function createBankSyncJob(event: OutboxEventForJob): BankSyncJob | null {
     provider: event.payload.provider,
     sourceOutboxEventId: event.id,
     idempotencyKey: `bank:sync:${event.id}`,
+  };
+}
+
+function createFortnoxSyncJob(event: OutboxEventForJob): FortnoxSyncJob | null {
+  if (event.type !== "integration.connected" || event.payload.provider !== "fortnox") {
+    return null;
+  }
+
+  if (typeof event.payload.connectionId !== "string") {
+    return null;
+  }
+
+  return {
+    type: "fortnox.sync",
+    teamId: event.teamId,
+    connectionId: event.payload.connectionId,
+    provider: "fortnox",
+    syncMode: "initial",
+    sourceOutboxEventId: event.id,
+    idempotencyKey: `fortnox:initial-sync:${event.id}:${event.payload.connectionId}`,
   };
 }
 

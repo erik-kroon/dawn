@@ -29,11 +29,13 @@ import { useEffect, useMemo, useState } from "react";
 import { orpc } from "@/utils/orpc";
 
 import { ensureCurrentTeam, rememberSelectedTeam } from "../-team-routing";
+import { requireParkedSurfaceFlag } from "./-parked-surface";
 
 export const Route = createFileRoute("/_auth/operations")({
   component: OperationsRoute,
   loaderDeps: ({ search }) => ({ teamId: search.teamId }),
   loader: async ({ context, deps }) => {
+    requireParkedSurfaceFlag(deps.teamId);
     const { currentTeamId } = await ensureCurrentTeam(context, deps.teamId);
 
     if (!currentTeamId) {

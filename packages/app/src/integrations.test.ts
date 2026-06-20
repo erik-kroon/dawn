@@ -1,15 +1,21 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  completeFortnoxOAuth,
   connectIntegration,
+  createFortnoxAuthorizationUrl,
+  createFortnoxOAuthStateCodec,
   disableIntegration,
+  disconnectFortnox,
   exportAccountingIntegration,
+  listFortnoxCatalog,
   listIntegrationWorkspace,
   recordPaymentProviderEvent,
   sendIntegrationEmail,
   sendIntegrationMessage,
   syncIntegration,
   type DawnRepository,
+  type FortnoxProviderObjectRecord,
   type IdempotencyResult,
 } from ".";
 import type {
@@ -23,7 +29,13 @@ import type {
   TeamRole,
   Transaction,
 } from "@dawn/domain";
-import { createMockIntegrationProviders, type IntegrationProvider } from "@dawn/integrations";
+import {
+  createFortnoxTokenCodec,
+  createMockFortnoxIntegrationProvider,
+  createMockIntegrationProviders,
+  type IntegrationProvider,
+  type IntegrationProviderToken,
+} from "@dawn/integrations";
 
 class MemoryIntegrationRepository {
   role: TeamRole | null = "owner";
@@ -33,6 +45,7 @@ class MemoryIntegrationRepository {
   invoices: InvoiceDraft[] = [];
   payments: InvoicePayment[] = [];
   invoiceEvents: unknown[] = [];
+  providerObjects = new Map<string, FortnoxProviderObjectRecord>();
   idempotency = new Map<string, IdempotencyResult<unknown>>();
   auditEvents: unknown[] = [];
   outboxEvents: unknown[] = [];
@@ -153,6 +166,21 @@ class MemoryIntegrationRepository {
     return connection?.teamId === teamId ? connection : null;
   }
 
+  async getIntegrationConnectionSecretsForTeam(teamId: string, connectionId: string) {
+    const connection = this.connections.get(connectionId);
+
+    return connection?.teamId === teamId
+      ? {
+          token: {
+            encryptedToken: connection.tokenCiphertext,
+            keyId: connection.tokenKeyId,
+            lastFour: connection.tokenLastFour,
+          },
+          rawPayload: connection.rawPayload ?? {},
+        }
+      : null;
+  }
+
   async upsertIntegrationConnection(input: {
     connectionId: string;
     teamId: string;
@@ -164,6 +192,7 @@ class MemoryIntegrationRepository {
     tokenCiphertext: string;
     tokenKeyId: string;
     tokenLastFour: string;
+    rawPayload: Record<string, unknown>;
     createdByActorId: string;
   }) {
     const existing = [...this.connections.values()].find(
@@ -185,6 +214,7 @@ class MemoryIntegrationRepository {
       tokenCiphertext: input.tokenCiphertext,
       tokenKeyId: input.tokenKeyId,
       tokenLastFour: input.tokenLastFour,
+      rawPayload: input.rawPayload,
       lastSyncAt: null,
       lastError: null,
       disabledAt: null,
@@ -267,6 +297,35 @@ class MemoryIntegrationRepository {
     return updated;
   }
 
+  async updateIntegrationConnectionTokenAndRawPayload(input: {
+    connectionId: string;
+    token?: IntegrationProviderToken | null;
+    rawPayload: Record<string, unknown>;
+    status?: IntegrationConnection["status"];
+    lastError?: string | null;
+    lastSyncAt?: Date | null;
+  }) {
+    const connection = this.connections.get(input.connectionId);
+
+    if (!connection) {
+      throw new Error("missing connection");
+    }
+
+    const updated = {
+      ...connection,
+      tokenCiphertext: input.token?.encryptedToken ?? connection.tokenCiphertext,
+      tokenKeyId: input.token?.keyId ?? connection.tokenKeyId,
+      tokenLastFour: input.token?.lastFour ?? connection.tokenLastFour,
+      rawPayload: input.rawPayload,
+      status: input.status ?? connection.status,
+      lastError: input.lastError === undefined ? connection.lastError : input.lastError,
+      lastSyncAt:
+        input.lastSyncAt === undefined ? connection.lastSyncAt : input.lastSyncAt?.toISOString(),
+    };
+    this.connections.set(updated.id, updated);
+    return updated;
+  }
+
   async disableIntegrationConnection(input: { connectionId: string; disabledAt: Date }) {
     const connection = this.connections.get(input.connectionId);
 
@@ -282,6 +341,39 @@ class MemoryIntegrationRepository {
     this.connections.set(disabled.id, disabled);
     return disabled;
   }
+
+  async upsertProviderObject(input: {
+    teamId: string;
+    provider: string;
+    providerObjectType: string;
+    providerObjectId: string;
+    internalEntityType?: string | null;
+    internalEntityId?: string | null;
+    rawPayload: Record<string, unknown>;
+  }) {
+    const object: FortnoxProviderObjectRecord = {
+      id: providerObjectKey(input),
+      teamId: input.teamId,
+      provider: input.provider,
+      providerObjectType: input.providerObjectType,
+      providerObjectId: input.providerObjectId,
+      internalEntityType: input.internalEntityType ?? null,
+      internalEntityId: input.internalEntityId ?? null,
+      rawPayload: input.rawPayload,
+    };
+    this.providerObjects.set(providerObjectKey(input), object);
+  }
+
+  async listProviderObjectsForTeam(input: {
+    teamId: string;
+    provider: string;
+    providerObjectTypes: readonly string[];
+  }) {
+    return [...this.providerObjects.values()]
+      .filter((object) => object.teamId === input.teamId)
+      .filter((object) => object.provider === input.provider)
+      .filter((object) => input.providerObjectTypes.includes(object.providerObjectType));
+  }
 }
 
 const context = {
@@ -289,6 +381,20 @@ const context = {
   requestId: "request_1",
   teamId: "team_1",
 };
+const fortnoxOAuthStateCodec = createFortnoxOAuthStateCodec({
+  secret: "test_fortnox_oauth_state_secret",
+  allowedRedirectOrigins: ["http://localhost:3001"],
+  now: () => new Date("2026-06-15T10:00:00.000Z"),
+});
+
+function providerObjectKey(input: {
+  teamId: string;
+  provider: string;
+  providerObjectType: string;
+  providerObjectId: string;
+}) {
+  return `${input.teamId}:${input.provider}:${input.providerObjectType}:${input.providerObjectId}`;
+}
 
 describe("integration use cases", () => {
   test("connects adapters with encrypted token metadata and declared capabilities", async () => {
@@ -333,8 +439,347 @@ describe("integration use cases", () => {
       repository.connections.get(connected.connection.id)?.tokenCiphertext.includes("mock_secret"),
     ).toBe(false);
     expect(replayed).toMatchObject({ replayed: true });
-    expect(workspace.providers).toHaveLength(4);
+    expect(workspace.providers.map((provider) => provider.provider)).toContain("fortnox");
     expect(workspace.connections).toHaveLength(1);
+  });
+
+  test("syncs Fortnox catalog mappings idempotently for quote building", async () => {
+    const repository = new MemoryIntegrationRepository();
+    const providers = createMockIntegrationProviders();
+    const connected = await connectIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        provider: "fortnox",
+        idempotencyKey: "connect_fortnox_1",
+      },
+    );
+
+    const synced = await syncIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "sync_fortnox_1",
+      },
+    );
+    const replayed = await syncIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "sync_fortnox_1",
+      },
+    );
+    const catalog = await listFortnoxCatalog(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      connectionId: connected.connection.id,
+    });
+
+    expect(connected.connection).toMatchObject({
+      provider: "fortnox",
+      tokenKeyId: "mock-fortnox-token",
+      rawPayload: { oauth: { stateValidated: true } },
+    });
+    expect(synced.syncRun).toMatchObject({ status: "completed", recordsSynced: 8 });
+    expect(replayed).toMatchObject({ replayed: true });
+    const providerObjects = [...repository.providerObjects.values()];
+    expect(providerObjects).toHaveLength(8);
+    expect(catalog.company?.rawPayload).toMatchObject({
+      providerConnectionId: "fortnox_team_1",
+      organizationNumber: "5566778899",
+    });
+    expect(catalog.customers.map((customer) => customer.providerObjectId)).toEqual([
+      "1001",
+      "1002",
+    ]);
+    expect(catalog.articles.map((article) => article.providerObjectId)).toEqual([
+      "KONSULT",
+      "SUPPORT",
+    ]);
+    expect(providerObjects.find((object) => object.providerObjectType === "invoice")).toMatchObject(
+      {
+        providerObjectId: "9001",
+        rawPayload: { paymentState: "paid", integrationConnectionId: connected.connection.id },
+      },
+    );
+    expect(providerObjects.find((object) => object.providerObjectType === "payment")).toMatchObject(
+      {
+        providerObjectId: "7001",
+        rawPayload: { invoiceNumber: "9001", integrationConnectionId: connected.connection.id },
+      },
+    );
+  });
+
+  test("refreshes Fortnox tokens during sync and persists actionable health warnings", async () => {
+    const repository = new MemoryIntegrationRepository();
+    const tokenCodec = createFortnoxTokenCodec({
+      secret: "fortnox_token_refresh_secret",
+      keyId: "test-fortnox-token",
+    });
+    const providers = [
+      createMockFortnoxIntegrationProvider({
+        tokenCodec,
+        grantedScopes: ["companyinformation", "customer"],
+        licensedScopes: ["companyinformation", "customer", "article"],
+        now: () => new Date("2026-06-15T10:29:00.000Z"),
+      }),
+    ];
+    const connected = await connectIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        provider: "fortnox",
+        idempotencyKey: "connect_fortnox_refresh_1",
+      },
+    );
+    const originalToken = repository.connections.get(connected.connection.id)?.tokenCiphertext;
+
+    const synced = await syncIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "sync_fortnox_refresh_1",
+      },
+    );
+    const refreshedToken = repository.connections.get(connected.connection.id)?.tokenCiphertext;
+
+    expect(refreshedToken).toStartWith("v1:");
+    expect(refreshedToken).not.toBe(originalToken);
+    expect(synced.connection.rawPayload?.health).toMatchObject({
+      status: "warning",
+      missingScopes: ["article", "invoice"],
+      warnings: expect.arrayContaining([
+        expect.objectContaining({ code: "missing_scope", scope: "article" }),
+        expect.objectContaining({ code: "missing_license", scope: "invoice" }),
+      ]),
+    });
+    expect(synced.syncRun.rawPayload).toMatchObject({
+      health: {
+        status: "warning",
+      },
+    });
+  });
+
+  test("keeps successful Fortnox partial sync imports and resumes from recovery cursor", async () => {
+    const repository = new MemoryIntegrationRepository();
+    const providers = [createMockFortnoxIntegrationProvider({ partialFailure: true })];
+    const connected = await connectIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        provider: "fortnox",
+        idempotencyKey: "connect_fortnox_partial_1",
+      },
+    );
+
+    const partial = await syncIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        syncMode: "initial",
+        idempotencyKey: "sync_fortnox_partial_1",
+      },
+    );
+    const recovery = partial.syncRun.rawPayload.recovery as {
+      retryCursor: Record<string, unknown>;
+    };
+    const resumed = await syncIntegration(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        syncMode: "initial",
+        cursor: recovery.retryCursor,
+        idempotencyKey: "sync_fortnox_resume_1",
+      },
+    );
+    const catalog = await listFortnoxCatalog(repository as unknown as DawnRepository, context, {
+      teamId: "team_1",
+      connectionId: connected.connection.id,
+    });
+
+    expect(partial.syncRun).toMatchObject({
+      status: "partial",
+      recordsSynced: 4,
+      error: "Fortnox article sync partially failed",
+      rawPayload: {
+        recovery: {
+          retryCursor: {
+            resumeFrom: "fortnox:article:SUPPORT",
+          },
+        },
+      },
+    });
+    expect(partial.connection).toMatchObject({
+      status: "error",
+      lastError: "Fortnox article sync partially failed",
+    });
+    expect(repository.providerObjects).toHaveLength(5);
+    expect(resumed.syncRun).toMatchObject({ status: "completed", recordsSynced: 1 });
+    expect(resumed.connection).toMatchObject({ status: "connected", lastError: null });
+    expect(catalog.articles.map((article) => article.providerObjectId)).toEqual([
+      "KONSULT",
+      "SUPPORT",
+    ]);
+  });
+
+  test("starts and completes Fortnox OAuth with signed state validation", async () => {
+    const repository = new MemoryIntegrationRepository();
+    const providers = createMockIntegrationProviders();
+    const authorization = await createFortnoxAuthorizationUrl(
+      repository as unknown as DawnRepository,
+      providers,
+      fortnoxOAuthStateCodec,
+      context,
+      {
+        teamId: "team_1",
+        redirectUrl: "http://localhost:3001/settings",
+      },
+    );
+
+    const completed = await completeFortnoxOAuth(
+      repository as unknown as DawnRepository,
+      providers,
+      fortnoxOAuthStateCodec,
+      context,
+      {
+        teamId: "team_1",
+        code: "fortnox_authorization_code_1234",
+        redirectUrl: "http://localhost:3001/settings",
+        state: authorization.state,
+        idempotencyKey: "fortnox_oauth_callback_1",
+      },
+    );
+    const replayed = await completeFortnoxOAuth(
+      repository as unknown as DawnRepository,
+      providers,
+      fortnoxOAuthStateCodec,
+      context,
+      {
+        teamId: "team_1",
+        code: "fortnox_authorization_code_1234",
+        redirectUrl: "http://localhost:3001/settings",
+        state: authorization.state,
+        idempotencyKey: "fortnox_oauth_callback_1",
+      },
+    );
+
+    expect(new URL(authorization.authorizationUrl).searchParams.get("state")).toBe(
+      authorization.state,
+    );
+    expect(completed.connection).toMatchObject({
+      provider: "fortnox",
+      status: "connected",
+      rawPayload: {
+        oauth: {
+          source: "authorization_code",
+          stateValidated: true,
+          authorizationCodeLastFour: "1234",
+        },
+      },
+    });
+    expect(repository.connections.get(completed.connection.id)?.tokenCiphertext).toStartWith("v1:");
+    expect(replayed).toMatchObject({ replayed: true });
+    expect(repository.connections).toHaveLength(1);
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "integration.connected",
+      payload: { provider: "fortnox" },
+    });
+
+    await expect(
+      completeFortnoxOAuth(
+        repository as unknown as DawnRepository,
+        providers,
+        fortnoxOAuthStateCodec,
+        { ...context, actor: { id: "user_2", type: "user" } },
+        {
+          teamId: "team_1",
+          code: "fortnox_authorization_code_1234",
+          redirectUrl: "http://localhost:3001/settings",
+          state: authorization.state,
+          idempotencyKey: "fortnox_oauth_callback_2",
+        },
+      ),
+    ).rejects.toThrow("Fortnox OAuth state is invalid");
+  });
+
+  test("disconnects Fortnox through the provider before disabling the connection", async () => {
+    const repository = new MemoryIntegrationRepository();
+    const providers = createMockIntegrationProviders();
+    const authorization = await createFortnoxAuthorizationUrl(
+      repository as unknown as DawnRepository,
+      providers,
+      fortnoxOAuthStateCodec,
+      context,
+      {
+        teamId: "team_1",
+        redirectUrl: "http://localhost:3001/settings",
+      },
+    );
+    const connected = await completeFortnoxOAuth(
+      repository as unknown as DawnRepository,
+      providers,
+      fortnoxOAuthStateCodec,
+      context,
+      {
+        teamId: "team_1",
+        code: "fortnox_authorization_code_1234",
+        redirectUrl: "http://localhost:3001/settings",
+        state: authorization.state,
+        idempotencyKey: "fortnox_oauth_callback_1",
+      },
+    );
+
+    const disconnected = await disconnectFortnox(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "fortnox_disconnect_1",
+      },
+    );
+    const replayed = await disconnectFortnox(
+      repository as unknown as DawnRepository,
+      providers,
+      context,
+      {
+        teamId: "team_1",
+        connectionId: connected.connection.id,
+        idempotencyKey: "fortnox_disconnect_1",
+      },
+    );
+
+    expect(disconnected.connection.status).toBe("disabled");
+    expect(replayed).toMatchObject({ replayed: true });
+    expect(repository.outboxEvents.at(-1)).toMatchObject({
+      type: "integration.disabled",
+      payload: {
+        provider: "fortnox",
+        revoked: true,
+        preservesHistoricalData: true,
+      },
+    });
   });
 
   test("logs idempotent sync runs and surfaces provider failures", async () => {

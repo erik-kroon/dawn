@@ -1,13 +1,14 @@
 # Dawn
 
-Dawn is a business operating system for owner-operators, freelancers, agencies,
-consultants, and small teams.
+Dawn's active product focus is a Fortnox-native quote-to-cash CRM for Swedish
+SMBs: create the account/contact and deal, build a quote or contract, get the
+right person to sign with BankID-backed TIC signing, then create the linked
+invoice in Fortnox.
 
-It brings the work that usually lives across banking tools, inboxes, file
-drives, spreadsheets, invoice apps, and AI chats into one trustworthy workspace:
-transactions, receipts, invoices, customers, projects, time, documents,
-reporting, automations, and an assistant that can explain and act on business
-data.
+The broader business-OS codebase still contains banking, inbox, documents,
+invoicing, projects, reporting, automations, public API, and assistant
+foundations. Treat those as reusable infrastructure or parked product surfaces
+unless the quote-to-cash roadmap pulls them back into the narrow flow.
 
 Dawn is designed around one domain model, one application boundary,
 Cloudflare-native operations, server-authorized sync, and auditable AI tools.
@@ -21,41 +22,39 @@ runtime behavior.
 
 Start with:
 
-- [Product requirements](docs/PRD.md)
-- [CRM backend/data model deep dive](docs/product/CRM-BACKEND-DATA-MODEL-PRD.md)
+- [Dawn quote-to-cash PRD](docs/product/FORTNOX-SALES-OS-PRD.md)
+- [Dawn quote-to-cash vertical slices](docs/work/FORTNOX-SALES-OS-VERTICAL-SLICES.md)
 - [Domain language](CONTEXT.md)
 - [Codebase map](CONTEXT-MAP.md)
 - [Architecture decisions](docs/adr/README.md)
-- [Agent workflow notes](docs/agents/README.md)
+- [Testing strategy](docs/TESTING.md)
+- [Cloudflare deployment](docs/deployment/CLOUDFLARE.md)
 
 ## Product Scope
 
-Dawn is built around the daily operating loop of a small business:
+Dawn's first sellable scope is:
 
-- **Transactions and banking**: sync accounts, import transactions, categorize
-  money movement, review exceptions, and keep financial records clean.
-- **Inbox and documents**: collect receipts, invoices, statements, contracts,
-  and forwarded emails, then extract metadata and connect them to the right
-  business records.
-- **Matching and reconciliation**: automatically match obvious receipts,
-  invoices, payments, and transactions while surfacing low-confidence cases for
-  human review.
-- **Invoicing and billing**: create invoices, send them to customers, track
-  payment status, handle recurring billing, and connect billing activity back to
-  revenue.
-- **CRM and customer graph**: distinguish real organizations, people,
-  commercial account relationships, opportunities, contracts, activities,
-  external system data, and derived projections.
-- **Customers, projects, and time**: understand customer performance, track
-  billable work, and turn project hours into invoice lines without re-entering
-  data.
-- **Files and search**: keep business documents in object storage with searchable
-  metadata, extraction results, and links to transactions, invoices, customers,
-  and projects.
-- **Reporting and insights**: explain revenue, cash, spending, runway,
-  profitability, and weekly/monthly changes from the same underlying records.
-- **Automations and AI**: let assistants draft, search, classify, match, explain,
-  and propose actions through the same permissioned use cases as the app.
+- **Fortnox-native CRM**: accounts, contacts, deals, Fortnox customer mappings,
+  and a customer/deal timeline.
+- **Quote to contract**: quote builder, commercial document versions, PDF
+  previews, terms snapshots, and signing packages.
+- **TIC trust and signing**: BankID signing, signer/company checks, signing
+  evidence, and auditable status changes.
+- **Fortnox invoice handoff**: create the invoice after signing, then show
+  invoice and payment status from Fortnox. Order creation is parked for P1
+  unless Phase 0 validation changes that decision.
+- **Operational backbone**: audit, outbox, jobs, idempotency, provider adapters,
+  document storage, and sync/recovery state.
+
+Parked product surfaces for the first beta:
+
+- banking ledger dashboard, CSV import, accountant handoff, and close workflows
+- projects and time tracking
+- public API/developer platform
+- AI copilot and approval workflows
+- generic automation builder
+- generic CRM custom object platform
+- email inbox/OCR parity as a primary wedge
 
 ## Architecture Principles
 

@@ -26,10 +26,10 @@ export function PlannedSurface({ description, icon: Icon, title }: PlannedSurfac
         </div>
         <div className="flex flex-wrap gap-2">
           <Button render={<Link to="/dashboard" />} size="sm" variant="outline">
-            Dashboard
+            Home
           </Button>
-          <Button render={<Link to="/operations" />} size="sm">
-            Operations
+          <Button render={<Link to="/settings" />} size="sm">
+            Settings
           </Button>
         </div>
       </section>

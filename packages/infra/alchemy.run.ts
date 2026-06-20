@@ -86,6 +86,8 @@ const dawnRuntimeBindings = {
   // POLAR_ACCESS_TOKEN: alchemy.secret(requiredEnv("POLAR_ACCESS_TOKEN")),
   POLAR_SUCCESS_URL: requiredEnv("POLAR_SUCCESS_URL"),
   DATABASE_URL: alchemy.secret(requiredEnv("DATABASE_URL")),
+  FORTNOX_CLIENT_ID: optionalEnv("FORTNOX_CLIENT_ID") ?? "",
+  FORTNOX_CLIENT_SECRET: alchemy.secret(optionalEnv("FORTNOX_CLIENT_SECRET") ?? ""),
   ...gmailRuntimeBindings,
   DAWN_DOCUMENTS: documentsBucket,
   DAWN_JOBS: jobsQueue,
