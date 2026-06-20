@@ -25,6 +25,7 @@ export type DawnCloudflareBindings = {
   POLAR_SUCCESS_URL: string;
   FORTNOX_CLIENT_ID?: string;
   FORTNOX_CLIENT_SECRET?: string;
+  TIC_WEBHOOK_SECRET?: string;
   GMAIL_CLIENT_ID?: string;
   GMAIL_CLIENT_SECRET?: string;
   DATABASE_URL: string;

@@ -242,6 +242,112 @@ export const crmOpportunity = pgTable(
   ],
 );
 
+export const marketCompany = pgTable(
+  "market_company",
+  {
+    id: text("id").primaryKey(),
+    countryCode: text("country_code").notNull(),
+    organizationNumber: text("organization_number").notNull(),
+    legalName: text("legal_name").notNull(),
+    status: text("status").default("active").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("market_company_country_org_active_idx").on(
+      table.countryCode,
+      table.organizationNumber,
+      table.status,
+    ),
+    index("market_company_legal_name_idx").on(table.legalName),
+  ],
+);
+
+export const marketCompanySnapshot = pgTable(
+  "market_company_snapshot",
+  {
+    id: text("id").primaryKey(),
+    companyId: text("company_id")
+      .notNull()
+      .references(() => marketCompany.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    providerCapability: text("provider_capability").notNull(),
+    providerCompanyId: text("provider_company_id"),
+    retrievedAt: timestamp("retrieved_at").notNull(),
+    normalizedFields: jsonb("normalized_fields")
+      .$type<{
+        legalName: string;
+        organizationNumber: string;
+        countryCode: string;
+      }>()
+      .notNull(),
+    rawPayload: jsonb("raw_payload").$type<Record<string, unknown>>().notNull(),
+    rawPayloadReference: text("raw_payload_reference"),
+    contentHash: text("content_hash").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("market_company_snapshot_content_idx").on(
+      table.companyId,
+      table.provider,
+      table.providerCapability,
+      table.contentHash,
+    ),
+    index("market_company_snapshot_company_idx").on(table.companyId, table.retrievedAt),
+    index("market_company_snapshot_provider_object_idx").on(
+      table.provider,
+      table.providerCompanyId,
+    ),
+  ],
+);
+
+export const marketProspect = pgTable(
+  "market_prospect",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    companyId: text("company_id")
+      .notNull()
+      .references(() => marketCompany.id, { onDelete: "restrict" }),
+    companySnapshotId: text("company_snapshot_id")
+      .notNull()
+      .references(() => marketCompanySnapshot.id, { onDelete: "restrict" }),
+    status: text("status").default("created").notNull(),
+    sourceGoalId: text("source_goal_id"),
+    sourceRunId: text("source_run_id"),
+    icpId: text("icp_id"),
+    segmentId: text("segment_id"),
+    sourceProvider: text("source_provider").notNull(),
+    sourceProviderCapability: text("source_provider_capability").notNull(),
+    sourceDecisionSummary: text("source_decision_summary").notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    promotedAccountId: text("promoted_account_id").references(() => crmAccount.recordId, {
+      onDelete: "set null",
+    }),
+    promotedOpportunityId: text("promoted_opportunity_id").references(
+      () => crmOpportunity.recordId,
+      { onDelete: "set null" },
+    ),
+    promotedAt: timestamp("promoted_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("market_prospect_team_status_idx").on(table.teamId, table.status),
+    index("market_prospect_team_company_idx").on(table.teamId, table.companyId),
+    index("market_prospect_team_account_idx").on(table.teamId, table.promotedAccountId),
+    index("market_prospect_team_opportunity_idx").on(table.teamId, table.promotedOpportunityId),
+  ],
+);
+
 export const commercialDocument = pgTable(
   "commercial_document",
   {
@@ -265,6 +371,7 @@ export const commercialDocument = pgTable(
     templateId: text("template_id"),
     recipientEmail: text("recipient_email"),
     scope: text("scope"),
+    marketOrigin: jsonb("market_origin").$type<Record<string, unknown> | null>(),
     activeVersionId: text("active_version_id"),
     recipientAccessTokenHash: text("recipient_access_token_hash"),
     recipientAccessTokenExpiresAt: timestamp("recipient_access_token_expires_at"),
@@ -350,6 +457,112 @@ export const commercialDocumentVersion = pgTable(
     uniqueIndex("commercial_document_version_number_idx").on(table.documentId, table.versionNumber),
     uniqueIndex("commercial_document_version_pdf_object_key_idx").on(table.pdfObjectKey),
     index("commercial_document_version_team_document_idx").on(table.teamId, table.documentId),
+  ],
+);
+
+export const signatureRequest = pgTable(
+  "signature_request",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => commercialDocument.id, { onDelete: "cascade" }),
+    documentVersionId: text("document_version_id")
+      .notNull()
+      .references(() => commercialDocumentVersion.id, { onDelete: "restrict" }),
+    provider: text("provider").notNull(),
+    providerSessionId: text("provider_session_id").notNull(),
+    status: text("status").default("requested").notNull(),
+    signingUrl: text("signing_url"),
+    expiresAt: timestamp("expires_at"),
+    signingText: text("signing_text").notNull(),
+    hiddenSignedData: jsonb("hidden_signed_data").$type<Record<string, unknown>>().notNull(),
+    hiddenSignedDataHash: text("hidden_signed_data_hash").notNull(),
+    providerRawPayload: jsonb("provider_raw_payload").$type<Record<string, unknown>>().notNull(),
+    createdByActorId: text("created_by_actor_id").notNull(),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("signature_request_team_document_idx").on(table.teamId, table.documentId),
+    index("signature_request_team_version_idx").on(table.teamId, table.documentVersionId),
+    uniqueIndex("signature_request_provider_session_idx").on(
+      table.provider,
+      table.providerSessionId,
+    ),
+  ],
+);
+
+export const signatureParty = pgTable(
+  "signature_party",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    signatureRequestId: text("signature_request_id")
+      .notNull()
+      .references(() => signatureRequest.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    signingOrder: integer("signing_order").default(1).notNull(),
+    name: text("name").notNull(),
+    email: text("email").notNull(),
+    providerPartyId: text("provider_party_id"),
+    status: text("status").default("pending").notNull(),
+    signedAt: timestamp("signed_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("signature_party_request_order_idx").on(table.signatureRequestId, table.signingOrder),
+    index("signature_party_team_status_idx").on(table.teamId, table.status),
+  ],
+);
+
+export const signatureEvidence = pgTable(
+  "signature_evidence",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    signatureRequestId: text("signature_request_id")
+      .notNull()
+      .references(() => signatureRequest.id, { onDelete: "cascade" }),
+    signaturePartyId: text("signature_party_id").references(() => signatureParty.id, {
+      onDelete: "set null",
+    }),
+    provider: text("provider").notNull(),
+    providerEventId: text("provider_event_id").notNull(),
+    providerSessionId: text("provider_session_id").notNull(),
+    signedAt: timestamp("signed_at").notNull(),
+    collectedAt: timestamp("collected_at").notNull(),
+    signerName: text("signer_name").notNull(),
+    signerEmail: text("signer_email"),
+    signerPersonalNumberMasked: text("signer_personal_number_masked"),
+    documentPdfSha256: text("document_pdf_sha256").notNull(),
+    verificationStatus: text("verification_status").notNull(),
+    signatureValue: text("signature_value"),
+    xmlDsig: text("xml_dsig"),
+    ocspResponse: text("ocsp_response"),
+    evidenceObjectKey: text("evidence_object_key"),
+    rawPayload: jsonb("raw_payload").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("signature_evidence_provider_event_idx").on(table.provider, table.providerEventId),
+    index("signature_evidence_request_idx").on(table.teamId, table.signatureRequestId),
+    index("signature_evidence_session_idx").on(table.provider, table.providerSessionId),
   ],
 );
 

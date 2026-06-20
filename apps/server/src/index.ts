@@ -10,6 +10,7 @@ import {
   acceptInboxMatch,
   AppError,
   completeDocumentUpload,
+  completeTicSignatureWebhook,
   createCustomer,
   createDocumentDownload,
   createDocumentUpload,
@@ -46,7 +47,7 @@ import type { PublicApiScope } from "@dawn/domain";
 import { env } from "@dawn/env/server";
 import type { DawnCloudflareBindings } from "@dawn/infra/cloudflare";
 import type { DawnQueueMessage } from "@dawn/jobs";
-import { verifySandboxBankingWebhook } from "@dawn/integrations";
+import { createMockTicSignatureProvider, verifySandboxBankingWebhook } from "@dawn/integrations";
 import {
   projectSyncCollectionContract,
   syncSubscriptionSearchParams,
@@ -1314,6 +1315,34 @@ app.post("/api/webhooks/banking/sandbox", async (c) => {
     );
 
     return c.json({ queued: true, connectionId: result.connection.id }, 202);
+  } catch (error) {
+    return publicApiError(c, error);
+  }
+});
+
+app.post("/api/webhooks/tic/signing", async (c) => {
+  const body = await c.req.text();
+  const signature = c.req.header("tic-signature") ?? c.req.header("x-tic-signature") ?? "";
+  const timestamp = c.req.header("tic-timestamp") ?? c.req.header("x-tic-timestamp") ?? "";
+  const repository = new DrizzleDawnRepository();
+
+  try {
+    const result = await completeTicSignatureWebhook(repository, createMockTicSignatureProvider(), {
+      rawBody: body,
+      signature,
+      timestamp,
+      webhookSecret: c.env.TIC_WEBHOOK_SECRET ?? env.TIC_WEBHOOK_SECRET ?? c.env.BETTER_AUTH_SECRET,
+    });
+
+    return c.json(
+      {
+        completed: !result.replayed,
+        replayed: result.replayed,
+        signatureRequestId: result.signatureRequest.id,
+        evidenceId: result.evidence.id,
+      },
+      result.replayed ? 200 : 202,
+    );
   } catch (error) {
     return publicApiError(c, error);
   }

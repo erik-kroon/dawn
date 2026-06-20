@@ -540,6 +540,10 @@ class MemoryCrmRepository {
     );
   }
 
+  async listMarketProspectsForAccount(_teamId: string, _accountId: string) {
+    return [];
+  }
+
   async createCrmRecord(input: {
     recordId: string;
     teamId: string;

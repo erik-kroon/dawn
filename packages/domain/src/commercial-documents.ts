@@ -1,4 +1,5 @@
 import type { Money } from "./money";
+import type { MarketOriginLineage } from "./market";
 import { assertValidMoney } from "./money";
 import {
   assertBasisPoints,
@@ -40,6 +41,7 @@ export type CommercialDocument = {
   templateId: string | null;
   recipientEmail: string | null;
   scope: string | null;
+  marketOrigin: MarketOriginLineage | null;
   activeVersionId: string | null;
   recipientAccessTokenHash: string | null;
   recipientAccessTokenExpiresAt: string | null;
@@ -125,6 +127,7 @@ export type CommercialDocumentDraftInput = {
   templateId?: string | null;
   recipientEmail?: string | null;
   scope?: string | null;
+  marketOrigin?: MarketOriginLineage | null;
   lines: readonly CommercialDocumentLineDraft[];
 };
 
@@ -146,6 +149,7 @@ export type CommercialDocumentVersionSnapshot = {
   templateId: string | null;
   recipientEmail: string | null;
   scope: string | null;
+  marketOrigin: MarketOriginLineage | null;
   lines: CommercialDocumentVersionLineSnapshot[];
   totals: CommercialDocumentTotals;
 };
@@ -192,6 +196,7 @@ export function normalizeCommercialDocumentDraftInput(
     templateId: input.templateId?.trim() || null,
     recipientEmail: normalizeOptionalEmail(input.recipientEmail),
     scope: input.scope?.trim() || null,
+    marketOrigin: input.marketOrigin ?? null,
     lines: input.lines.map((line) => normalizeCommercialDocumentLineDraft(line, currency)),
   };
 }
@@ -326,6 +331,7 @@ export function buildCommercialDocumentVersionSnapshot(input: {
     templateId: input.document.templateId,
     recipientEmail: input.document.recipientEmail,
     scope: input.document.scope,
+    marketOrigin: input.document.marketOrigin,
     lines: input.document.lines.map((line) => ({
       source: line.source,
       provider: line.provider,
@@ -396,7 +402,7 @@ export function assertCanReviseCommercialDocument(document: { status: Commercial
 }
 
 export function assertCanViewRecipientCommercialDocument(document: CommercialDocument) {
-  if (document.status !== "sent" && document.status !== "viewed") {
+  if (document.status !== "sent" && document.status !== "viewed" && document.status !== "signed") {
     throw new Error("Commercial document is not available to recipient");
   }
 
@@ -409,7 +415,16 @@ export function assertCanViewRecipientCommercialDocument(document: CommercialDoc
 }
 
 export function assertCanDeclineCommercialDocument(document: CommercialDocument) {
-  assertCanViewRecipientCommercialDocument(document);
+  if (document.status !== "sent" && document.status !== "viewed") {
+    throw new Error("Commercial document cannot be declined");
+  }
+
+  if (
+    document.recipientAccessTokenExpiresAt &&
+    Date.now() >= new Date(document.recipientAccessTokenExpiresAt).getTime()
+  ) {
+    throw new Error("Commercial document recipient link expired");
+  }
 }
 
 function normalizeCommercialDocumentLineDraft(

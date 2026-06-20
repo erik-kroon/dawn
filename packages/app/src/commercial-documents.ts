@@ -7,6 +7,7 @@ import type {
   CommercialDocumentVersion,
   CommercialDocumentVersionSnapshot,
   CommercialDocumentWithLines,
+  MarketProspect,
   Opportunity,
 } from "@dawn/domain";
 import {
@@ -19,6 +20,7 @@ import {
   buildCommercialDocumentVersionSnapshot,
   calculateCommercialDocumentTotals,
   canonicalCommercialDocumentVersionPayload,
+  marketOriginLineageFromProspect,
   normalizeCommercialDocumentDraftInput,
 } from "@dawn/domain";
 
@@ -184,6 +186,10 @@ export type CommercialDocumentRepository = {
     teamId: string,
     opportunityId: string,
   ): Promise<CommercialDocumentWithLines[]>;
+  getMarketProspectForOpportunity(
+    teamId: string,
+    opportunityId: string,
+  ): Promise<MarketProspect | null>;
   getLatestCommercialDocumentVersionForTeam(
     teamId: string,
     documentId: string,
@@ -273,11 +279,16 @@ export async function createCommercialDocument(
       command.opportunityId,
     );
     const account = await getAccountForOpportunity(documentRepository, command.teamId, opportunity);
+    const marketProspect = await documentRepository.getMarketProspectForOpportunity(
+      command.teamId,
+      opportunity.recordId,
+    );
     const normalized = await normalizeCommercialDocumentCommand(documentRepository, {
       ...command,
       accountId: account.recordId,
       documentType: command.documentType ?? "quote",
       currency: command.currency ?? opportunity.currencyCode,
+      marketOrigin: marketProspect ? marketOriginLineageFromProspect(marketProspect) : null,
     });
     const fingerprint = JSON.stringify(normalized);
     const replayed = await documentRepository.getIdempotencyResult(
@@ -368,6 +379,7 @@ export async function updateCommercialDocumentDraft(
       recipientEmail:
         command.recipientEmail === undefined ? current.recipientEmail : command.recipientEmail,
       scope: command.scope === undefined ? current.scope : command.scope,
+      marketOrigin: current.marketOrigin,
       lines: command.lines ?? current.lines,
     });
     const fingerprint = JSON.stringify({
@@ -625,6 +637,7 @@ export async function reviseCommercialDocument(
       recipientEmail:
         command.recipientEmail === undefined ? current.recipientEmail : command.recipientEmail,
       scope: command.scope === undefined ? current.scope : command.scope,
+      marketOrigin: current.marketOrigin,
       lines: command.lines ?? current.lines,
     });
     const fingerprint = JSON.stringify({

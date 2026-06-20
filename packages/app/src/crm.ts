@@ -20,6 +20,7 @@ import type {
   CrmRecordGrant,
   LegalEntity,
   IntegrationConnection,
+  MarketProspect,
   Organization,
   Opportunity,
   OpportunityStage,
@@ -482,6 +483,7 @@ export type CrmRepository = {
   listContactsForAccount(teamId: string, accountId: string): Promise<AccountContactSummary[]>;
   listOpenOpportunitiesForAccount(teamId: string, accountId: string): Promise<Opportunity[]>;
   listOpportunitiesForAccount(teamId: string, accountId: string): Promise<Opportunity[]>;
+  listMarketProspectsForAccount(teamId: string, accountId: string): Promise<MarketProspect[]>;
   listAuditEvents(input: {
     teamId: string;
     limit: number;
@@ -747,6 +749,12 @@ const accountTimelineActions = new Set([
   "commercial_document.viewed",
   "commercial_document.declined",
   "commercial_document.revised",
+  "signature.requested",
+  "signature.completed",
+  "signature.invalid",
+  "market.company.seeded",
+  "market.prospect.created",
+  "market.prospect.promoted",
 ]);
 
 const crmObjectFields: Record<CrmObjectType, readonly string[]> = {
@@ -2886,13 +2894,15 @@ export async function listAccountTimeline(
     visibleContacts: new Map(),
     visiblePeople: new Map(),
     visibleOpportunities: new Map(),
+    marketProspects: new Map(),
   };
   const entityRefs: { entityType: string; entityId: string }[] = [
     { entityType: "account", entityId: account.recordId },
   ];
-  const [contacts, opportunities] = await Promise.all([
+  const [contacts, opportunities, marketProspects] = await Promise.all([
     repository.listContactsForAccount(command.teamId, account.recordId),
     repository.listOpportunitiesForAccount(command.teamId, account.recordId),
+    repository.listMarketProspectsForAccount(command.teamId, account.recordId),
   ]);
 
   for (const summary of contacts) {
@@ -2962,6 +2972,15 @@ export async function listAccountTimeline(
 
       throw error;
     }
+  }
+
+  for (const prospect of marketProspects) {
+    timelineContext.marketProspects.set(prospect.id, prospect);
+    entityRefs.push({ entityType: "market_prospect", entityId: prospect.id });
+    entityRefs.push({
+      entityType: "market_company_snapshot",
+      entityId: prospect.companySnapshotId,
+    });
   }
 
   const auditBatches = await Promise.all([
@@ -3152,6 +3171,7 @@ type TimelineContext = {
   visibleContacts: Map<string, Partial<Contact>>;
   visiblePeople: Map<string, Partial<Person>>;
   visibleOpportunities: Map<string, Partial<Opportunity>>;
+  marketProspects: Map<string, MarketProspect>;
 };
 
 function accountTimelineEntryFromAuditEvent(
@@ -3372,6 +3392,76 @@ function timelineEventDetails(
       declinedAt: event.metadata.declinedAt,
       reason: event.metadata.reason,
       pdfSha256: event.metadata.pdfSha256,
+    });
+  }
+
+  if (event.action.startsWith("signature.")) {
+    if (event.metadata.accountId !== context.account.recordId) {
+      return null;
+    }
+
+    const opportunity =
+      typeof event.metadata.opportunityId === "string"
+        ? context.visibleOpportunities.get(event.metadata.opportunityId)
+        : null;
+
+    if (event.metadata.opportunityId && !opportunity) {
+      return null;
+    }
+
+    return pickDefined({
+      documentId: event.metadata.documentId ?? event.entityId,
+      accountId: event.metadata.accountId,
+      opportunityId: event.metadata.opportunityId,
+      opportunityName: opportunity?.name,
+      documentType: event.metadata.documentType,
+      title: event.metadata.title,
+      status: event.metadata.status,
+      signatureRequestId: event.metadata.signatureRequestId,
+      signatureEvidenceId: event.metadata.signatureEvidenceId,
+      provider: event.metadata.provider,
+      providerEventId: event.metadata.providerEventId,
+      providerSessionId: event.metadata.providerSessionId,
+      documentVersionId: event.metadata.documentVersionId,
+      versionNumber: event.metadata.versionNumber,
+      pdfSha256: event.metadata.pdfSha256,
+      hiddenSignedDataHash: event.metadata.hiddenSignedDataHash,
+      signerEmail: event.metadata.signerEmail,
+      signerName: event.metadata.signerName,
+      expectedPdfSha256: event.metadata.expectedPdfSha256,
+      receivedPdfSha256: event.metadata.receivedPdfSha256,
+    });
+  }
+
+  if (event.action.startsWith("market.")) {
+    const prospectId =
+      typeof event.metadata.prospectId === "string" ? event.metadata.prospectId : null;
+
+    if (
+      event.entityType === "market_prospect" &&
+      (!prospectId || !context.marketProspects.has(prospectId))
+    ) {
+      return null;
+    }
+
+    return pickDefined({
+      prospectId: event.metadata.prospectId,
+      companyId: event.metadata.companyId,
+      companySnapshotId: event.metadata.companySnapshotId ?? event.entityId,
+      organizationNumber: event.metadata.organizationNumber,
+      legalName: event.metadata.legalName,
+      sourceGoalId: event.metadata.sourceGoalId,
+      sourceRunId: event.metadata.sourceRunId,
+      icpId: event.metadata.icpId,
+      segmentId: event.metadata.segmentId,
+      sourceProvider: event.metadata.sourceProvider ?? event.metadata.provider,
+      sourceProviderCapability:
+        event.metadata.sourceProviderCapability ?? event.metadata.providerCapability,
+      sourceDecisionSummary: event.metadata.sourceDecisionSummary,
+      accountId: event.metadata.accountId ?? context.account.recordId,
+      opportunityId: event.metadata.opportunityId,
+      organizationId: event.metadata.organizationId,
+      contentHash: event.metadata.contentHash,
     });
   }
 

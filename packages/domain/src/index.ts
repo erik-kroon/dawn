@@ -16,3 +16,5 @@ export * from "./fortnox";
 export * from "./integrations";
 export * from "./inbox-matching";
 export * from "./matching-evaluation";
+export * from "./market";
+export * from "./signatures";

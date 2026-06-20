@@ -50,6 +50,9 @@ import type {
   InvoicePayment,
   InboxMatchSuggestion,
   LegalEntity,
+  MarketCompany,
+  MarketCompanySnapshot,
+  MarketProspect,
   Opportunity,
   Organization,
   Party,
@@ -60,6 +63,9 @@ import type {
   ProjectMember,
   ReportSourceRef,
   RecurringInvoiceSchedule,
+  SignatureEvidence,
+  SignatureParty,
+  SignatureRequest,
   TeamInvite,
   TeamMember,
   TeamMembership,
@@ -99,8 +105,10 @@ import {
   createSandboxBankingProvider,
   createMockIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
+  createMockTicSignatureProvider,
   InboxConnector,
 } from "@dawn/integrations";
+import { signWebhookPayload } from "@dawn/app/webhook-signature";
 import {
   createApiTestContext as testContext,
   createScopedActorApiTestContext,
@@ -174,9 +182,15 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
   crmRecordFieldValues = new Map<string, CrmRecordFieldValue>();
   crmRecordGrants: CrmRecordGrant[] = [];
   crmFieldSecurityPolicies: CrmFieldSecurityPolicy[] = [];
+  marketCompanies = new Map<string, MarketCompany>();
+  marketCompanySnapshots = new Map<string, MarketCompanySnapshot>();
+  marketProspects = new Map<string, MarketProspect>();
   commercialDocuments = new Map<string, CommercialDocument>();
   commercialDocumentLines = new Map<string, CommercialDocumentLine[]>();
   commercialDocumentVersions = new Map<string, CommercialDocumentVersion>();
+  signatureRequests = new Map<string, SignatureRequest>();
+  signatureParties = new Map<string, SignatureParty>();
+  signatureEvidence = new Map<string, SignatureEvidence>();
 
   async withTransaction<T>(callback: (repository: DawnRepository) => Promise<T>): Promise<T> {
     return callback(this);
@@ -2728,6 +2742,179 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     );
   }
 
+  async getMarketCompanyByIdentity(input: { countryCode: string; organizationNumber: string }) {
+    return (
+      [...this.marketCompanies.values()].find(
+        (company) =>
+          company.countryCode === input.countryCode &&
+          company.organizationNumber === input.organizationNumber &&
+          company.status === "active",
+      ) ?? null
+    );
+  }
+
+  async getMarketCompany(companyId: string) {
+    return this.marketCompanies.get(companyId) ?? null;
+  }
+
+  async upsertMarketCompany(input: {
+    companyId: string;
+    countryCode: string;
+    organizationNumber: string;
+    legalName: string;
+  }) {
+    const existing = await this.getMarketCompanyByIdentity(input);
+    const now = new Date().toISOString();
+    const company: MarketCompany = existing
+      ? { ...existing, legalName: input.legalName, updatedAt: now }
+      : {
+          id: input.companyId,
+          countryCode: input.countryCode,
+          organizationNumber: input.organizationNumber,
+          legalName: input.legalName,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        };
+
+    this.marketCompanies.set(company.id, company);
+    return company;
+  }
+
+  async getMarketCompanySnapshot(snapshotId: string) {
+    return this.marketCompanySnapshots.get(snapshotId) ?? null;
+  }
+
+  async getMarketCompanySnapshotByContentHash(input: {
+    companyId: string;
+    provider: string;
+    providerCapability: string;
+    contentHash: string;
+  }) {
+    return (
+      [...this.marketCompanySnapshots.values()].find(
+        (snapshot) =>
+          snapshot.companyId === input.companyId &&
+          snapshot.provider === input.provider &&
+          snapshot.providerCapability === input.providerCapability &&
+          snapshot.contentHash === input.contentHash,
+      ) ?? null
+    );
+  }
+
+  async createMarketCompanySnapshot(input: {
+    snapshotId: string;
+    companyId: string;
+    provider: string;
+    providerCapability: string;
+    providerCompanyId: string | null;
+    retrievedAt: string;
+    normalizedFields: MarketCompanySnapshot["normalizedFields"];
+    rawPayload: Record<string, unknown>;
+    rawPayloadReference: string | null;
+    contentHash: string;
+  }) {
+    const snapshot: MarketCompanySnapshot = {
+      id: input.snapshotId,
+      companyId: input.companyId,
+      provider: input.provider,
+      providerCapability: input.providerCapability,
+      providerCompanyId: input.providerCompanyId,
+      retrievedAt: input.retrievedAt,
+      normalizedFields: input.normalizedFields,
+      rawPayload: input.rawPayload,
+      rawPayloadReference: input.rawPayloadReference,
+      contentHash: input.contentHash,
+      createdAt: new Date().toISOString(),
+    };
+    this.marketCompanySnapshots.set(snapshot.id, snapshot);
+    return snapshot;
+  }
+
+  async getMarketProspectForTeam(teamId: string, prospectId: string) {
+    const prospect = this.marketProspects.get(prospectId);
+    return prospect?.teamId === teamId ? prospect : null;
+  }
+
+  async getMarketProspectForOpportunity(teamId: string, opportunityId: string) {
+    return (
+      [...this.marketProspects.values()].find(
+        (prospect) =>
+          prospect.teamId === teamId && prospect.promotedOpportunityId === opportunityId,
+      ) ?? null
+    );
+  }
+
+  async listMarketProspectsForAccount(teamId: string, accountId: string) {
+    return [...this.marketProspects.values()].filter(
+      (prospect) => prospect.teamId === teamId && prospect.promotedAccountId === accountId,
+    );
+  }
+
+  async createMarketProspect(input: {
+    prospectId: string;
+    teamId: string;
+    companyId: string;
+    companySnapshotId: string;
+    sourceGoalId: string | null;
+    sourceRunId: string | null;
+    icpId: string | null;
+    segmentId: string | null;
+    sourceProvider: string;
+    sourceProviderCapability: string;
+    sourceDecisionSummary: string;
+    createdByActorId: string;
+  }) {
+    const now = new Date().toISOString();
+    const prospect: MarketProspect = {
+      id: input.prospectId,
+      teamId: input.teamId,
+      companyId: input.companyId,
+      companySnapshotId: input.companySnapshotId,
+      status: "created",
+      sourceGoalId: input.sourceGoalId,
+      sourceRunId: input.sourceRunId,
+      icpId: input.icpId,
+      segmentId: input.segmentId,
+      sourceProvider: input.sourceProvider,
+      sourceProviderCapability: input.sourceProviderCapability,
+      sourceDecisionSummary: input.sourceDecisionSummary,
+      createdByActorId: input.createdByActorId,
+      promotedAccountId: null,
+      promotedOpportunityId: null,
+      promotedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.marketProspects.set(prospect.id, prospect);
+    return prospect;
+  }
+
+  async promoteMarketProspect(input: {
+    teamId: string;
+    prospectId: string;
+    accountId: string;
+    opportunityId: string;
+    promotedAt: string;
+  }) {
+    const prospect = this.marketProspects.get(input.prospectId);
+
+    if (!prospect || prospect.teamId !== input.teamId) {
+      return null;
+    }
+
+    const promoted: MarketProspect = {
+      ...prospect,
+      status: "promoted",
+      promotedAccountId: input.accountId,
+      promotedOpportunityId: input.opportunityId,
+      promotedAt: input.promotedAt,
+      updatedAt: input.promotedAt,
+    };
+    this.marketProspects.set(promoted.id, promoted);
+    return promoted;
+  }
+
   async getCommercialDocumentForTeam(teamId: string, documentId: string) {
     const document = this.commercialDocuments.get(documentId);
     return document?.teamId === teamId ? this.commercialDocumentWithLines(document) : null;
@@ -2769,6 +2956,7 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       templateId: input.templateId ?? null,
       recipientEmail: input.recipientEmail ?? null,
       scope: input.scope ?? null,
+      marketOrigin: input.marketOrigin ?? null,
       activeVersionId: null,
       recipientAccessTokenHash: null,
       recipientAccessTokenExpiresAt: null,
@@ -2808,6 +2996,7 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       templateId: input.templateId ?? null,
       recipientEmail: input.recipientEmail ?? null,
       scope: input.scope ?? null,
+      marketOrigin: input.marketOrigin ?? current.marketOrigin,
       updatedAt: new Date().toISOString(),
     };
     this.commercialDocuments.set(document.id, document);
@@ -2883,6 +3072,7 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       templateId: input.templateId ?? null,
       recipientEmail: input.recipientEmail ?? null,
       scope: input.scope ?? null,
+      marketOrigin: input.marketOrigin ?? current.marketOrigin,
       activeVersionId: null,
       recipientAccessTokenHash: null,
       recipientAccessTokenExpiresAt: null,
@@ -2973,6 +3163,214 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     };
     this.commercialDocuments.set(document.id, document);
     return this.commercialDocumentWithLines(document);
+  }
+
+  async markCommercialDocumentSigning(
+    input: Parameters<DawnRepository["markCommercialDocumentSigning"]>[0],
+  ) {
+    const current = this.commercialDocuments.get(input.documentId);
+
+    if (!current || current.teamId !== input.teamId) {
+      return null;
+    }
+
+    const document: CommercialDocument = {
+      ...current,
+      status: "signing",
+      updatedAt: input.signingAt,
+    };
+    this.commercialDocuments.set(document.id, document);
+    return this.commercialDocumentWithLines(document);
+  }
+
+  async markCommercialDocumentSigned(
+    input: Parameters<DawnRepository["markCommercialDocumentSigned"]>[0],
+  ) {
+    const current = this.commercialDocuments.get(input.documentId);
+
+    if (!current || current.teamId !== input.teamId) {
+      return null;
+    }
+
+    const document: CommercialDocument = {
+      ...current,
+      status: "signed",
+      updatedAt: input.signedAt,
+    };
+    this.commercialDocuments.set(document.id, document);
+    return this.commercialDocumentWithLines(document);
+  }
+
+  async getSignatureRequestForTeam(
+    teamId: string,
+    signatureRequestId: string,
+  ): Promise<SignatureRequest | null> {
+    const request = this.signatureRequests.get(signatureRequestId);
+    return request?.teamId === teamId ? request : null;
+  }
+
+  async getSignatureRequestForDocumentVersion(
+    input: Parameters<DawnRepository["getSignatureRequestForDocumentVersion"]>[0],
+  ) {
+    return (
+      [...this.signatureRequests.values()].find(
+        (request) =>
+          request.teamId === input.teamId &&
+          request.documentId === input.documentId &&
+          request.documentVersionId === input.documentVersionId,
+      ) ?? null
+    );
+  }
+
+  async getSignatureRequestByProviderSession(
+    input: Parameters<DawnRepository["getSignatureRequestByProviderSession"]>[0],
+  ) {
+    return (
+      [...this.signatureRequests.values()].find(
+        (request) =>
+          request.provider === input.provider &&
+          request.providerSessionId === input.providerSessionId,
+      ) ?? null
+    );
+  }
+
+  async listSignatureParties(
+    teamId: string,
+    signatureRequestId: string,
+  ): Promise<SignatureParty[]> {
+    return [...this.signatureParties.values()].filter(
+      (party) => party.teamId === teamId && party.signatureRequestId === signatureRequestId,
+    );
+  }
+
+  async listSignatureEvidence(
+    teamId: string,
+    signatureRequestId: string,
+  ): Promise<SignatureEvidence[]> {
+    return [...this.signatureEvidence.values()].filter(
+      (evidence) =>
+        evidence.teamId === teamId && evidence.signatureRequestId === signatureRequestId,
+    );
+  }
+
+  async getSignatureEvidenceByProviderEvent(
+    input: Parameters<DawnRepository["getSignatureEvidenceByProviderEvent"]>[0],
+  ) {
+    return (
+      [...this.signatureEvidence.values()].find(
+        (evidence) =>
+          evidence.provider === input.provider &&
+          evidence.providerEventId === input.providerEventId,
+      ) ?? null
+    );
+  }
+
+  async createSignatureRequest(input: Parameters<DawnRepository["createSignatureRequest"]>[0]) {
+    const now = new Date().toISOString();
+    const request: SignatureRequest = {
+      id: input.signatureRequestId,
+      teamId: input.teamId,
+      documentId: input.documentId,
+      documentVersionId: input.documentVersionId,
+      provider: input.provider,
+      providerSessionId: input.providerSessionId,
+      status: "requested",
+      signingUrl: input.signingUrl,
+      expiresAt: input.expiresAt,
+      signingText: input.signingText,
+      hiddenSignedData: input.hiddenSignedData,
+      hiddenSignedDataHash: input.hiddenSignedDataHash,
+      providerRawPayload: input.providerRawPayload,
+      createdByActorId: input.createdByActorId,
+      completedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.signatureRequests.set(request.id, request);
+    return request;
+  }
+
+  async createSignatureParty(input: Parameters<DawnRepository["createSignatureParty"]>[0]) {
+    const now = new Date().toISOString();
+    const party: SignatureParty = {
+      id: input.partyId,
+      teamId: input.teamId,
+      signatureRequestId: input.signatureRequestId,
+      role: input.role,
+      signingOrder: input.signingOrder,
+      name: input.name,
+      email: input.email,
+      providerPartyId: input.providerPartyId,
+      status: "pending",
+      signedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.signatureParties.set(party.id, party);
+    return party;
+  }
+
+  async markSignatureRequestCompleted(
+    input: Parameters<DawnRepository["markSignatureRequestCompleted"]>[0],
+  ) {
+    const current = this.signatureRequests.get(input.signatureRequestId);
+
+    if (!current || current.teamId !== input.teamId) {
+      return null;
+    }
+
+    const request: SignatureRequest = {
+      ...current,
+      status: "completed",
+      completedAt: input.completedAt,
+      updatedAt: input.completedAt,
+    };
+    this.signatureRequests.set(request.id, request);
+    return request;
+  }
+
+  async markSignaturePartySigned(input: Parameters<DawnRepository["markSignaturePartySigned"]>[0]) {
+    const current = this.signatureParties.get(input.partyId);
+
+    if (!current || current.teamId !== input.teamId) {
+      return null;
+    }
+
+    const party: SignatureParty = {
+      ...current,
+      status: "signed",
+      signedAt: input.signedAt,
+      updatedAt: input.signedAt,
+    };
+    this.signatureParties.set(party.id, party);
+    return party;
+  }
+
+  async createSignatureEvidence(input: Parameters<DawnRepository["createSignatureEvidence"]>[0]) {
+    const evidence: SignatureEvidence = {
+      id: input.evidenceId,
+      teamId: input.teamId,
+      signatureRequestId: input.signatureRequestId,
+      signaturePartyId: input.signaturePartyId,
+      provider: input.provider,
+      providerEventId: input.providerEventId,
+      providerSessionId: input.providerSessionId,
+      signedAt: input.signedAt,
+      collectedAt: input.collectedAt,
+      signerName: input.signerName,
+      signerEmail: input.signerEmail,
+      signerPersonalNumberMasked: input.signerPersonalNumberMasked,
+      documentPdfSha256: input.documentPdfSha256,
+      verificationStatus: input.verificationStatus,
+      signatureValue: input.signatureValue,
+      xmlDsig: input.xmlDsig,
+      ocspResponse: input.ocspResponse,
+      evidenceObjectKey: input.evidenceObjectKey,
+      rawPayload: input.rawPayload,
+      createdAt: input.collectedAt,
+    };
+    this.signatureEvidence.set(evidence.id, evidence);
+    return evidence;
   }
 
   private buildCommercialDocumentLines(
@@ -3511,6 +3909,8 @@ async function createTestRouter(
     }),
     documentUrlSigner: testDocumentUrlSigner,
     commercialDocumentPdfRenderer: createDeterministicCommercialDocumentPdfRenderer(),
+    ticSignatureProvider: createMockTicSignatureProvider(),
+    ticWebhookSecret: "tic_webhook_secret_abcdefghijklmnopqrstuvwxyz",
     invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
     invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
   });
@@ -4950,6 +5350,337 @@ describe("appRouter", () => {
     });
     expect(repository.outboxEvents.map((event) => event.type)).toContain(
       "commercial_document.declined",
+    );
+  });
+
+  test("runs TIC signature request, webhook completion, evidence, and receipt through routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+    const recipientContext = { context: createUnauthenticatedApiTestContext() };
+    const legalEntity = await call(
+      router.crm.createLegalEntity,
+      {
+        teamId: "team_1",
+        legalName: "Seller AB",
+        organizationNumber: "5599998888",
+        countryCode: "SE",
+        baseCurrency: "SEK",
+        fiscalYearStartMonth: 1,
+        idempotencyKey: "signature_legal_entity_1",
+      },
+      context,
+    );
+    const organization = await call(
+      router.crm.createOrganization,
+      {
+        teamId: "team_1",
+        legalName: "Buyer AB",
+        organizationNumber: "5561234567",
+        countryCode: "SE",
+        idempotencyKey: "signature_org_1",
+      },
+      context,
+    );
+    const account = await call(
+      router.crm.createAccount,
+      {
+        teamId: "team_1",
+        organizationId: organization.organization.recordId,
+        legalEntityId: legalEntity.legalEntity.recordId,
+        accountType: "customer",
+        idempotencyKey: "signature_account_1",
+      },
+      context,
+    );
+    await repository.upsertProviderObject({
+      teamId: "team_1",
+      provider: "fortnox",
+      providerObjectType: "customer",
+      providerObjectId: "1001",
+      connectionId: "fortnox_conn_1",
+      internalEntityType: "account",
+      internalEntityId: account.account.recordId,
+      rawPayload: { integrationConnectionId: "fortnox_conn_1", customerNumber: "1001" },
+    });
+    const opportunity = await call(
+      router.crm.createOpportunity,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+        name: "Signed implementation package",
+        amountMinor: 125_000,
+        currencyCode: "SEK",
+        stage: "proposal_sent",
+        idempotencyKey: "signature_opportunity_1",
+      },
+      context,
+    );
+    const created = await call(
+      router.commercialDocuments.create,
+      {
+        teamId: "team_1",
+        opportunityId: opportunity.opportunity.recordId,
+        title: "Signature quote",
+        validUntil: "2026-07-20T00:00:00.000Z",
+        paymentTerms: "30 dagar",
+        termsVersion: "2026.1",
+        recipientEmail: "buyer@example.com",
+        lines: [
+          {
+            source: "freeform",
+            description: "Implementation",
+            quantityMilli: 1_000,
+            unitPrice: { amountMinor: 100_000, currency: "SEK" },
+            vatRateBasisPoints: 2_500,
+          },
+        ],
+        idempotencyKey: "signature_quote_create_1",
+      },
+      context,
+    );
+    const finalized = await call(
+      router.commercialDocuments.finalize,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        idempotencyKey: "signature_quote_finalize_1",
+      },
+      context,
+    );
+    const sent = await call(
+      router.commercialDocuments.send,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        idempotencyKey: "signature_quote_send_1",
+      },
+      context,
+    );
+    const started = await call(
+      router.commercialDocuments.startTicSignature,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        signerName: "Ada Buyer",
+        signerEmail: "buyer@example.com",
+        idempotencyKey: "signature_start_1",
+      },
+      context,
+    );
+
+    const body = JSON.stringify({
+      providerEventId: "tic_evt_api_1",
+      providerSessionId: started.signatureRequest.providerSessionId,
+      documentPdfSha256: finalized.version.pdfSha256,
+      signedAt: "2026-06-20T12:00:00.000Z",
+      signerName: "Ada Buyer",
+      signerEmail: "buyer@example.com",
+      signerPersonalNumberMasked: "********1234",
+      signatureValue: "signature-value",
+      xmlDsig: "<Signature />",
+      ocspResponse: "ocsp-response",
+      evidenceObjectKey: "signatures/team_1/tic_evt_api_1.json",
+    });
+    const timestamp = Math.floor(Date.now() / 1_000).toString();
+    const signature = await signWebhookPayload({
+      secret: "tic_webhook_secret_abcdefghijklmnopqrstuvwxyz",
+      timestamp,
+      body,
+    });
+
+    await expect(
+      call(
+        router.commercialDocuments.ticSignatureWebhook,
+        {
+          rawBody: body,
+          timestamp,
+          signature: "v1=invalid",
+        },
+        recipientContext,
+      ),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    const completed = await call(
+      router.commercialDocuments.ticSignatureWebhook,
+      {
+        rawBody: body,
+        timestamp,
+        signature,
+      },
+      recipientContext,
+    );
+    const duplicate = await call(
+      router.commercialDocuments.ticSignatureWebhook,
+      {
+        rawBody: body,
+        timestamp,
+        signature,
+      },
+      recipientContext,
+    );
+    const evidence = await call(
+      router.commercialDocuments.getSignatureEvidence,
+      {
+        teamId: "team_1",
+        signatureRequestId: started.signatureRequest.id,
+      },
+      context,
+    );
+    const receipt = await call(
+      router.commercialDocuments.recipientSignatureReceipt,
+      {
+        accessToken: sent.recipientAccessToken,
+      },
+      recipientContext,
+    );
+    const timeline = await call(
+      router.crm.accountTimeline,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+      },
+      context,
+    );
+
+    expect(started.signatureRequest.hiddenSignedData).toMatchObject({
+      seller: { legalName: "Seller AB" },
+      account: { customerLegalName: "Buyer AB" },
+      fortnoxCustomerMapping: { providerCustomerId: "1001" },
+    });
+    expect(completed).toMatchObject({
+      replayed: false,
+      document: { status: "signed" },
+      evidence: {
+        providerEventId: "tic_evt_api_1",
+        verificationStatus: "verified",
+        ocspResponse: "ocsp-response",
+      },
+    });
+    expect(duplicate.replayed).toBe(true);
+    expect(repository.crmOpportunities.get(opportunity.opportunity.recordId)).toMatchObject({
+      stage: "won_pending_invoice",
+      status: "won",
+    });
+    expect(evidence.evidence).toHaveLength(1);
+    expect(receipt).toMatchObject({
+      document: { status: "signed" },
+      version: { id: finalized.version.id },
+      evidence: [{ providerEventId: "tic_evt_api_1" }],
+    });
+    expect(timeline.entries.map((entry) => entry.action)).toEqual(
+      expect.arrayContaining(["signature.requested", "signature.completed"]),
+    );
+  });
+
+  test("promotes market prospect and snapshots lineage into commercial documents", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+    const seeded = await call(
+      router.market.seedCompany,
+      {
+        teamId: "team_1",
+        provider: "tic",
+        providerCapability: "company_profile",
+        providerCompanyId: "tic:5569876543",
+        retrievedAt: "2026-06-20T10:00:00.000Z",
+        legalName: "Beta AB",
+        organizationNumber: "556987-6543",
+        rawPayload: { name: "Beta AB", orgNo: "5569876543" },
+        rawPayloadReference: "r2://tic/beta.json",
+        idempotencyKey: "api_market_seed_1",
+      },
+      context,
+    );
+    const prospect = await call(
+      router.market.createProspect,
+      {
+        teamId: "team_1",
+        companyId: seeded.company.id,
+        companySnapshotId: seeded.snapshot.id,
+        sourceGoalId: "goal_api_1",
+        sourceRunId: "run_api_1",
+        icpId: "icp_api_1",
+        segmentId: "segment_api_1",
+        sourceDecisionSummary: "Seeded from TIC mock profile",
+        idempotencyKey: "api_market_prospect_1",
+      },
+      context,
+    );
+    const promoted = await call(
+      router.market.promoteProspect,
+      {
+        teamId: "team_1",
+        prospectId: prospect.prospect.id,
+        opportunityName: "Beta quote",
+        amountMinor: 95_000,
+        currencyCode: "SEK",
+        idempotencyKey: "api_market_promote_1",
+      },
+      context,
+    );
+    const document = await call(
+      router.commercialDocuments.create,
+      {
+        teamId: "team_1",
+        opportunityId: promoted.opportunity.recordId,
+        title: "Beta pilot quote",
+        termsVersion: "terms-2026-06",
+        recipientEmail: "buyer@beta.se",
+        lines: [
+          {
+            source: "freeform",
+            description: "Quote-to-cash pilot",
+            quantityMilli: 1_000,
+            unitPrice: { amountMinor: 95_000, currency: "SEK" },
+            vatRateBasisPoints: 2_500,
+          },
+        ],
+        idempotencyKey: "api_market_document_1",
+      },
+      context,
+    );
+    const preview = await call(
+      router.commercialDocuments.previewPdf,
+      {
+        teamId: "team_1",
+        documentId: document.document.id,
+      },
+      context,
+    );
+    const timeline = await call(
+      router.crm.accountTimeline,
+      {
+        teamId: "team_1",
+        accountId: promoted.account.recordId,
+      },
+      context,
+    );
+
+    expect(promoted.marketOrigin).toMatchObject({
+      companyId: seeded.company.id,
+      companySnapshotId: seeded.snapshot.id,
+      prospectId: prospect.prospect.id,
+      sourceGoalId: "goal_api_1",
+      sourceRunId: "run_api_1",
+      icpId: "icp_api_1",
+      segmentId: "segment_api_1",
+      sourceProvider: "tic",
+    });
+    expect(document.document.marketOrigin).toEqual(promoted.marketOrigin);
+    expect(preview.snapshot.marketOrigin).toEqual(promoted.marketOrigin);
+    expect(timeline.entries.map((entry) => entry.action)).toEqual(
+      expect.arrayContaining([
+        "market.company.seeded",
+        "market.prospect.created",
+        "market.prospect.promoted",
+        "commercial_document.created",
+      ]),
     );
   });
 

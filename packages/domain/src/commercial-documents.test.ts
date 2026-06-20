@@ -123,6 +123,7 @@ describe("commercial document domain", () => {
       templateId: null,
       recipientEmail: "buyer@example.com",
       scope: "Scope",
+      marketOrigin: null,
       activeVersionId: null,
       recipientAccessTokenHash: null,
       recipientAccessTokenExpiresAt: null,

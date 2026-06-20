@@ -15,6 +15,7 @@ export const serverEnvSchema = {
   POLAR_SUCCESS_URL: z.url().optional(),
   FORTNOX_CLIENT_ID: z.string().min(1).optional(),
   FORTNOX_CLIENT_SECRET: z.string().min(1).optional(),
+  TIC_WEBHOOK_SECRET: z.string().min(1).optional(),
   GMAIL_CLIENT_ID: z.string().min(1).optional(),
   GMAIL_CLIENT_SECRET: z.string().min(1).optional(),
   CORS_ORIGIN: z.url(),

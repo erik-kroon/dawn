@@ -315,6 +315,52 @@ export type IntegrationProvider = {
   }): Promise<IntegrationProviderDisconnectResult>;
 };
 
+export type TicSignatureProviderName = "tic";
+
+export type TicSignatureRequestInput = {
+  teamId: string;
+  documentId: string;
+  documentVersionId: string;
+  signer: {
+    name: string;
+    email: string;
+  };
+  userVisibleData: string;
+  userNonVisibleData: string;
+  callbackUrl?: string | null;
+  idempotencyKey: string;
+};
+
+export type TicSignatureSession = {
+  provider: TicSignatureProviderName;
+  providerSessionId: string;
+  signingUrl: string;
+  expiresAt: string;
+  rawPayload: ProviderRawPayload;
+};
+
+export type TicSignatureCompletion = {
+  providerEventId: string;
+  providerSessionId: string;
+  documentPdfSha256: string;
+  signedAt: string;
+  signerName: string;
+  signerEmail?: string | null;
+  signerPersonalNumberMasked?: string | null;
+  signatureValue?: string | null;
+  xmlDsig?: string | null;
+  ocspResponse?: string | null;
+  evidenceObjectKey?: string | null;
+  rawPayload: ProviderRawPayload;
+};
+
+export type TicSignatureProvider = {
+  provider: TicSignatureProviderName;
+  displayName: string;
+  createSignatureRequest(input: TicSignatureRequestInput): Promise<TicSignatureSession>;
+  parseCompletionWebhook(input: { body: string }): TicSignatureCompletion;
+};
+
 export type FortnoxTokenBundle = {
   accessToken: string;
   refreshToken: string;
@@ -2443,6 +2489,62 @@ function mockPaymentEventFromPayload(input: {
     paidAt,
     method,
     rawPayload: input.rawPayload,
+  };
+}
+
+export function createMockTicSignatureProvider(): TicSignatureProvider {
+  return {
+    provider: "tic",
+    displayName: "Mock TIC Identity",
+    async createSignatureRequest(input) {
+      const providerSessionId = `tic_session_${hashMockDelivery([
+        input.teamId,
+        input.documentId,
+        input.documentVersionId,
+        input.signer.email,
+        input.idempotencyKey,
+      ])}`;
+
+      return {
+        provider: "tic",
+        providerSessionId,
+        signingUrl: `https://tic.example/sign/${providerSessionId}`,
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString(),
+        rawPayload: {
+          mock: true,
+          provider: "tic",
+          providerSessionId,
+          userVisibleData: input.userVisibleData,
+          userNonVisibleDataSha256: createHash("sha256")
+            .update(input.userNonVisibleData)
+            .digest("hex"),
+          callbackUrl: input.callbackUrl ?? null,
+        },
+      };
+    },
+    parseCompletionWebhook(input) {
+      const payload = JSON.parse(input.body) as Record<string, unknown>;
+
+      return {
+        providerEventId: requiredString(payload.providerEventId, "providerEventId"),
+        providerSessionId: requiredString(payload.providerSessionId, "providerSessionId"),
+        documentPdfSha256: requiredString(payload.documentPdfSha256, "documentPdfSha256"),
+        signedAt:
+          typeof payload.signedAt === "string" ? payload.signedAt : new Date().toISOString(),
+        signerName: requiredString(payload.signerName, "signerName"),
+        signerEmail: typeof payload.signerEmail === "string" ? payload.signerEmail : null,
+        signerPersonalNumberMasked:
+          typeof payload.signerPersonalNumberMasked === "string"
+            ? payload.signerPersonalNumberMasked
+            : null,
+        signatureValue: typeof payload.signatureValue === "string" ? payload.signatureValue : null,
+        xmlDsig: typeof payload.xmlDsig === "string" ? payload.xmlDsig : null,
+        ocspResponse: typeof payload.ocspResponse === "string" ? payload.ocspResponse : null,
+        evidenceObjectKey:
+          typeof payload.evidenceObjectKey === "string" ? payload.evidenceObjectKey : null,
+        rawPayload: payload,
+      };
+    },
   };
 }
 

@@ -40,6 +40,8 @@ import type { EmailInboxUseCaseRepository } from "./email-inbox";
 import type { FortnoxUseCaseRepository } from "./fortnox";
 import type { IntegrationUseCaseRepository } from "./integrations";
 import type { CrmRepository } from "./crm";
+import type { MarketOriginRepository } from "./market";
+import type { SignatureRepository } from "./signatures";
 
 export * from "./assistant";
 export * from "./automation";
@@ -53,6 +55,8 @@ export * from "./documents-inbox";
 export * from "./email-inbox";
 export * from "./fortnox";
 export * from "./integrations";
+export * from "./market";
+export * from "./signatures";
 export * from "./operations";
 export * from "./projects-reporting";
 
@@ -298,7 +302,9 @@ export type DawnRepository = BankingUseCaseRepository &
   FortnoxUseCaseRepository &
   IntegrationUseCaseRepository &
   OperationsRepository &
-  CrmRepository;
+  CrmRepository &
+  MarketOriginRepository &
+  SignatureRepository;
 
 export type OutboxDispatchRepository = {
   withTransaction<T>(callback: (repository: OutboxDispatchRepository) => Promise<T>): Promise<T>;

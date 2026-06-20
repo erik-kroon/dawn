@@ -7,6 +7,7 @@ import {
   acceptTeamInvite,
   approveAssistantAction,
   commitCsvTransactionImport,
+  completeTicSignatureWebhook,
   completeBankConnection,
   completeEmailInboxOAuth,
   completeFortnoxOAuth,
@@ -14,6 +15,7 @@ import {
   createLedgerCounterparty,
   connectIntegration,
   createCommercialDocument,
+  createMarketProspect,
   createDeterministicCommercialDocumentPdfRenderer,
   createDeterministicInvoicePdfRenderer,
   createEmailInboxOAuthStateCodec,
@@ -47,6 +49,8 @@ import {
   createEmailInboxAuthorizationUrl,
   generateInboxMatchSuggestions,
   getCommercialDocumentPdf,
+  getRecipientSignatureReceipt,
+  getSignatureEvidence,
   getAssistantConversation,
   exportAccountingIntegration,
   finalizeCommercialDocument,
@@ -91,11 +95,14 @@ import {
   requestTeamDataDeletion,
   requestTeamDataExport,
   grantOAuthConsent,
+  promoteMarketProspect,
   runAutomationsForOutboxEvent,
+  seedMarketCompany,
   sendCommercialDocument,
   sendInvoice,
   sendInvoiceReminder,
   sendAssistantMessage,
+  startTicSignatureRequest,
   sendIntegrationEmail,
   sendIntegrationMessage,
   syncIntegration,
@@ -128,6 +135,7 @@ import {
   createMockBankingProvider,
   createSandboxBankingProvider,
   createConfiguredIntegrationProviders,
+  createMockTicSignatureProvider,
   createMockInvoiceEmailDeliveryProvider,
   type AccountantPacketEmailDeliveryProvider,
   type BankingProvider,
@@ -136,6 +144,7 @@ import {
   type InboxConnector,
   type IntegrationProvider,
   type InvoiceEmailDeliveryProvider,
+  type TicSignatureProvider,
 } from "@dawn/integrations";
 import {
   archiveAccount as archiveCrmAccount,
@@ -181,6 +190,8 @@ export type AppRouterDependencies = {
   transactionImportPayloadStorage?: TransactionImportPayloadStorage;
   csvTransactionMappingProvider?: CsvTransactionMappingSuggestionProvider;
   commercialDocumentPdfRenderer?: CommercialDocumentPdfRenderer;
+  ticSignatureProvider?: TicSignatureProvider;
+  ticWebhookSecret?: string;
   invoicePdfRenderer: InvoicePdfRenderer;
   invoiceEmailDeliveryProvider: InvoiceEmailDeliveryProvider;
 };
@@ -1010,6 +1021,30 @@ const commercialDocumentRecipientDeclineInput = z.object({
   reason: z.string().max(2_000).nullable().optional(),
 });
 
+const ticSignatureStartInput = z.object({
+  teamId: z.string().min(1),
+  documentId: z.string().min(1),
+  versionId: z.string().nullable().optional(),
+  signerName: z.string().min(1),
+  signerEmail: z.email(),
+  signerRole: z.enum(["external_signer", "internal_countersigner"]).nullable().optional(),
+  sellerLegalName: z.string().nullable().optional(),
+  sellerOrganizationNumber: z.string().nullable().optional(),
+  callbackUrl: z.url().nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const ticSignatureEvidenceInput = z.object({
+  teamId: z.string().min(1),
+  signatureRequestId: z.string().min(1),
+});
+
+const ticSignatureWebhookInput = z.object({
+  rawBody: z.string().min(1),
+  signature: z.string().min(1),
+  timestamp: z.string().min(1),
+});
+
 const crmFieldValueInput = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("text"),
@@ -1115,6 +1150,46 @@ const crmListAccountsInput = z.object({
     })
     .nullable()
     .optional(),
+});
+
+const marketSeedCompanyInput = z.object({
+  teamId: z.string().min(1),
+  provider: z.string().min(1),
+  providerCapability: z.string().min(1),
+  providerCompanyId: z.string().nullable().optional(),
+  retrievedAt: z.iso.datetime().nullable().optional(),
+  legalName: z.string().min(1),
+  organizationNumber: z.string().min(1),
+  countryCode: z.string().nullable().optional(),
+  rawPayload: z.record(z.string(), z.unknown()).nullable().optional(),
+  rawPayloadReference: z.string().nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const marketCreateProspectInput = z.object({
+  teamId: z.string().min(1),
+  companyId: z.string().min(1),
+  companySnapshotId: z.string().min(1),
+  sourceGoalId: z.string().nullable().optional(),
+  sourceRunId: z.string().nullable().optional(),
+  icpId: z.string().nullable().optional(),
+  segmentId: z.string().nullable().optional(),
+  sourceProvider: z.string().nullable().optional(),
+  sourceProviderCapability: z.string().nullable().optional(),
+  sourceDecisionSummary: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+});
+
+const marketPromoteProspectInput = z.object({
+  teamId: z.string().min(1),
+  prospectId: z.string().min(1),
+  accountId: z.string().nullable().optional(),
+  opportunityName: z.string().min(1),
+  amountMinor: z.number().int(),
+  currencyCode: z.string().regex(/^[A-Z]{3}$/),
+  expectedCloseDate: z.iso.datetime().nullable().optional(),
+  primaryOwnerPrincipalId: z.string().nullable().optional(),
+  idempotencyKey: z.string().min(1),
 });
 
 const createLedgerTransactionInput = z.object({
@@ -1278,6 +1353,8 @@ function createDefaultDependencies(): AppRouterDependencies {
       secret: env.BETTER_AUTH_SECRET,
     }),
     commercialDocumentPdfRenderer: createDeterministicCommercialDocumentPdfRenderer(),
+    ticSignatureProvider: createMockTicSignatureProvider(),
+    ticWebhookSecret: env.TIC_WEBHOOK_SECRET ?? env.BETTER_AUTH_SECRET,
     invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
     invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
   };
@@ -1340,6 +1417,8 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
     accountantPacketEmailDeliveryProvider,
     transactionImportPayloadStorage,
     csvTransactionMappingProvider,
+    ticSignatureProvider = createMockTicSignatureProvider(),
+    ticWebhookSecret = env.TIC_WEBHOOK_SECRET ?? env.BETTER_AUTH_SECRET,
   } = dependencies;
   const bankingProviderRegistry = createBankingProviderRegistry(bankingProviders);
 
@@ -2461,6 +2540,76 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
           }
         }),
     },
+    market: {
+      seedCompany: protectedProcedure
+        .input(marketSeedCompanyInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await seedMarketCompany(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                providerCompanyId: input.providerCompanyId ?? null,
+                retrievedAt: input.retrievedAt ?? null,
+                countryCode: input.countryCode ?? null,
+                rawPayload: input.rawPayload ?? null,
+                rawPayloadReference: input.rawPayloadReference ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createProspect: protectedProcedure
+        .input(marketCreateProspectInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createMarketProspect(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                sourceGoalId: input.sourceGoalId ?? null,
+                sourceRunId: input.sourceRunId ?? null,
+                icpId: input.icpId ?? null,
+                segmentId: input.segmentId ?? null,
+                sourceProvider: input.sourceProvider ?? null,
+                sourceProviderCapability: input.sourceProviderCapability ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      promoteProspect: protectedProcedure
+        .input(marketPromoteProspectInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await promoteMarketProspect(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                accountId: input.accountId ?? null,
+                expectedCloseDate: input.expectedCloseDate ?? null,
+                primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
     crm: {
       createObjectTypeDefinition: protectedProcedure
         .input(crmCreateObjectTypeDefinitionInput)
@@ -2983,6 +3132,55 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             mapAppError(error);
           }
         }),
+      startTicSignature: protectedProcedure
+        .input(ticSignatureStartInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await startTicSignatureRequest(
+              dawnRepository,
+              ticSignatureProvider,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                versionId: input.versionId ?? null,
+                signerRole: input.signerRole ?? null,
+                sellerLegalName: input.sellerLegalName ?? null,
+                sellerOrganizationNumber: input.sellerOrganizationNumber ?? null,
+                callbackUrl: input.callbackUrl ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      getSignatureEvidence: protectedProcedure
+        .input(ticSignatureEvidenceInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await getSignatureEvidence(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      ticSignatureWebhook: publicProcedure
+        .input(ticSignatureWebhookInput)
+        .handler(async ({ input }) => {
+          try {
+            return await completeTicSignatureWebhook(dawnRepository, ticSignatureProvider, {
+              ...input,
+              webhookSecret: ticWebhookSecret,
+            });
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
       recipientView: publicProcedure
         .input(commercialDocumentRecipientInput)
         .handler(async ({ input }) => {
@@ -3000,6 +3198,15 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
               ...input,
               reason: input.reason ?? null,
             });
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      recipientSignatureReceipt: publicProcedure
+        .input(commercialDocumentRecipientInput)
+        .handler(async ({ input }) => {
+          try {
+            return await getRecipientSignatureReceipt(dawnRepository, input);
           } catch (error) {
             mapAppError(error);
           }

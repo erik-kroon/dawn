@@ -76,6 +76,10 @@ import type {
   LegalEntity,
   OAuthApp,
   OAuthGrant,
+  MarketCompany,
+  MarketCompanySnapshot,
+  MarketOriginLineage,
+  MarketProspect,
   Opportunity,
   Organization,
   Party,
@@ -88,6 +92,10 @@ import type {
   ProjectMember,
   RecurringInvoiceSchedule,
   ReportSourceRef,
+  SignatureEvidence,
+  SignatureHiddenSignedData,
+  SignatureParty,
+  SignatureRequest,
   TeamInvite,
   TeamMember,
   TeamMembership,
@@ -5680,6 +5688,265 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return opportunity ? mapOpportunity(opportunity) : null;
   }
 
+  async getMarketCompanyByIdentity(input: {
+    countryCode: string;
+    organizationNumber: string;
+  }): Promise<MarketCompany | null> {
+    const [company] = await this.client
+      .select()
+      .from(schema.marketCompany)
+      .where(
+        and(
+          eq(schema.marketCompany.countryCode, input.countryCode),
+          eq(schema.marketCompany.organizationNumber, input.organizationNumber),
+          eq(schema.marketCompany.status, "active"),
+        ),
+      )
+      .limit(1);
+
+    return company ? mapMarketCompany(company) : null;
+  }
+
+  async getMarketCompany(companyId: string): Promise<MarketCompany | null> {
+    const [company] = await this.client
+      .select()
+      .from(schema.marketCompany)
+      .where(eq(schema.marketCompany.id, companyId))
+      .limit(1);
+
+    return company ? mapMarketCompany(company) : null;
+  }
+
+  async upsertMarketCompany(input: {
+    companyId: string;
+    countryCode: string;
+    organizationNumber: string;
+    legalName: string;
+  }): Promise<MarketCompany> {
+    const now = new Date();
+    const [company] = await this.client
+      .insert(schema.marketCompany)
+      .values({
+        id: input.companyId,
+        countryCode: input.countryCode,
+        organizationNumber: input.organizationNumber,
+        legalName: input.legalName,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.marketCompany.countryCode,
+          schema.marketCompany.organizationNumber,
+          schema.marketCompany.status,
+        ],
+        set: {
+          legalName: input.legalName,
+          updatedAt: now,
+        },
+      })
+      .returning();
+
+    if (!company) {
+      throw new Error("Market company was not upserted");
+    }
+
+    return mapMarketCompany(company);
+  }
+
+  async getMarketCompanySnapshot(snapshotId: string): Promise<MarketCompanySnapshot | null> {
+    const [snapshot] = await this.client
+      .select()
+      .from(schema.marketCompanySnapshot)
+      .where(eq(schema.marketCompanySnapshot.id, snapshotId))
+      .limit(1);
+
+    return snapshot ? mapMarketCompanySnapshot(snapshot) : null;
+  }
+
+  async getMarketCompanySnapshotByContentHash(input: {
+    companyId: string;
+    provider: string;
+    providerCapability: string;
+    contentHash: string;
+  }): Promise<MarketCompanySnapshot | null> {
+    const [snapshot] = await this.client
+      .select()
+      .from(schema.marketCompanySnapshot)
+      .where(
+        and(
+          eq(schema.marketCompanySnapshot.companyId, input.companyId),
+          eq(schema.marketCompanySnapshot.provider, input.provider),
+          eq(schema.marketCompanySnapshot.providerCapability, input.providerCapability),
+          eq(schema.marketCompanySnapshot.contentHash, input.contentHash),
+        ),
+      )
+      .limit(1);
+
+    return snapshot ? mapMarketCompanySnapshot(snapshot) : null;
+  }
+
+  async createMarketCompanySnapshot(input: {
+    snapshotId: string;
+    companyId: string;
+    provider: string;
+    providerCapability: string;
+    providerCompanyId: string | null;
+    retrievedAt: string;
+    normalizedFields: MarketCompanySnapshot["normalizedFields"];
+    rawPayload: Record<string, unknown>;
+    rawPayloadReference: string | null;
+    contentHash: string;
+  }): Promise<MarketCompanySnapshot> {
+    const [snapshot] = await this.client
+      .insert(schema.marketCompanySnapshot)
+      .values({
+        id: input.snapshotId,
+        companyId: input.companyId,
+        provider: input.provider,
+        providerCapability: input.providerCapability,
+        providerCompanyId: input.providerCompanyId,
+        retrievedAt: new Date(input.retrievedAt),
+        normalizedFields: input.normalizedFields,
+        rawPayload: input.rawPayload,
+        rawPayloadReference: input.rawPayloadReference,
+        contentHash: input.contentHash,
+      })
+      .returning();
+
+    if (!snapshot) {
+      throw new Error("Market company snapshot was not created");
+    }
+
+    return mapMarketCompanySnapshot(snapshot);
+  }
+
+  async getMarketProspectForTeam(
+    teamId: string,
+    prospectId: string,
+  ): Promise<MarketProspect | null> {
+    const [prospect] = await this.client
+      .select()
+      .from(schema.marketProspect)
+      .where(
+        and(eq(schema.marketProspect.teamId, teamId), eq(schema.marketProspect.id, prospectId)),
+      )
+      .limit(1);
+
+    return prospect ? mapMarketProspect(prospect) : null;
+  }
+
+  async getMarketProspectForOpportunity(
+    teamId: string,
+    opportunityId: string,
+  ): Promise<MarketProspect | null> {
+    const [prospect] = await this.client
+      .select()
+      .from(schema.marketProspect)
+      .where(
+        and(
+          eq(schema.marketProspect.teamId, teamId),
+          eq(schema.marketProspect.promotedOpportunityId, opportunityId),
+        ),
+      )
+      .limit(1);
+
+    return prospect ? mapMarketProspect(prospect) : null;
+  }
+
+  async listMarketProspectsForAccount(
+    teamId: string,
+    accountId: string,
+  ): Promise<MarketProspect[]> {
+    const prospects = await this.client
+      .select()
+      .from(schema.marketProspect)
+      .where(
+        and(
+          eq(schema.marketProspect.teamId, teamId),
+          eq(schema.marketProspect.promotedAccountId, accountId),
+        ),
+      )
+      .orderBy(desc(schema.marketProspect.updatedAt));
+
+    return prospects.map(mapMarketProspect);
+  }
+
+  async createMarketProspect(input: {
+    prospectId: string;
+    teamId: string;
+    companyId: string;
+    companySnapshotId: string;
+    sourceGoalId: string | null;
+    sourceRunId: string | null;
+    icpId: string | null;
+    segmentId: string | null;
+    sourceProvider: string;
+    sourceProviderCapability: string;
+    sourceDecisionSummary: string;
+    createdByActorId: string;
+  }): Promise<MarketProspect> {
+    const now = new Date();
+    const [prospect] = await this.client
+      .insert(schema.marketProspect)
+      .values({
+        id: input.prospectId,
+        teamId: input.teamId,
+        companyId: input.companyId,
+        companySnapshotId: input.companySnapshotId,
+        status: "created",
+        sourceGoalId: input.sourceGoalId,
+        sourceRunId: input.sourceRunId,
+        icpId: input.icpId,
+        segmentId: input.segmentId,
+        sourceProvider: input.sourceProvider,
+        sourceProviderCapability: input.sourceProviderCapability,
+        sourceDecisionSummary: input.sourceDecisionSummary,
+        createdByActorId: input.createdByActorId,
+        promotedAccountId: null,
+        promotedOpportunityId: null,
+        promotedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!prospect) {
+      throw new Error("Market prospect was not created");
+    }
+
+    return mapMarketProspect(prospect);
+  }
+
+  async promoteMarketProspect(input: {
+    teamId: string;
+    prospectId: string;
+    accountId: string;
+    opportunityId: string;
+    promotedAt: string;
+  }): Promise<MarketProspect | null> {
+    const promotedAt = new Date(input.promotedAt);
+    const [prospect] = await this.client
+      .update(schema.marketProspect)
+      .set({
+        status: "promoted",
+        promotedAccountId: input.accountId,
+        promotedOpportunityId: input.opportunityId,
+        promotedAt,
+        updatedAt: promotedAt,
+      })
+      .where(
+        and(
+          eq(schema.marketProspect.teamId, input.teamId),
+          eq(schema.marketProspect.id, input.prospectId),
+        ),
+      )
+      .returning();
+
+    return prospect ? mapMarketProspect(prospect) : null;
+  }
+
   async getCommercialDocumentForTeam(
     teamId: string,
     documentId: string,
@@ -5791,6 +6058,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     templateId?: string | null;
     recipientEmail?: string | null;
     scope?: string | null;
+    marketOrigin?: MarketOriginLineage | null;
     lines: CommercialDocumentLineDraft[];
     createdByActorId: string;
   }): Promise<CommercialDocumentWithLines> {
@@ -5812,6 +6080,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         templateId: input.templateId ?? null,
         recipientEmail: input.recipientEmail ?? null,
         scope: input.scope ?? null,
+        marketOrigin: input.marketOrigin ?? null,
         activeVersionId: null,
         recipientAccessTokenHash: null,
         recipientAccessTokenExpiresAt: null,
@@ -5856,6 +6125,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     templateId?: string | null;
     recipientEmail?: string | null;
     scope?: string | null;
+    marketOrigin?: MarketOriginLineage | null;
     lines: CommercialDocumentLineDraft[];
   }): Promise<CommercialDocumentWithLines> {
     const [document] = await this.client
@@ -5870,6 +6140,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         templateId: input.templateId ?? null,
         recipientEmail: input.recipientEmail ?? null,
         scope: input.scope ?? null,
+        marketOrigin: input.marketOrigin ?? null,
         updatedAt: new Date(),
       })
       .where(
@@ -5977,6 +6248,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     templateId?: string | null;
     recipientEmail?: string | null;
     scope?: string | null;
+    marketOrigin?: MarketOriginLineage | null;
     lines: CommercialDocumentLineDraft[];
   }): Promise<{
     document: CommercialDocumentWithLines;
@@ -6013,6 +6285,7 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         templateId: input.templateId ?? null,
         recipientEmail: input.recipientEmail ?? null,
         scope: input.scope ?? null,
+        marketOrigin: input.marketOrigin ?? null,
         activeVersionId: null,
         recipientAccessTokenHash: null,
         recipientAccessTokenExpiresAt: null,
@@ -6167,6 +6440,352 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     }
 
     return document;
+  }
+
+  async markCommercialDocumentSigning(input: {
+    teamId: string;
+    documentId: string;
+    signingAt: string;
+  }): Promise<CommercialDocumentWithLines | null> {
+    const [document] = await this.client
+      .update(schema.commercialDocument)
+      .set({
+        status: "signing",
+        updatedAt: new Date(input.signingAt),
+      })
+      .where(
+        and(
+          eq(schema.commercialDocument.teamId, input.teamId),
+          eq(schema.commercialDocument.id, input.documentId),
+          inArray(schema.commercialDocument.status, ["finalised", "sent", "viewed"]),
+        ),
+      )
+      .returning();
+
+    return document
+      ? ((await this.getCommercialDocumentForTeam(input.teamId, input.documentId)) ??
+          mapCommercialDocumentWithLines(document, []))
+      : null;
+  }
+
+  async markCommercialDocumentSigned(input: {
+    teamId: string;
+    documentId: string;
+    signedAt: string;
+  }): Promise<CommercialDocumentWithLines | null> {
+    const [document] = await this.client
+      .update(schema.commercialDocument)
+      .set({
+        status: "signed",
+        updatedAt: new Date(input.signedAt),
+      })
+      .where(
+        and(
+          eq(schema.commercialDocument.teamId, input.teamId),
+          eq(schema.commercialDocument.id, input.documentId),
+          inArray(schema.commercialDocument.status, ["signing", "sent", "viewed", "finalised"]),
+        ),
+      )
+      .returning();
+
+    return document
+      ? ((await this.getCommercialDocumentForTeam(input.teamId, input.documentId)) ??
+          mapCommercialDocumentWithLines(document, []))
+      : null;
+  }
+
+  async getSignatureRequestForTeam(
+    teamId: string,
+    signatureRequestId: string,
+  ): Promise<SignatureRequest | null> {
+    const [request] = await this.client
+      .select()
+      .from(schema.signatureRequest)
+      .where(
+        and(
+          eq(schema.signatureRequest.teamId, teamId),
+          eq(schema.signatureRequest.id, signatureRequestId),
+        ),
+      )
+      .limit(1);
+
+    return request ? mapSignatureRequest(request) : null;
+  }
+
+  async getSignatureRequestForDocumentVersion(input: {
+    teamId: string;
+    documentId: string;
+    documentVersionId: string;
+  }): Promise<SignatureRequest | null> {
+    const [request] = await this.client
+      .select()
+      .from(schema.signatureRequest)
+      .where(
+        and(
+          eq(schema.signatureRequest.teamId, input.teamId),
+          eq(schema.signatureRequest.documentId, input.documentId),
+          eq(schema.signatureRequest.documentVersionId, input.documentVersionId),
+        ),
+      )
+      .orderBy(desc(schema.signatureRequest.createdAt))
+      .limit(1);
+
+    return request ? mapSignatureRequest(request) : null;
+  }
+
+  async getSignatureRequestByProviderSession(input: {
+    provider: "tic";
+    providerSessionId: string;
+  }): Promise<SignatureRequest | null> {
+    const [request] = await this.client
+      .select()
+      .from(schema.signatureRequest)
+      .where(
+        and(
+          eq(schema.signatureRequest.provider, input.provider),
+          eq(schema.signatureRequest.providerSessionId, input.providerSessionId),
+        ),
+      )
+      .limit(1);
+
+    return request ? mapSignatureRequest(request) : null;
+  }
+
+  async listSignatureParties(
+    teamId: string,
+    signatureRequestId: string,
+  ): Promise<SignatureParty[]> {
+    const parties = await this.client
+      .select()
+      .from(schema.signatureParty)
+      .where(
+        and(
+          eq(schema.signatureParty.teamId, teamId),
+          eq(schema.signatureParty.signatureRequestId, signatureRequestId),
+        ),
+      )
+      .orderBy(asc(schema.signatureParty.signingOrder));
+
+    return parties.map(mapSignatureParty);
+  }
+
+  async listSignatureEvidence(
+    teamId: string,
+    signatureRequestId: string,
+  ): Promise<SignatureEvidence[]> {
+    const evidence = await this.client
+      .select()
+      .from(schema.signatureEvidence)
+      .where(
+        and(
+          eq(schema.signatureEvidence.teamId, teamId),
+          eq(schema.signatureEvidence.signatureRequestId, signatureRequestId),
+        ),
+      )
+      .orderBy(desc(schema.signatureEvidence.collectedAt));
+
+    return evidence.map(mapSignatureEvidence);
+  }
+
+  async getSignatureEvidenceByProviderEvent(input: {
+    provider: "tic";
+    providerEventId: string;
+  }): Promise<SignatureEvidence | null> {
+    const [evidence] = await this.client
+      .select()
+      .from(schema.signatureEvidence)
+      .where(
+        and(
+          eq(schema.signatureEvidence.provider, input.provider),
+          eq(schema.signatureEvidence.providerEventId, input.providerEventId),
+        ),
+      )
+      .limit(1);
+
+    return evidence ? mapSignatureEvidence(evidence) : null;
+  }
+
+  async createSignatureRequest(input: {
+    signatureRequestId: string;
+    teamId: string;
+    documentId: string;
+    documentVersionId: string;
+    provider: "tic";
+    providerSessionId: string;
+    signingUrl: string | null;
+    expiresAt: string | null;
+    signingText: string;
+    hiddenSignedData: SignatureHiddenSignedData;
+    hiddenSignedDataHash: string;
+    providerRawPayload: Record<string, unknown>;
+    createdByActorId: string;
+  }): Promise<SignatureRequest> {
+    const now = new Date();
+    const [request] = await this.client
+      .insert(schema.signatureRequest)
+      .values({
+        id: input.signatureRequestId,
+        teamId: input.teamId,
+        documentId: input.documentId,
+        documentVersionId: input.documentVersionId,
+        provider: input.provider,
+        providerSessionId: input.providerSessionId,
+        status: "requested",
+        signingUrl: input.signingUrl,
+        expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
+        signingText: input.signingText,
+        hiddenSignedData: input.hiddenSignedData,
+        hiddenSignedDataHash: input.hiddenSignedDataHash,
+        providerRawPayload: input.providerRawPayload,
+        createdByActorId: input.createdByActorId,
+        completedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!request) {
+      throw new Error("Signature request was not created");
+    }
+
+    return mapSignatureRequest(request);
+  }
+
+  async createSignatureParty(input: {
+    partyId: string;
+    teamId: string;
+    signatureRequestId: string;
+    role: SignatureParty["role"];
+    signingOrder: number;
+    name: string;
+    email: string;
+    providerPartyId: string | null;
+  }): Promise<SignatureParty> {
+    const now = new Date();
+    const [party] = await this.client
+      .insert(schema.signatureParty)
+      .values({
+        id: input.partyId,
+        teamId: input.teamId,
+        signatureRequestId: input.signatureRequestId,
+        role: input.role,
+        signingOrder: input.signingOrder,
+        name: input.name,
+        email: input.email,
+        providerPartyId: input.providerPartyId,
+        status: "pending",
+        signedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!party) {
+      throw new Error("Signature party was not created");
+    }
+
+    return mapSignatureParty(party);
+  }
+
+  async markSignatureRequestCompleted(input: {
+    teamId: string;
+    signatureRequestId: string;
+    completedAt: string;
+  }): Promise<SignatureRequest | null> {
+    const completedAt = new Date(input.completedAt);
+    const [request] = await this.client
+      .update(schema.signatureRequest)
+      .set({
+        status: "completed",
+        completedAt,
+        updatedAt: completedAt,
+      })
+      .where(
+        and(
+          eq(schema.signatureRequest.teamId, input.teamId),
+          eq(schema.signatureRequest.id, input.signatureRequestId),
+        ),
+      )
+      .returning();
+
+    return request ? mapSignatureRequest(request) : null;
+  }
+
+  async markSignaturePartySigned(input: {
+    teamId: string;
+    partyId: string;
+    signedAt: string;
+  }): Promise<SignatureParty | null> {
+    const signedAt = new Date(input.signedAt);
+    const [party] = await this.client
+      .update(schema.signatureParty)
+      .set({
+        status: "signed",
+        signedAt,
+        updatedAt: signedAt,
+      })
+      .where(
+        and(
+          eq(schema.signatureParty.teamId, input.teamId),
+          eq(schema.signatureParty.id, input.partyId),
+        ),
+      )
+      .returning();
+
+    return party ? mapSignatureParty(party) : null;
+  }
+
+  async createSignatureEvidence(input: {
+    evidenceId: string;
+    teamId: string;
+    signatureRequestId: string;
+    signaturePartyId: string | null;
+    provider: "tic";
+    providerEventId: string;
+    providerSessionId: string;
+    signedAt: string;
+    collectedAt: string;
+    signerName: string;
+    signerEmail: string | null;
+    signerPersonalNumberMasked: string | null;
+    documentPdfSha256: string;
+    verificationStatus: SignatureEvidence["verificationStatus"];
+    signatureValue: string | null;
+    xmlDsig: string | null;
+    ocspResponse: string | null;
+    evidenceObjectKey: string | null;
+    rawPayload: Record<string, unknown>;
+  }): Promise<SignatureEvidence> {
+    const [evidence] = await this.client
+      .insert(schema.signatureEvidence)
+      .values({
+        id: input.evidenceId,
+        teamId: input.teamId,
+        signatureRequestId: input.signatureRequestId,
+        signaturePartyId: input.signaturePartyId,
+        provider: input.provider,
+        providerEventId: input.providerEventId,
+        providerSessionId: input.providerSessionId,
+        signedAt: new Date(input.signedAt),
+        collectedAt: new Date(input.collectedAt),
+        signerName: input.signerName,
+        signerEmail: input.signerEmail,
+        signerPersonalNumberMasked: input.signerPersonalNumberMasked,
+        documentPdfSha256: input.documentPdfSha256,
+        verificationStatus: input.verificationStatus,
+        signatureValue: input.signatureValue,
+        xmlDsig: input.xmlDsig,
+        ocspResponse: input.ocspResponse,
+        evidenceObjectKey: input.evidenceObjectKey,
+        rawPayload: input.rawPayload,
+      })
+      .returning();
+
+    if (!evidence) {
+      throw new Error("Signature evidence was not created");
+    }
+
+    return mapSignatureEvidence(evidence);
   }
 
   private async insertCommercialDocumentLines(input: {
@@ -7350,6 +7969,127 @@ function mapOpportunity(opportunity: typeof schema.crmOpportunity.$inferSelect):
   };
 }
 
+function mapMarketCompany(company: typeof schema.marketCompany.$inferSelect): MarketCompany {
+  return {
+    id: company.id,
+    countryCode: company.countryCode,
+    organizationNumber: company.organizationNumber,
+    legalName: company.legalName,
+    status: company.status as MarketCompany["status"],
+    createdAt: company.createdAt.toISOString(),
+    updatedAt: company.updatedAt.toISOString(),
+  };
+}
+
+function mapMarketCompanySnapshot(
+  snapshot: typeof schema.marketCompanySnapshot.$inferSelect,
+): MarketCompanySnapshot {
+  return {
+    id: snapshot.id,
+    companyId: snapshot.companyId,
+    provider: snapshot.provider,
+    providerCapability: snapshot.providerCapability,
+    providerCompanyId: snapshot.providerCompanyId,
+    retrievedAt: snapshot.retrievedAt.toISOString(),
+    normalizedFields: snapshot.normalizedFields,
+    rawPayload: snapshot.rawPayload,
+    rawPayloadReference: snapshot.rawPayloadReference,
+    contentHash: snapshot.contentHash,
+    createdAt: snapshot.createdAt.toISOString(),
+  };
+}
+
+function mapMarketProspect(prospect: typeof schema.marketProspect.$inferSelect): MarketProspect {
+  return {
+    id: prospect.id,
+    teamId: prospect.teamId,
+    companyId: prospect.companyId,
+    companySnapshotId: prospect.companySnapshotId,
+    status: prospect.status as MarketProspect["status"],
+    sourceGoalId: prospect.sourceGoalId,
+    sourceRunId: prospect.sourceRunId,
+    icpId: prospect.icpId,
+    segmentId: prospect.segmentId,
+    sourceProvider: prospect.sourceProvider,
+    sourceProviderCapability: prospect.sourceProviderCapability,
+    sourceDecisionSummary: prospect.sourceDecisionSummary,
+    createdByActorId: prospect.createdByActorId,
+    promotedAccountId: prospect.promotedAccountId,
+    promotedOpportunityId: prospect.promotedOpportunityId,
+    promotedAt: prospect.promotedAt?.toISOString() ?? null,
+    createdAt: prospect.createdAt.toISOString(),
+    updatedAt: prospect.updatedAt.toISOString(),
+  };
+}
+
+function mapSignatureRequest(
+  request: typeof schema.signatureRequest.$inferSelect,
+): SignatureRequest {
+  return {
+    id: request.id,
+    teamId: request.teamId,
+    documentId: request.documentId,
+    documentVersionId: request.documentVersionId,
+    provider: request.provider as SignatureRequest["provider"],
+    providerSessionId: request.providerSessionId,
+    status: request.status as SignatureRequest["status"],
+    signingUrl: request.signingUrl,
+    expiresAt: request.expiresAt?.toISOString() ?? null,
+    signingText: request.signingText,
+    hiddenSignedData: request.hiddenSignedData as SignatureHiddenSignedData,
+    hiddenSignedDataHash: request.hiddenSignedDataHash,
+    providerRawPayload: request.providerRawPayload,
+    createdByActorId: request.createdByActorId,
+    completedAt: request.completedAt?.toISOString() ?? null,
+    createdAt: request.createdAt.toISOString(),
+    updatedAt: request.updatedAt.toISOString(),
+  };
+}
+
+function mapSignatureParty(party: typeof schema.signatureParty.$inferSelect): SignatureParty {
+  return {
+    id: party.id,
+    teamId: party.teamId,
+    signatureRequestId: party.signatureRequestId,
+    role: party.role as SignatureParty["role"],
+    signingOrder: party.signingOrder,
+    name: party.name,
+    email: party.email,
+    providerPartyId: party.providerPartyId,
+    status: party.status as SignatureParty["status"],
+    signedAt: party.signedAt?.toISOString() ?? null,
+    createdAt: party.createdAt.toISOString(),
+    updatedAt: party.updatedAt.toISOString(),
+  };
+}
+
+function mapSignatureEvidence(
+  evidence: typeof schema.signatureEvidence.$inferSelect,
+): SignatureEvidence {
+  return {
+    id: evidence.id,
+    teamId: evidence.teamId,
+    signatureRequestId: evidence.signatureRequestId,
+    signaturePartyId: evidence.signaturePartyId,
+    provider: evidence.provider as SignatureEvidence["provider"],
+    providerEventId: evidence.providerEventId,
+    providerSessionId: evidence.providerSessionId,
+    signedAt: evidence.signedAt.toISOString(),
+    collectedAt: evidence.collectedAt.toISOString(),
+    signerName: evidence.signerName,
+    signerEmail: evidence.signerEmail,
+    signerPersonalNumberMasked: evidence.signerPersonalNumberMasked,
+    documentPdfSha256: evidence.documentPdfSha256,
+    verificationStatus: evidence.verificationStatus as SignatureEvidence["verificationStatus"],
+    signatureValue: evidence.signatureValue,
+    xmlDsig: evidence.xmlDsig,
+    ocspResponse: evidence.ocspResponse,
+    evidenceObjectKey: evidence.evidenceObjectKey,
+    rawPayload: evidence.rawPayload,
+    createdAt: evidence.createdAt.toISOString(),
+  };
+}
+
 function mapCommercialDocumentWithLines(
   document: typeof schema.commercialDocument.$inferSelect,
   lines: (typeof schema.commercialDocumentLine.$inferSelect)[],
@@ -7389,6 +8129,7 @@ function mapCommercialDocumentWithLines(
     templateId: document.templateId,
     recipientEmail: document.recipientEmail,
     scope: document.scope,
+    marketOrigin: document.marketOrigin as MarketOriginLineage | null,
     activeVersionId: document.activeVersionId,
     recipientAccessTokenHash: document.recipientAccessTokenHash,
     recipientAccessTokenExpiresAt: document.recipientAccessTokenExpiresAt?.toISOString() ?? null,

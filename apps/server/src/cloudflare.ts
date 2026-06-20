@@ -27,6 +27,7 @@ export function createServerEnvFromCloudflareBindings(bindings: DawnCloudflareBi
     POLAR_SUCCESS_URL: bindings.POLAR_SUCCESS_URL,
     FORTNOX_CLIENT_ID: bindings.FORTNOX_CLIENT_ID,
     FORTNOX_CLIENT_SECRET: bindings.FORTNOX_CLIENT_SECRET,
+    TIC_WEBHOOK_SECRET: bindings.TIC_WEBHOOK_SECRET,
     GMAIL_CLIENT_ID: bindings.GMAIL_CLIENT_ID,
     GMAIL_CLIENT_SECRET: bindings.GMAIL_CLIENT_SECRET,
     CORS_ORIGIN: bindings.CORS_ORIGIN,

@@ -86,6 +86,10 @@ class MemoryCommercialDocumentRepository
       .map((document) => this.withLines(document));
   }
 
+  async getMarketProspectForOpportunity(_teamId: string, _opportunityId: string) {
+    return null;
+  }
+
   async getLatestCommercialDocumentVersionForTeam(teamId: string, documentId: string) {
     return (
       [...this.commercialDocumentVersions.values()]
@@ -113,6 +117,7 @@ class MemoryCommercialDocumentRepository
     templateId?: string | null;
     recipientEmail?: string | null;
     scope?: string | null;
+    marketOrigin?: CommercialDocument["marketOrigin"];
     lines: CommercialDocumentLineDraft[];
     createdByActorId: string;
   }) {
@@ -132,6 +137,7 @@ class MemoryCommercialDocumentRepository
       templateId: input.templateId ?? null,
       recipientEmail: input.recipientEmail ?? null,
       scope: input.scope ?? null,
+      marketOrigin: input.marketOrigin ?? null,
       activeVersionId: null,
       recipientAccessTokenHash: null,
       recipientAccessTokenExpiresAt: null,
@@ -162,6 +168,7 @@ class MemoryCommercialDocumentRepository
     templateId?: string | null;
     recipientEmail?: string | null;
     scope?: string | null;
+    marketOrigin?: CommercialDocument["marketOrigin"];
     lines: CommercialDocumentLineDraft[];
   }) {
     const current = this.commercialDocuments.get(input.documentId);
@@ -181,6 +188,7 @@ class MemoryCommercialDocumentRepository
       templateId: input.templateId ?? null,
       recipientEmail: input.recipientEmail ?? null,
       scope: input.scope ?? null,
+      marketOrigin: input.marketOrigin ?? current.marketOrigin,
       updatedAt: new Date().toISOString(),
     };
     this.commercialDocuments.set(updated.id, updated);
@@ -251,6 +259,7 @@ class MemoryCommercialDocumentRepository
     templateId?: string | null;
     recipientEmail?: string | null;
     scope?: string | null;
+    marketOrigin?: CommercialDocument["marketOrigin"];
     lines: CommercialDocumentLineDraft[];
   }) {
     const current = this.commercialDocuments.get(input.documentId);
@@ -277,6 +286,7 @@ class MemoryCommercialDocumentRepository
       templateId: input.templateId ?? null,
       recipientEmail: input.recipientEmail ?? null,
       scope: input.scope ?? null,
+      marketOrigin: input.marketOrigin ?? current!.marketOrigin,
       activeVersionId: null,
       recipientAccessTokenHash: null,
       recipientAccessTokenExpiresAt: null,
@@ -776,8 +786,7 @@ describe("commercial document use cases", () => {
     );
     const storedVersion = repository.commercialDocumentVersions.get(viewed.version.id);
     const declinedAuditEvents = repository.auditEvents.filter(
-      (event) =>
-        (event as { action?: string }).action === "commercial_document.declined",
+      (event) => (event as { action?: string }).action === "commercial_document.declined",
     );
 
     expect(sent.document.status).toBe("sent");

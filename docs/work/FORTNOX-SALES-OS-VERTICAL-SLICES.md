@@ -37,7 +37,7 @@ Goal or ICP seed
               -> outcome attribution and learning
 ```
 
-Current implementation checkpoint: quote-to-cash slices 0 through 3 are the implemented foundation. Treat slice 3.5 as the next executable backlog item, then continue with TIC signing, signer trust, invoice handoff and pilot surface.
+Current implementation checkpoint: quote-to-cash slices 0 through 3 are the implemented foundation. Treat slice 3.5 as the next executable backlog item, then continue with TIC signing, the recipient signing surface, signer trust, invoice handoff and pilot surface.
 
 ## Accounting Provider Posture
 
@@ -63,6 +63,33 @@ Spiris OAuth connect
 ```
 
 This means internal names should prefer `AccountingConnection`, `AccountingExternalMapping`, `AccountingCustomerProjection`, and `AccountingInvoiceProjection` over new Fortnox-only generic names. Fortnox adapter files and public product copy may still say Fortnox.
+
+## Signing Surface Posture
+
+BankID signing should have its own focused public recipient surface, but not a separate product or backend service.
+
+Target shape:
+
+```text
+apps/web      = Dawn CRM, prospecting and quote-to-cash
+apps/sign     = public recipient signing surface
+packages/sign = signing domain/app glue and evidence UI helpers where useful
+```
+
+The recipient app should have no CRM shell, no sidebar and no Dawn user authentication. It should be mobile-first, high-trust, fast-loading and token-based.
+
+Backend and business logic stay shared:
+
+```text
+apps/sign
+  -> packages/api recipient/signing routes
+    -> packages/app signing and commercial-document use cases
+      -> packages/domain rules
+      -> packages/db
+      -> TIC adapter
+```
+
+Do not create a separate signing service, database, auth system or evidence store. The signing surface is an entry point into Dawn's quote-to-cash and market-to-revenue loop, not a standalone Scrive/GetAccept/Oneflow competitor.
 
 ## Source Of Truth
 
@@ -188,6 +215,7 @@ These are not product blockers for the first pilot:
 - assistant/copilot product
 - public API/OAuth/developer platform
 - generic automation builder
+- standalone e-sign product with arbitrary PDF upload, signing-order management, independent templates, API and admin console
 - Gmail inbox/OCR parity as a primary product wedge
 - advanced reporting
 - full Spiris/Visma support or multi-accounting-provider parity
@@ -212,12 +240,13 @@ CRM metadata Slice 4 from the older CRM plan may be finished only as internal fo
 - Do not make autonomous sending the default before sender policy, suppression, evaluation and stop-condition gates exist.
 - Do not make chat the primary product surface. Natural language is a command surface over structured goals, runs, companies, accounts, deals and outcomes.
 - Do not build signing as a quote-only lane that cannot carry market-origin, company snapshot, prospect or ICP lineage.
+- Do not turn `apps/sign` into a separate backend service, separate database or standalone e-sign product before Dawn's CRM-to-revenue loop proves demand.
 
 ## Ordered Slices
 
 The order intentionally has two horizons plus one parked provider proof:
 
-1. Quote-to-cash spine with market-origin bridge: slices 0 through 7 plus slice 3.5.
+1. Quote-to-cash spine with market-origin bridge: slices 0 through 7 plus slices 3.5 and 4.5.
 2. AI-native market-to-revenue expansion: slices 8 through 19.
 
 The Spiris/Visma provider-2 spike stays parked as slice 20 until Fortnox invoice handoff has real product signal.
@@ -591,11 +620,36 @@ Remaining work before this slice is complete:
 
 ### 3.5. Market-Origin And TIC Company Snapshot Bridge
 
-Status: next
+Status: completed
 
 #### Goal
 
 A Swedish company can enter Dawn from registry or provider context, become a prospect/account/deal, and carry market-origin lineage into an existing commercial document before signing starts.
+
+#### Progress Landed
+
+- Added a market-origin domain model for canonical Swedish company identity, provider snapshots, team-scoped prospects, and promotion lineage.
+- Added company seed normalization with Swedish organisation-number matching and explicit canonical identity invariants.
+- Added market company, market company snapshot, and market prospect persistence with content-hash snapshot reuse and provider lineage stored outside canonical IDs.
+- Added app use cases for seeding a market company, creating a team-scoped prospect, and promoting that prospect through the existing CRM organization/account/opportunity use cases.
+- Added protected API routes for market company seed, prospect creation, and prospect promotion.
+- Commercial document drafts created from promoted deals now snapshot market-origin/prospect lineage into the document/version payload.
+- Account timelines now project market company seed, prospect creation, prospect promotion, CRM deal, and commercial document events into one history.
+- Market-origin use cases use the existing team permission, idempotency, audit, and outbox contracts.
+
+Verified market-origin bridge locally on 2026-06-20:
+
+```text
+bun test packages/domain/src/market.test.ts packages/domain/src/commercial-documents.test.ts
+bun test packages/app/src/market.test.ts packages/app/src/commercial-documents.test.ts packages/app/src/crm.test.ts
+bun test packages/api/src/router.test.ts
+bun run check-types
+bun run check:migrations
+bunx oxfmt --check packages/domain/src/market.ts packages/domain/src/market.test.ts packages/domain/src/commercial-documents.ts packages/domain/src/commercial-documents.test.ts packages/app/src/market.ts packages/app/src/market.test.ts packages/app/src/crm.ts packages/app/src/crm.test.ts packages/app/src/commercial-documents.ts packages/app/src/commercial-documents.test.ts packages/api/src/routers/index.ts packages/api/src/router.test.ts packages/db/src/schema/crm.ts packages/db/src/dawn-repository.ts
+bunx oxlint packages/domain/src/market.ts packages/domain/src/market.test.ts packages/domain/src/commercial-documents.ts packages/domain/src/commercial-documents.test.ts packages/app/src/market.ts packages/app/src/market.test.ts packages/app/src/crm.ts packages/app/src/crm.test.ts packages/app/src/commercial-documents.ts packages/app/src/commercial-documents.test.ts packages/api/src/routers/index.ts packages/api/src/router.test.ts packages/db/src/schema/crm.ts packages/db/src/dawn-repository.ts
+```
+
+Result: 91 focused market/commercial-document/CRM/API tests pass, monorepo typecheck/build is clean, the migration journal validates, and touched TypeScript files pass format/lint checks.
 
 #### Scope
 
@@ -625,22 +679,22 @@ A Swedish company can enter Dawn from registry or provider context, become a pro
 
 #### Acceptance Criteria
 
-- [ ] A user or test fixture can seed a Swedish company from registry/provider context.
-- [ ] One Swedish organisation number maps to one active canonical company identity per current legal-continuity rule.
-- [ ] The seed creates a versioned company snapshot with raw provider lineage and idempotent content hash behavior.
-- [ ] A prospect can record `sourceGoalId`, `sourceRunId`, `icpId`, `segmentId`, source provider and source decision summary.
-- [ ] Prospect promotion retains lineage after creating or linking an account and deal.
-- [ ] A commercial document created from the deal retains market-origin/prospect lineage.
-- [ ] Timeline shows market origin, prospect creation, promotion, deal and document events in one readable history.
-- [ ] Team isolation prevents private prospect/account/deal state leaking through the global company identity.
-- [ ] Provider external IDs are never used as Dawn canonical IDs.
+- [x] A user or test fixture can seed a Swedish company from registry/provider context.
+- [x] One Swedish organisation number maps to one active canonical company identity per current legal-continuity rule.
+- [x] The seed creates a versioned company snapshot with raw provider lineage and idempotent content hash behavior.
+- [x] A prospect can record `sourceGoalId`, `sourceRunId`, `icpId`, `segmentId`, source provider and source decision summary.
+- [x] Prospect promotion retains lineage after creating or linking an account and deal.
+- [x] A commercial document created from the deal retains market-origin/prospect lineage.
+- [x] Timeline shows market origin, prospect creation, promotion, deal and document events in one readable history.
+- [x] Team isolation prevents private prospect/account/deal state leaking through the global company identity.
+- [x] Provider external IDs are never used as Dawn canonical IDs.
 
 #### Verification
 
-- Domain tests for Swedish organisation-number normalization and canonical company identity invariants.
-- App tests for snapshot idempotency, content hash reuse and team isolation.
-- App/API tests for prospect creation, promotion, account/deal/document lineage and timeline projection.
-- Audit/outbox tests proving market-origin and promotion actions use the existing app workflow contracts.
+- [x] Domain tests for Swedish organisation-number normalization and canonical company identity invariants.
+- [x] App tests for snapshot idempotency, content hash reuse and team isolation.
+- [x] App/API tests for prospect creation, promotion, account/deal/document lineage and timeline projection.
+- [x] Audit/outbox tests proving market-origin and promotion actions use the existing app workflow contracts.
 
 #### Dependencies
 
@@ -648,11 +702,38 @@ A Swedish company can enter Dawn from registry or provider context, become a pro
 
 ### 4. TIC BankID Signing Evidence Package
 
-Status: ready
+Status: completed
 
 #### Goal
 
 A recipient can sign the exact finalised quote/contract version with BankID through TIC, and Dawn stores verifiable evidence.
+
+#### Progress Landed
+
+- Added a signature domain model for TIC-backed signature requests, signer parties, hidden signed data, visible BankID text, and retained evidence.
+- Added deterministic canonical JSON for hidden signed data covering document ID, version ID, version number, PDF SHA-256, terms version, deal ID, signer, Fortnox customer mapping, and market/prospect lineage.
+- Added a TIC signing provider adapter contract and deterministic mock TIC provider for local/test flows.
+- Added app use cases for seller-started TIC signing, raw-body webhook completion, team-protected evidence reads, and recipient signed-receipt access.
+- Added signature request, party, and evidence persistence tables with provider session/event indexes for callback dedupe.
+- Added HMAC/timestamp verification for TIC webhooks, with raw-body verification available from both the API procedure and `/api/webhooks/tic/signing`.
+- Signing completion verifies the provider-reported document hash against immutable final PDF bytes before storing verified evidence.
+- Completion stores XML-DSig, OCSP response, evidence object key, masked signer identity, raw provider payload, and verification status.
+- Completion marks the commercial document `signed`, moves the deal to `won_pending_invoice`, and writes signature timeline, audit, outbox, and idempotency state.
+- Recipient token access can fetch the signed receipt and retained evidence after completion. The polished public signing surface remains Slice 4.5.
+
+Verified TIC signing evidence locally on 2026-06-20:
+
+```text
+bun test packages/domain/src/signatures.test.ts packages/domain/src/commercial-documents.test.ts packages/domain/src/market.test.ts
+bun test packages/app/src/signatures.test.ts packages/app/src/webhook-signature.test.ts packages/app/src/commercial-documents.test.ts packages/app/src/crm.test.ts packages/app/src/market.test.ts
+bun test packages/api/src/router.test.ts
+bun run check-types
+bun run check:migrations
+bunx oxfmt --check apps/server/src/cloudflare.ts apps/server/src/dev.ts apps/server/src/index.ts packages/api/src/router.test.ts packages/api/src/routers/index.ts packages/app/src/commercial-documents.test.ts packages/app/src/commercial-documents.ts packages/app/src/crm.test.ts packages/app/src/crm.ts packages/app/src/index.ts packages/app/src/market.test.ts packages/app/src/market.ts packages/app/src/signatures.test.ts packages/app/src/signatures.ts packages/db/src/dawn-repository.ts packages/db/src/schema/crm.ts packages/domain/src/commercial-documents.test.ts packages/domain/src/commercial-documents.ts packages/domain/src/index.ts packages/domain/src/market.test.ts packages/domain/src/market.ts packages/domain/src/signatures.test.ts packages/domain/src/signatures.ts packages/env/src/server.ts packages/infra/src/cloudflare.ts packages/integrations/src/index.ts
+bunx oxlint apps/server/src/cloudflare.ts apps/server/src/dev.ts apps/server/src/index.ts packages/api/src/router.test.ts packages/api/src/routers/index.ts packages/app/src/commercial-documents.test.ts packages/app/src/commercial-documents.ts packages/app/src/crm.test.ts packages/app/src/crm.ts packages/app/src/index.ts packages/app/src/market.test.ts packages/app/src/market.ts packages/app/src/signatures.test.ts packages/app/src/signatures.ts packages/db/src/dawn-repository.ts packages/db/src/schema/crm.ts packages/domain/src/commercial-documents.test.ts packages/domain/src/commercial-documents.ts packages/domain/src/index.ts packages/domain/src/market.test.ts packages/domain/src/market.ts packages/domain/src/signatures.test.ts packages/domain/src/signatures.ts packages/env/src/server.ts packages/infra/src/cloudflare.ts packages/integrations/src/index.ts
+```
+
+Result: focused domain/app/API signing and quote-to-cash tests pass, monorepo typecheck/build is clean, the migration journal validates, and touched TypeScript files pass format/lint checks.
 
 #### Scope
 
@@ -679,27 +760,85 @@ A recipient can sign the exact finalised quote/contract version with BankID thro
 
 #### Acceptance Criteria
 
-- [ ] Seller can create a TIC signature request for a finalised quote/contract.
-- [ ] Request cannot start for draft, expired, declined, voided, or superseded versions.
-- [ ] Visible signing text names document type/number, seller, customer, total/currency, validity/start date, terms version, and signing intent.
-- [ ] Hidden signed data uses deterministic canonical JSON and includes document/version/hash context plus available company/prospect lineage.
-- [ ] TIC webhook with invalid HMAC or timestamp is rejected.
-- [ ] Duplicate completion webhook produces one business completion.
-- [ ] Signature evidence and OCSP response are retained and permission-protected.
-- [ ] Stored hash matches final PDF bytes.
-- [ ] Signing completion writes timeline, audit, outbox, and idempotency state.
-- [ ] Recipient can later access the signed document/evidence receipt according to policy.
+- [x] Seller can create a TIC signature request for a finalised quote/contract.
+- [x] Request cannot start for draft, expired, declined, voided, or superseded versions.
+- [x] Visible signing text names document type/number, seller, customer, total/currency, validity/start date, terms version, and signing intent.
+- [x] Hidden signed data uses deterministic canonical JSON and includes document/version/hash context plus available company/prospect lineage.
+- [x] TIC webhook with invalid HMAC or timestamp is rejected.
+- [x] Duplicate completion webhook produces one business completion.
+- [x] Signature evidence and OCSP response are retained and permission-protected.
+- [x] Stored hash matches final PDF bytes.
+- [x] Signing completion writes timeline, audit, outbox, and idempotency state.
+- [x] Recipient can later access the signed document/evidence receipt according to policy.
 
 #### Verification
 
-- Domain/app tests for signing state transitions and invalid states.
-- Canonical JSON tests for hidden signed data.
-- Adapter contract tests with mock TIC responses/webhooks.
-- App/API tests for webhook replay, invalid HMAC, wrong document/session, evidence storage, and permission redaction.
+- [x] Domain/app tests for signing state transitions and invalid states.
+- [x] Canonical JSON tests for hidden signed data.
+- [x] Adapter contract tests with mock TIC responses/webhooks.
+- [x] App/API tests for webhook replay, invalid HMAC, wrong document/session, evidence storage, and permission redaction.
 
 #### Dependencies
 
 - Slices 3 and 3.5.
+
+### 4.5. Recipient Signing Surface
+
+Status: ready alongside slice 4
+
+#### Goal
+
+A recipient can open a clean public signing link, review the exact finalised commercial document, start TIC BankID signing and see completion or failure state without entering the authenticated Dawn CRM app.
+
+#### Scope
+
+- Add `apps/sign` as a separate public recipient web app or equivalent deployable surface.
+- Keep `apps/sign` free of CRM shell, sidebar, Dawn app navigation and authenticated workspace UI.
+- Use token-based recipient access from the commercial document/signature request flow.
+- Show sender, customer, document type/number, total, currency, validity, terms and signing intent.
+- Render or embed the exact immutable PDF bytes for the active finalised document version.
+- Start TIC BankID signing through existing recipient/signing API routes.
+- Show pending, failed, expired, declined and signed states.
+- Show a signed receipt and allow signed document/evidence download when policy allows.
+- Make the experience mobile-first, fast-loading and high-trust.
+- Add hard public-surface constraints: tight CSP, rate limits, no secret leakage, no workspace-auth assumptions.
+- Do not add standalone PDF upload, generic signing order, independent document templates, public API, admin console or separate signing backend.
+
+#### Areas To Inspect
+
+- `apps/web/src/routes`
+- `apps/web/src/components`
+- `packages/api/src/routers/index.ts`
+- `packages/app/src/commercial-documents.ts`
+- `packages/app/src/integrations.ts`
+- `packages/domain/src/commercial-documents.ts`
+- `packages/sign` if reusable signing/evidence helpers are introduced
+- `packages/ui/src/components`
+- `packages/env/src/web.ts`
+- `packages/infra/src/cloudflare.ts`
+
+#### Acceptance Criteria
+
+- [ ] Recipient signing link opens outside the authenticated Dawn CRM shell.
+- [ ] Recipient can view document overview and exact immutable PDF for the active finalised version.
+- [ ] Recipient can start TIC BankID signing from the public surface.
+- [ ] Pending, failed, expired, declined and signed states are human-readable.
+- [ ] Signed completion shows a receipt and available evidence/download actions according to policy.
+- [ ] Public surface uses recipient token access only and never requires Dawn user auth.
+- [ ] Public surface does not expose CRM navigation, workspace data or unrelated APIs.
+- [ ] Business mutations still go through shared app/domain use cases with audit, outbox and idempotency.
+- [ ] Surface is mobile-usable for the external buyer/signer.
+
+#### Verification
+
+- API tests for recipient signing read/start/status flows.
+- App tests proving token access is scoped to one document/version/signature request.
+- Web route/component tests or browser smoke for view, start, pending, failed and signed states.
+- Security tests or checklist for public route auth boundaries, CSP-sensitive asset loading and rate-limit expectations.
+
+#### Dependencies
+
+- Slices 3, 3.5 and 4.
 
 ### 5. TIC Company Context And Signer Trust
 
@@ -755,7 +894,7 @@ Company context and signer-role evidence help the team decide whether the signer
 
 #### Dependencies
 
-- Slices 3.5 and 4.
+- Slices 3.5, 4 and 4.5.
 
 ### 6. Fortnox Invoice Handoff
 
@@ -814,7 +953,7 @@ A signed and policy-cleared document creates exactly one linked Fortnox invoice,
 
 #### Dependencies
 
-- Slices 1, 4, and 5.
+- Slices 1, 4, 4.5, and 5.
 
 ### 7. Pilot Product Surface And Operations
 
@@ -872,7 +1011,7 @@ External teams can use the quote-to-cash flow with supportable reliability.
 
 #### Dependencies
 
-- Slices 1 through 6, including slice 3.5.
+- Slices 1 through 6, including slices 3.5 and 4.5.
 
 ## Phase 2: AI-Native Market-To-Revenue Expansion
 
@@ -1457,6 +1596,7 @@ Prove Dawn can support a second Swedish accounting provider through the existing
 - Slice 3 proves quote/document value before signing.
 - Slice 3.5 proves that a Swedish company can enter from market/registry context and carry lineage into account, deal and document state.
 - Slice 4 proves TIC signing and evidence.
+- Slice 4.5 makes signing feel like a focused public recipient product surface without splitting backend ownership.
 - Slice 5 deepens the Swedish trust wedge and gates invoice handoff where policy requires it.
 - Slice 6 proves quote-to-cash through Fortnox invoice creation.
 - Slice 7 makes the flow pilot-ready and supportable.
@@ -1471,7 +1611,7 @@ Prove Dawn can support a second Swedish accounting provider through the existing
 
 Build **Slice 3.5: Market-Origin And TIC Company Snapshot Bridge** next. Slices 0 through 3 are the implemented foundation, and slice 3.5 is the narrow product-critical bridge that lets a Swedish company enter from registry/market context, become a prospect/account/deal, and carry lineage into commercial documents before signing.
 
-Then continue with **Slice 4: TIC BankID Signing Evidence Package**, **Slice 5: TIC Company Context And Signer Trust**, and **Slice 6: Fortnox Invoice Handoff**.
+Then continue with **Slice 4: TIC BankID Signing Evidence Package** and **Slice 4.5: Recipient Signing Surface** together. After the recipient can sign through the focused public surface, continue with **Slice 5: TIC Company Context And Signer Trust** and **Slice 6: Fortnox Invoice Handoff**.
 
 Close the remaining real-provider verification for **Slice 1: Fortnox Foundation** opportunistically when credentials are available, and resolve any final Slice 3 recipient idempotency decision if it is still open. Do not let either become a reason to skip the market-origin bridge or start broad prospecting, agents, outreach, watchlists or a company mirror.
 
