@@ -122,9 +122,11 @@ import {
 } from "@dawn/integrations";
 import {
   createAccount as createCrmAccount,
+  createLegalEntity as createCrmLegalEntity,
   createOrganization as createCrmOrganization,
   createOpportunity as createCrmOpportunity,
   getAccountSummary as getCrmAccountSummary,
+  listAccounts as listCrmAccounts,
 } from "@dawn/app";
 import { z } from "zod";
 
@@ -690,6 +692,22 @@ const crmCreateOrganizationInput = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+const crmCreateLegalEntityInput = z.object({
+  teamId: z.string().min(1),
+  legalName: z.string().min(1),
+  organizationNumber: z.string().nullable().optional(),
+  vatNumber: z.string().nullable().optional(),
+  countryCode: z.string().nullable().optional(),
+  baseCurrency: z
+    .string()
+    .regex(/^[A-Z]{3}$/)
+    .nullable()
+    .optional(),
+  fiscalYearStartMonth: z.number().int().min(1).max(12).nullable().optional(),
+  status: z.enum(["active", "inactive"]).optional(),
+  idempotencyKey: z.string().min(1),
+});
+
 const crmCreateAccountInput = z.object({
   teamId: z.string().min(1),
   organizationId: z.string().min(1),
@@ -697,7 +715,16 @@ const crmCreateAccountInput = z.object({
     .enum(["prospect", "customer", "partner", "supplier", "former_customer"])
     .optional(),
   legalEntityId: z.string().nullable().optional(),
+  relationshipStatus: z.enum(["active", "churned", "inactive"]).optional(),
+  lifecycleStage: z
+    .enum(["new", "qualified", "active", "growth", "at_risk", "churned", "inactive"])
+    .nullable()
+    .optional(),
+  segment: z.string().nullable().optional(),
+  territory: z.string().nullable().optional(),
   primaryOwnerPrincipalId: z.string().nullable().optional(),
+  customerSince: z.iso.datetime().nullable().optional(),
+  churnedAt: z.iso.datetime().nullable().optional(),
   idempotencyKey: z.string().min(1),
 });
 
@@ -715,6 +742,16 @@ const crmCreateOpportunityInput = z.object({
 const crmAccountSummaryInput = z.object({
   teamId: z.string().min(1),
   accountId: z.string().min(1),
+});
+
+const crmListAccountsInput = z.object({
+  teamId: z.string().min(1),
+  legalEntityId: z.string().nullable().optional(),
+  relationshipStatus: z.enum(["active", "churned", "inactive"]).nullable().optional(),
+  accountType: z
+    .enum(["prospect", "customer", "partner", "supplier", "former_customer"])
+    .nullable()
+    .optional(),
 });
 
 const createLedgerTransactionInput = z.object({
@@ -2014,6 +2051,29 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
             mapAppError(error);
           }
         }),
+      createLegalEntity: protectedProcedure
+        .input(crmCreateLegalEntityInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createCrmLegalEntity(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                organizationNumber: input.organizationNumber ?? null,
+                vatNumber: input.vatNumber ?? null,
+                countryCode: input.countryCode ?? null,
+                baseCurrency: input.baseCurrency ?? null,
+                fiscalYearStartMonth: input.fiscalYearStartMonth ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
       createAccount: protectedProcedure
         .input(crmCreateAccountInput)
         .handler(async ({ context, input }) => {
@@ -2028,7 +2088,13 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
                 ...input,
                 accountType: input.accountType,
                 legalEntityId: input.legalEntityId ?? null,
+                relationshipStatus: input.relationshipStatus,
+                lifecycleStage: input.lifecycleStage ?? null,
+                segment: input.segment ?? null,
+                territory: input.territory ?? null,
                 primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
+                customerSince: input.customerSince ?? null,
+                churnedAt: input.churnedAt ?? null,
               },
             );
           } catch (error) {
@@ -2063,6 +2129,24 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
               dawnRepository,
               appRequestFromSession(context, { teamId: input.teamId }),
               input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      listAccounts: protectedProcedure
+        .input(crmListAccountsInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await listCrmAccounts(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              {
+                ...input,
+                legalEntityId: input.legalEntityId ?? null,
+                relationshipStatus: input.relationshipStatus ?? null,
+                accountType: input.accountType ?? null,
+              },
             );
           } catch (error) {
             mapAppError(error);

@@ -6,6 +6,7 @@ import type {
   CrmFieldSecurityPolicy,
   CrmRecord,
   CrmRecordGrant,
+  LegalEntity,
   Organization,
   Opportunity,
   Party,
@@ -14,9 +15,11 @@ import type {
 
 import {
   createAccount,
+  createLegalEntity,
   createOpportunity,
   createOrganization,
   getAccountSummary,
+  listAccounts,
   type CrmRepository,
   type CrmUseCaseRepository,
 } from "./crm";
@@ -29,6 +32,7 @@ class MemoryCrmRepository {
   records = new Map<string, CrmRecord>();
   parties = new Map<string, Party>();
   organizations = new Map<string, Organization>();
+  legalEntities = new Map<string, LegalEntity>();
   accounts = new Map<string, Account>();
   opportunities = new Map<string, Opportunity>();
   grants: CrmRecordGrant[] = [];
@@ -76,6 +80,11 @@ class MemoryCrmRepository {
     return organization?.teamId === teamId ? organization : null;
   }
 
+  async getLegalEntityForTeam(teamId: string, recordId: string) {
+    const legalEntity = this.legalEntities.get(recordId);
+    return legalEntity?.teamId === teamId ? legalEntity : null;
+  }
+
   async getCrmRecordForTeam(teamId: string, recordId: string) {
     const record = this.records.get(recordId);
     return record?.teamId === teamId ? record : null;
@@ -112,6 +121,21 @@ class MemoryCrmRepository {
   async getAccountForTeam(teamId: string, recordId: string) {
     const account = this.accounts.get(recordId);
     return account?.teamId === teamId ? account : null;
+  }
+
+  async listAccountsForTeam(input: {
+    teamId: string;
+    legalEntityId?: string | null;
+    relationshipStatus?: Account["relationshipStatus"] | null;
+    accountType?: Account["accountType"] | null;
+  }) {
+    return [...this.accounts.values()].filter(
+      (account) =>
+        account.teamId === input.teamId &&
+        (!input.legalEntityId || account.legalEntityId === input.legalEntityId) &&
+        (!input.relationshipStatus || account.relationshipStatus === input.relationshipStatus) &&
+        (!input.accountType || account.accountType === input.accountType),
+    );
   }
 
   async getOpportunityForTeam(teamId: string, recordId: string) {
@@ -189,24 +213,61 @@ class MemoryCrmRepository {
     return organization;
   }
 
+  async createLegalEntity(input: {
+    recordId: string;
+    teamId: string;
+    legalName: string;
+    organizationNumber?: string | null;
+    vatNumber?: string | null;
+    countryCode: string;
+    baseCurrency: string;
+    fiscalYearStartMonth: number;
+    status: LegalEntity["status"];
+  }) {
+    const legalEntity: LegalEntity = {
+      recordId: input.recordId,
+      teamId: input.teamId,
+      legalName: input.legalName,
+      organizationNumber: input.organizationNumber ?? null,
+      vatNumber: input.vatNumber ?? null,
+      countryCode: input.countryCode,
+      baseCurrency: input.baseCurrency,
+      fiscalYearStartMonth: input.fiscalYearStartMonth,
+      status: input.status,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.legalEntities.set(legalEntity.recordId, legalEntity);
+    return legalEntity;
+  }
+
   async createAccount(input: {
     recordId: string;
     teamId: string;
     organizationId: string;
     accountType?: Account["accountType"];
     legalEntityId?: string | null;
+    relationshipStatus?: Account["relationshipStatus"];
+    lifecycleStage?: Account["lifecycleStage"];
+    segment?: string | null;
+    territory?: string | null;
     primaryOwnerPrincipalId?: string | null;
+    customerSince?: string | null;
+    churnedAt?: string | null;
   }) {
     const account: Account = {
       recordId: input.recordId,
       teamId: input.teamId,
       organizationId: input.organizationId,
       accountType: input.accountType ?? "prospect",
-      relationshipStatus: "active",
+      relationshipStatus: input.relationshipStatus ?? "active",
       legalEntityId: input.legalEntityId ?? null,
+      lifecycleStage: input.lifecycleStage ?? null,
+      segment: input.segment ?? null,
+      territory: input.territory ?? null,
       primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
-      customerSince: null,
-      churnedAt: null,
+      customerSince: input.customerSince ?? null,
+      churnedAt: input.churnedAt ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -304,6 +365,41 @@ describe("crm use cases", () => {
     expect(repository.outboxEvents).toHaveLength(1);
   });
 
+  test("creates multiple legal entities for a team", async () => {
+    const repository = new MemoryCrmRepository();
+    const first = await createLegalEntity(repository as unknown as CrmUseCaseRepository, context, {
+      teamId: "team_1",
+      legalName: "Dawn Sverige AB",
+      organizationNumber: "559001-0001",
+      baseCurrency: "sek",
+      idempotencyKey: "legal_entity_1",
+    });
+    const second = await createLegalEntity(repository as unknown as CrmUseCaseRepository, context, {
+      teamId: "team_1",
+      legalName: "Dawn Norge AS",
+      countryCode: "no",
+      baseCurrency: "nok",
+      fiscalYearStartMonth: 7,
+      idempotencyKey: "legal_entity_2",
+    });
+
+    expect(first.legalEntity).toMatchObject({
+      legalName: "Dawn Sverige AB",
+      countryCode: "SE",
+      baseCurrency: "SEK",
+      fiscalYearStartMonth: 1,
+    });
+    expect(second.legalEntity).toMatchObject({
+      legalName: "Dawn Norge AS",
+      countryCode: "NO",
+      baseCurrency: "NOK",
+      fiscalYearStartMonth: 7,
+    });
+    expect(repository.legalEntities.size).toBe(2);
+    expect(repository.auditEvents.at(-1)).toMatchObject({ action: "crm.legal_entity.created" });
+    expect(repository.outboxEvents.at(-1)).toMatchObject({ type: "crm.legal_entity.created" });
+  });
+
   test("creates account linked to organization", async () => {
     const repository = new MemoryCrmRepository();
     const organization = await createOrganization(
@@ -331,6 +427,136 @@ describe("crm use cases", () => {
     expect(result.replayed).toBe(false);
     expect(repository.auditEvents.at(-1)).toMatchObject({ action: "crm.account.created" });
     expect(repository.outboxEvents.at(-1)).toMatchObject({ type: "crm.account.created" });
+  });
+
+  test("creates separate account roles for the same organization across legal entities", async () => {
+    const repository = new MemoryCrmRepository();
+    const organization = await createOrganization(
+      repository as unknown as CrmUseCaseRepository,
+      context,
+      {
+        teamId: "team_1",
+        legalName: "Acme AB",
+        idempotencyKey: "org_1",
+      },
+    );
+    const legalEntity = await createLegalEntity(
+      repository as unknown as CrmUseCaseRepository,
+      context,
+      {
+        teamId: "team_1",
+        legalName: "Dawn Sverige AB",
+        idempotencyKey: "legal_entity_1",
+      },
+    );
+    const roles: Account["accountType"][] = [
+      "prospect",
+      "customer",
+      "partner",
+      "supplier",
+      "former_customer",
+    ];
+
+    for (const accountType of roles) {
+      await createAccount(repository as unknown as CrmUseCaseRepository, context, {
+        teamId: "team_1",
+        organizationId: organization.organization.recordId,
+        legalEntityId: legalEntity.legalEntity.recordId,
+        accountType,
+        relationshipStatus: accountType === "former_customer" ? "churned" : "active",
+        lifecycleStage: accountType === "customer" ? "growth" : "new",
+        segment: "mid-market",
+        territory: "SE",
+        customerSince: accountType === "customer" ? "2026-01-01T00:00:00.000Z" : null,
+        churnedAt: accountType === "former_customer" ? "2026-05-01T00:00:00.000Z" : null,
+        idempotencyKey: `account_${accountType}`,
+      });
+    }
+
+    expect(repository.accounts.size).toBe(5);
+    expect([...repository.accounts.values()].map((account) => account.accountType).sort()).toEqual(
+      [...roles].sort(),
+    );
+    expect(repository.organizations.get(organization.organization.recordId)).not.toHaveProperty(
+      "accountType",
+    );
+    expect(repository.auditEvents.at(-1)).toMatchObject({
+      action: "crm.account.created",
+      metadata: {
+        organizationId: organization.organization.recordId,
+        legalEntityId: legalEntity.legalEntity.recordId,
+      },
+    });
+  });
+
+  test("filters account queries by legal entity and relationship status", async () => {
+    const repository = new MemoryCrmRepository();
+    const organization = await createOrganization(
+      repository as unknown as CrmUseCaseRepository,
+      context,
+      {
+        teamId: "team_1",
+        legalName: "Acme AB",
+        idempotencyKey: "org_1",
+      },
+    );
+    const legalEntityOne = await createLegalEntity(
+      repository as unknown as CrmUseCaseRepository,
+      context,
+      {
+        teamId: "team_1",
+        legalName: "Dawn Sverige AB",
+        idempotencyKey: "legal_entity_1",
+      },
+    );
+    const legalEntityTwo = await createLegalEntity(
+      repository as unknown as CrmUseCaseRepository,
+      context,
+      {
+        teamId: "team_1",
+        legalName: "Dawn Norge AS",
+        countryCode: "NO",
+        baseCurrency: "NOK",
+        idempotencyKey: "legal_entity_2",
+      },
+    );
+    await createAccount(repository as unknown as CrmUseCaseRepository, context, {
+      teamId: "team_1",
+      organizationId: organization.organization.recordId,
+      legalEntityId: legalEntityOne.legalEntity.recordId,
+      accountType: "customer",
+      relationshipStatus: "active",
+      idempotencyKey: "account_1",
+    });
+    await createAccount(repository as unknown as CrmUseCaseRepository, context, {
+      teamId: "team_1",
+      organizationId: organization.organization.recordId,
+      legalEntityId: legalEntityOne.legalEntity.recordId,
+      accountType: "former_customer",
+      relationshipStatus: "churned",
+      idempotencyKey: "account_2",
+    });
+    await createAccount(repository as unknown as CrmUseCaseRepository, context, {
+      teamId: "team_1",
+      organizationId: organization.organization.recordId,
+      legalEntityId: legalEntityTwo.legalEntity.recordId,
+      accountType: "customer",
+      relationshipStatus: "active",
+      idempotencyKey: "account_3",
+    });
+
+    const filtered = await listAccounts(repository as unknown as CrmUseCaseRepository, context, {
+      teamId: "team_1",
+      legalEntityId: legalEntityOne.legalEntity.recordId,
+      relationshipStatus: "active",
+    });
+
+    expect(filtered.accounts).toHaveLength(1);
+    expect(filtered.accounts[0]).toMatchObject({
+      legalEntityId: legalEntityOne.legalEntity.recordId,
+      relationshipStatus: "active",
+      accountType: "customer",
+    });
   });
 
   test("denies account creation for organization from another team", async () => {
@@ -436,6 +662,9 @@ describe("crm use cases", () => {
       accountType: "customer",
       relationshipStatus: "active",
       legalEntityId: null,
+      lifecycleStage: null,
+      segment: null,
+      territory: null,
       primaryOwnerPrincipalId: null,
       customerSince: null,
       churnedAt: null,
@@ -613,6 +842,9 @@ describe("crm use cases", () => {
       accountType: "customer",
       relationshipStatus: "active",
       legalEntityId: null,
+      lifecycleStage: null,
+      segment: null,
+      territory: null,
       primaryOwnerPrincipalId: null,
       customerSince: null,
       churnedAt: null,

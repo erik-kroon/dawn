@@ -59,6 +59,7 @@ import type {
   InvoiceDraft,
   InvoiceLineDraft,
   InvoicePayment,
+  LegalEntity,
   OAuthApp,
   OAuthGrant,
   Opportunity,
@@ -4634,6 +4635,18 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return organization ? mapOrganization(organization) : null;
   }
 
+  async getLegalEntityForTeam(teamId: string, recordId: string): Promise<LegalEntity | null> {
+    const [legalEntity] = await this.client
+      .select()
+      .from(schema.crmLegalEntity)
+      .where(
+        and(eq(schema.crmLegalEntity.teamId, teamId), eq(schema.crmLegalEntity.recordId, recordId)),
+      )
+      .limit(1);
+
+    return legalEntity ? mapLegalEntity(legalEntity) : null;
+  }
+
   async getAccountForTeam(teamId: string, recordId: string): Promise<Account | null> {
     const [account] = await this.client
       .select()
@@ -4642,6 +4655,35 @@ export class DrizzleDawnRepository implements DrizzleRepository {
       .limit(1);
 
     return account ? mapAccount(account) : null;
+  }
+
+  async listAccountsForTeam(input: {
+    teamId: string;
+    legalEntityId?: string | null;
+    relationshipStatus?: Account["relationshipStatus"] | null;
+    accountType?: Account["accountType"] | null;
+  }): Promise<Account[]> {
+    const conditions: SQL[] = [eq(schema.crmAccount.teamId, input.teamId)];
+
+    if (input.legalEntityId) {
+      conditions.push(eq(schema.crmAccount.legalEntityId, input.legalEntityId));
+    }
+
+    if (input.relationshipStatus) {
+      conditions.push(eq(schema.crmAccount.relationshipStatus, input.relationshipStatus));
+    }
+
+    if (input.accountType) {
+      conditions.push(eq(schema.crmAccount.accountType, input.accountType));
+    }
+
+    const accounts = await this.client
+      .select()
+      .from(schema.crmAccount)
+      .where(and(...conditions))
+      .orderBy(desc(schema.crmAccount.createdAt));
+
+    return accounts.map(mapAccount);
   }
 
   async getOpportunityForTeam(teamId: string, recordId: string): Promise<Opportunity | null> {
@@ -4760,13 +4802,55 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return mapOrganization(organization);
   }
 
+  async createLegalEntity(input: {
+    recordId: string;
+    teamId: string;
+    legalName: string;
+    organizationNumber?: string | null;
+    vatNumber?: string | null;
+    countryCode: string;
+    baseCurrency: string;
+    fiscalYearStartMonth: number;
+    status: LegalEntity["status"];
+  }): Promise<LegalEntity> {
+    const now = new Date();
+    const [legalEntity] = await this.client
+      .insert(schema.crmLegalEntity)
+      .values({
+        recordId: input.recordId,
+        teamId: input.teamId,
+        legalName: input.legalName,
+        organizationNumber: input.organizationNumber ?? null,
+        vatNumber: input.vatNumber ?? null,
+        countryCode: input.countryCode,
+        baseCurrency: input.baseCurrency,
+        fiscalYearStartMonth: input.fiscalYearStartMonth,
+        status: input.status,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!legalEntity) {
+      throw new Error("Legal entity was not created");
+    }
+
+    return mapLegalEntity(legalEntity);
+  }
+
   async createAccount(input: {
     recordId: string;
     teamId: string;
     organizationId: string;
     accountType?: Account["accountType"];
     legalEntityId?: string | null;
+    relationshipStatus?: Account["relationshipStatus"];
+    lifecycleStage?: Account["lifecycleStage"];
+    segment?: string | null;
+    territory?: string | null;
     primaryOwnerPrincipalId?: string | null;
+    customerSince?: string | null;
+    churnedAt?: string | null;
   }): Promise<Account> {
     const now = new Date();
     const [account] = await this.client
@@ -4776,11 +4860,14 @@ export class DrizzleDawnRepository implements DrizzleRepository {
         teamId: input.teamId,
         organizationId: input.organizationId,
         accountType: input.accountType ?? "prospect",
-        relationshipStatus: "active",
+        relationshipStatus: input.relationshipStatus ?? "active",
         legalEntityId: input.legalEntityId ?? null,
+        lifecycleStage: input.lifecycleStage ?? null,
+        segment: input.segment ?? null,
+        territory: input.territory ?? null,
         primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
-        customerSince: null,
-        churnedAt: null,
+        customerSince: input.customerSince ? new Date(input.customerSince) : null,
+        churnedAt: input.churnedAt ? new Date(input.churnedAt) : null,
         createdAt: now,
         updatedAt: now,
       })
@@ -5760,6 +5847,22 @@ function mapOrganization(organization: typeof schema.crmOrganization.$inferSelec
   };
 }
 
+function mapLegalEntity(legalEntity: typeof schema.crmLegalEntity.$inferSelect): LegalEntity {
+  return {
+    recordId: legalEntity.recordId,
+    teamId: legalEntity.teamId,
+    legalName: legalEntity.legalName,
+    organizationNumber: legalEntity.organizationNumber,
+    vatNumber: legalEntity.vatNumber,
+    countryCode: legalEntity.countryCode,
+    baseCurrency: legalEntity.baseCurrency,
+    fiscalYearStartMonth: legalEntity.fiscalYearStartMonth,
+    status: legalEntity.status as LegalEntity["status"],
+    createdAt: legalEntity.createdAt.toISOString(),
+    updatedAt: legalEntity.updatedAt.toISOString(),
+  };
+}
+
 function mapAccount(account: typeof schema.crmAccount.$inferSelect): Account {
   return {
     recordId: account.recordId,
@@ -5768,6 +5871,9 @@ function mapAccount(account: typeof schema.crmAccount.$inferSelect): Account {
     organizationId: account.organizationId,
     accountType: account.accountType as Account["accountType"],
     relationshipStatus: account.relationshipStatus as Account["relationshipStatus"],
+    lifecycleStage: account.lifecycleStage as Account["lifecycleStage"],
+    segment: account.segment,
+    territory: account.territory,
     primaryOwnerPrincipalId: account.primaryOwnerPrincipalId,
     customerSince: account.customerSince?.toISOString() ?? null,
     churnedAt: account.churnedAt?.toISOString() ?? null,

@@ -48,6 +48,7 @@ describe("team role permissions", () => {
       "assistant.use",
       "automations.read",
       "crm.organizations.read",
+      "crm.legal_entities.read",
       "crm.accounts.read",
       "crm.opportunities.read",
     ]);

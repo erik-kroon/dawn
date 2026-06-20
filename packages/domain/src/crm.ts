@@ -39,9 +39,34 @@ export type Organization = {
   updatedAt: string;
 };
 
+// Legal entity - tenant-owned company that holds commercial relationships
+export type LegalEntityStatus = "active" | "inactive";
+
+export type LegalEntity = {
+  recordId: string;
+  teamId: string;
+  legalName: string;
+  organizationNumber: string | null;
+  vatNumber: string | null;
+  countryCode: string;
+  baseCurrency: string;
+  fiscalYearStartMonth: number;
+  status: LegalEntityStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
 // Account - tenant's commercial relationship to an organization
 export type AccountType = "prospect" | "customer" | "partner" | "supplier" | "former_customer";
 export type RelationshipStatus = "active" | "churned" | "inactive";
+export type AccountLifecycleStage =
+  | "new"
+  | "qualified"
+  | "active"
+  | "growth"
+  | "at_risk"
+  | "churned"
+  | "inactive";
 
 export type Account = {
   recordId: string;
@@ -50,6 +75,9 @@ export type Account = {
   organizationId: string;
   accountType: AccountType;
   relationshipStatus: RelationshipStatus;
+  lifecycleStage: AccountLifecycleStage | null;
+  segment: string | null;
+  territory: string | null;
   primaryOwnerPrincipalId: string | null;
   customerSince: string | null;
   churnedAt: string | null;

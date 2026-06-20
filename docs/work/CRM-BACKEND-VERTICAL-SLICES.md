@@ -120,6 +120,40 @@ Verified by the implementing agent:
 - `bun run check-types`
 - `bun test packages/domain/src/crm-permissions.test.ts packages/domain/src/permissions.test.ts packages/app/src/request-context.test.ts packages/app/src/crm.test.ts packages/api/src/context.test.ts packages/api/src/router.test.ts`
 
+### Done: Legal Entities And Account Roles
+
+Slice 3 is implemented in the current worktree. It deepens the account relationship model without moving customer status onto organization identity.
+
+Implemented files:
+
+- `packages/domain/src/crm.ts`
+- `packages/domain/src/crm-permissions.ts`
+- `packages/domain/src/identity.ts`
+- `packages/domain/src/permissions.test.ts`
+- `packages/db/src/schema/crm.ts`
+- `packages/db/src/dawn-repository.ts`
+- `packages/db/src/migrations/0030_crm_legal_entities_account_roles.sql`
+- `packages/db/src/migrations/meta/_journal.json`
+- `packages/app/src/crm.ts`
+- `packages/app/src/crm.test.ts`
+- `packages/app/src/team-permissions.test.ts`
+- `packages/api/src/routers/index.ts`
+- `packages/api/src/router.test.ts`
+
+Completed behavior:
+
+- Teams can create multiple own legal entities as CRM record-envelope objects.
+- Accounts can bind to legal entities and carry account type, relationship status, lifecycle stage, segment, territory, customer-since, churned-at, and owner fields.
+- The same organization can have separate prospect, customer, partner, supplier, and former-customer account records.
+- Account list queries filter by legal entity, relationship status, and account type.
+- Account audit/outbox payloads identify both organization and legal entity relationship context.
+
+Verified by the implementing agent:
+
+- `bun run check-types`
+- `bun run check`
+- `bun test packages/domain/src/permissions.test.ts packages/domain/src/crm-permissions.test.ts packages/app/src/crm.test.ts packages/app/src/team-permissions.test.ts packages/api/src/router.test.ts`
+
 ## Reference Repo Map
 
 Use reference repos as behavior and architecture input. Do not copy code from AGPL/GPL/source-available references.
@@ -342,6 +376,8 @@ Add CRM-aware authorization and request context beyond coarse team roles before 
 
 ### 3. Legal Entities And Account Roles
 
+Status: done
+
 ## Goal
 
 Support tenants with multiple own legal entities and multiple commercial relationships to the same external organization.
@@ -365,11 +401,11 @@ Support tenants with multiple own legal entities and multiple commercial relatio
 
 ## Acceptance Criteria
 
-- [ ] A team can create multiple legal entities.
-- [ ] The same organization can be prospect, customer, partner, supplier, or former customer through separate account records.
-- [ ] Account queries can filter by legal entity and relationship status.
-- [ ] Organization records do not carry a single canonical customer status.
-- [ ] Audit and domain events identify the legal entity and account relationship affected.
+- [x] A team can create multiple legal entities.
+- [x] The same organization can be prospect, customer, partner, supplier, or former customer through separate account records.
+- [x] Account queries can filter by legal entity and relationship status.
+- [x] Organization records do not carry a single canonical customer status.
+- [x] Audit and domain events identify the legal entity and account relationship affected.
 
 ## Verification
 
@@ -1008,7 +1044,7 @@ Make privacy lifecycle behavior executable across canonical CRM data, derived da
 ## Dependency Summary
 
 - Slice 2 is landed for the current CRM tracer boundary; later CRM surfaces must reuse its request context and access policy path.
-- Slice 3 can proceed after Slice 2 if commercial account modeling is the priority.
+- Slice 3 is landed; future account-facing slices can rely on legal entities and account relationship filters.
 - Slice 4 should land before duplicate handling, query/reporting, field-level AI evidence, and registry field promotion.
 - Slices 6 and 7 can proceed in parallel after Slice 3 if opportunity depth is the priority.
 - Slice 8 depends on product/pricing depth and should not copy NextCRM's or Midday's invoice table shape directly.
@@ -1018,6 +1054,6 @@ Make privacy lifecycle behavior executable across canonical CRM data, derived da
 
 ## Suggested Next Slice
 
-Start with **Slice 3: Legal Entities And Account Roles**.
+Start with **Slice 4: Metadata Extensions Tracer**.
 
-Reason: the customer graph tracer and permission/request-context foundation now exist. Legal entities and account roles are the smallest next slice that deepens the core commercial account model before metadata, search, integrations, registry enrichment, or AI tools depend on it.
+Reason: the customer graph, permission/request-context foundation, and legal entity/account relationship model now exist. Metadata extensions are the next foundation needed before duplicate handling, query/reporting, field-level AI evidence, and registry field promotion.

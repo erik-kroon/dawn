@@ -8,6 +8,7 @@ import type {
   CrmObjectType,
   CrmRecord,
   CrmRecordGrant,
+  LegalEntity,
   Organization,
   Opportunity,
   Party,
@@ -47,12 +48,35 @@ export type CreateOrganizationResult = {
   replayed: boolean;
 };
 
+export type CreateLegalEntityCommand = {
+  teamId: string;
+  legalName: string;
+  organizationNumber?: string | null;
+  vatNumber?: string | null;
+  countryCode?: string | null;
+  baseCurrency?: string | null;
+  fiscalYearStartMonth?: number | null;
+  status?: LegalEntity["status"];
+  idempotencyKey: string;
+};
+
+export type CreateLegalEntityResult = {
+  legalEntity: LegalEntity;
+  replayed: boolean;
+};
+
 export type CreateAccountCommand = {
   teamId: string;
   organizationId: string;
   accountType?: Account["accountType"];
   legalEntityId?: string | null;
+  relationshipStatus?: Account["relationshipStatus"];
+  lifecycleStage?: Account["lifecycleStage"];
+  segment?: string | null;
+  territory?: string | null;
   primaryOwnerPrincipalId?: string | null;
+  customerSince?: string | null;
+  churnedAt?: string | null;
   idempotencyKey: string;
 };
 
@@ -80,6 +104,17 @@ export type CreateOpportunityResult = {
 export type GetAccountSummaryCommand = {
   teamId: string;
   accountId: string;
+};
+
+export type ListAccountsCommand = {
+  teamId: string;
+  legalEntityId?: string | null;
+  relationshipStatus?: Account["relationshipStatus"] | null;
+  accountType?: Account["accountType"] | null;
+};
+
+export type ListAccountsResult = {
+  accounts: Partial<Account>[];
 };
 
 export type CrmRepository = {
@@ -131,8 +166,15 @@ export type CrmRepository = {
     principalId: string;
   }): Promise<CrmFieldSecurityPolicy[]>;
   getOrganizationForTeam(teamId: string, recordId: string): Promise<Organization | null>;
+  getLegalEntityForTeam(teamId: string, recordId: string): Promise<LegalEntity | null>;
   getAccountForTeam(teamId: string, recordId: string): Promise<Account | null>;
   getOpportunityForTeam(teamId: string, recordId: string): Promise<Opportunity | null>;
+  listAccountsForTeam(input: {
+    teamId: string;
+    legalEntityId?: string | null;
+    relationshipStatus?: Account["relationshipStatus"] | null;
+    accountType?: Account["accountType"] | null;
+  }): Promise<Account[]>;
   listOpenOpportunitiesForAccount(teamId: string, accountId: string): Promise<Opportunity[]>;
 
   // CRM-specific mutations
@@ -154,13 +196,30 @@ export type CrmRepository = {
     vatNumber?: string | null;
     websiteDomain?: string | null;
   }): Promise<Organization>;
+  createLegalEntity(input: {
+    recordId: string;
+    teamId: string;
+    legalName: string;
+    organizationNumber?: string | null;
+    vatNumber?: string | null;
+    countryCode: string;
+    baseCurrency: string;
+    fiscalYearStartMonth: number;
+    status: LegalEntity["status"];
+  }): Promise<LegalEntity>;
   createAccount(input: {
     recordId: string;
     teamId: string;
     organizationId: string;
     accountType?: Account["accountType"];
     legalEntityId?: string | null;
+    relationshipStatus?: Account["relationshipStatus"];
+    lifecycleStage?: Account["lifecycleStage"];
+    segment?: string | null;
+    territory?: string | null;
     primaryOwnerPrincipalId?: string | null;
+    customerSince?: string | null;
+    churnedAt?: string | null;
   }): Promise<Account>;
   createOpportunity(input: {
     recordId: string;
@@ -177,6 +236,7 @@ export type CrmRepository = {
 export type CrmUseCaseRepository = TransactionReviewRepository & CrmRepository;
 
 const createOrganizationOperation = "crm.organization.create";
+const createLegalEntityOperation = "crm.legal_entity.create";
 const createAccountOperation = "crm.account.create";
 const createOpportunityOperation = "crm.opportunity.create";
 
@@ -193,6 +253,19 @@ const crmObjectFields: Record<CrmObjectType, readonly string[]> = {
     "createdAt",
     "updatedAt",
   ],
+  legal_entity: [
+    "recordId",
+    "teamId",
+    "legalName",
+    "organizationNumber",
+    "vatNumber",
+    "countryCode",
+    "baseCurrency",
+    "fiscalYearStartMonth",
+    "status",
+    "createdAt",
+    "updatedAt",
+  ],
   account: [
     "recordId",
     "teamId",
@@ -200,6 +273,9 @@ const crmObjectFields: Record<CrmObjectType, readonly string[]> = {
     "organizationId",
     "accountType",
     "relationshipStatus",
+    "lifecycleStage",
+    "segment",
+    "territory",
     "primaryOwnerPrincipalId",
     "customerSince",
     "churnedAt",
@@ -319,6 +395,99 @@ export async function createOrganization(
   });
 }
 
+export async function createLegalEntity(
+  repository: CrmUseCaseRepository,
+  context: TransactionReviewContext,
+  command: CreateLegalEntityCommand,
+): Promise<CreateLegalEntityResult> {
+  return repository.withTransaction(async (transactionRepository) => {
+    const crmRepository = transactionRepository as CrmUseCaseRepository;
+
+    assertCommandTeamMatchesContext(context, command.teamId, "Legal entity not found");
+
+    const normalized = normalizeCreateLegalEntityCommand(command);
+    const principal = await assertCrmCreateAccess(
+      crmRepository,
+      context,
+      command.teamId,
+      "legal_entity",
+      normalized,
+      "You cannot create legal entities for this team",
+    );
+    const fingerprint = JSON.stringify(normalized);
+    const replayed = await crmRepository.getIdempotencyResult(
+      command.teamId,
+      context.actor.id,
+      createLegalEntityOperation,
+      command.idempotencyKey,
+    );
+
+    if (replayed) {
+      if (replayed.fingerprint !== fingerprint) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used for a different legal entity",
+        );
+      }
+
+      return { ...(replayed.result as CreateLegalEntityResult), replayed: true };
+    }
+
+    const recordId = crypto.randomUUID();
+    await crmRepository.createCrmRecord({
+      recordId,
+      teamId: command.teamId,
+      objectTypeId: "legal_entity",
+      createdByActorId: context.actor.id,
+      ownerPrincipalId: principal.id,
+    });
+    const legalEntity = await crmRepository.createLegalEntity({
+      recordId,
+      ...normalized,
+    });
+
+    await crmRepository.appendAuditEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      action: "crm.legal_entity.created",
+      entityType: "legal_entity",
+      entityId: legalEntity.recordId,
+      metadata: {
+        legalName: legalEntity.legalName,
+        organizationNumber: legalEntity.organizationNumber,
+        baseCurrency: legalEntity.baseCurrency,
+      },
+    });
+
+    await crmRepository.appendOutboxEvent({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      requestId: context.requestId,
+      type: "crm.legal_entity.created",
+      version: 1,
+      payload: {
+        legalEntityId: legalEntity.recordId,
+        legalName: legalEntity.legalName,
+        baseCurrency: legalEntity.baseCurrency,
+      },
+    });
+
+    const result = { legalEntity, replayed: false };
+
+    await crmRepository.saveIdempotencyResult({
+      teamId: command.teamId,
+      actorId: context.actor.id,
+      operation: createLegalEntityOperation,
+      key: command.idempotencyKey,
+      fingerprint,
+      result,
+    });
+
+    return result;
+  });
+}
+
 export async function createAccount(
   repository: CrmUseCaseRepository,
   context: TransactionReviewContext,
@@ -373,6 +542,27 @@ export async function createAccount(
       throw new AppError("NOT_FOUND", "Organization not found");
     }
 
+    if (normalized.legalEntityId) {
+      await resolveCrmRecordAccess(
+        crmRepository,
+        context,
+        command.teamId,
+        normalized.legalEntityId,
+        "legal_entity",
+        "read",
+        "Legal entity not found",
+      );
+
+      const legalEntity = await crmRepository.getLegalEntityForTeam(
+        command.teamId,
+        normalized.legalEntityId,
+      );
+
+      if (!legalEntity) {
+        throw new AppError("NOT_FOUND", "Legal entity not found");
+      }
+    }
+
     const recordId = crypto.randomUUID();
     await crmRepository.createCrmRecord({
       recordId,
@@ -395,7 +585,10 @@ export async function createAccount(
       entityId: account.recordId,
       metadata: {
         organizationId: account.organizationId,
+        legalEntityId: account.legalEntityId,
         accountType: account.accountType,
+        relationshipStatus: account.relationshipStatus,
+        lifecycleStage: account.lifecycleStage,
       },
     });
 
@@ -408,6 +601,9 @@ export async function createAccount(
       payload: {
         accountId: account.recordId,
         organizationId: account.organizationId,
+        legalEntityId: account.legalEntityId,
+        accountType: account.accountType,
+        relationshipStatus: account.relationshipStatus,
       },
     });
 
@@ -608,6 +804,54 @@ export async function getAccountSummary(
   };
 }
 
+export async function listAccounts(
+  repository: CrmUseCaseRepository,
+  context: TransactionReviewContext,
+  command: ListAccountsCommand,
+): Promise<ListAccountsResult> {
+  assertCommandTeamMatchesContext(context, command.teamId, "Account not found");
+
+  const normalized = normalizeListAccountsCommand(command);
+
+  if (normalized.legalEntityId) {
+    await resolveCrmRecordAccess(
+      repository,
+      context,
+      command.teamId,
+      normalized.legalEntityId,
+      "legal_entity",
+      "read",
+      "Legal entity not found",
+    );
+  }
+
+  const accounts = await repository.listAccountsForTeam(normalized);
+  const visibleAccounts: Partial<Account>[] = [];
+
+  for (const account of accounts) {
+    try {
+      const decision = await resolveCrmRecordAccess(
+        repository,
+        context,
+        command.teamId,
+        account.recordId,
+        "account",
+        "read",
+        "Account not found",
+      );
+      visibleAccounts.push(redactCrmFields(account, decision.visibleFields));
+    } catch (error) {
+      if (error instanceof AppError && error.code === "NOT_FOUND") {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  return { accounts: visibleAccounts };
+}
+
 function normalizeCreateOrganizationCommand(command: CreateOrganizationCommand) {
   const legalName = command.legalName.trim();
 
@@ -623,6 +867,47 @@ function normalizeCreateOrganizationCommand(command: CreateOrganizationCommand) 
     countryCode: command.countryCode?.trim().toUpperCase() || null,
     vatNumber: command.vatNumber?.trim() || null,
     websiteDomain: command.websiteDomain?.trim().toLowerCase() || null,
+  };
+}
+
+function normalizeCreateLegalEntityCommand(command: CreateLegalEntityCommand) {
+  const legalName = command.legalName.trim();
+  const countryCode = command.countryCode?.trim().toUpperCase() || "SE";
+  const baseCurrency = command.baseCurrency?.trim().toUpperCase() || "SEK";
+  const fiscalYearStartMonth = command.fiscalYearStartMonth ?? 1;
+  const validStatuses: LegalEntity["status"][] = ["active", "inactive"];
+  const status =
+    command.status && validStatuses.includes(command.status) ? command.status : "active";
+
+  if (!legalName) {
+    throw new AppError("CONFLICT", "Legal entity name is required");
+  }
+
+  if (!/^[A-Z]{2}$/.test(countryCode)) {
+    throw new AppError("CONFLICT", "Country code must use ISO 3166-1 alpha-2 format");
+  }
+
+  if (!/^[A-Z]{3}$/.test(baseCurrency)) {
+    throw new AppError("CONFLICT", "Base currency must use ISO 4217 format");
+  }
+
+  if (
+    !Number.isInteger(fiscalYearStartMonth) ||
+    fiscalYearStartMonth < 1 ||
+    fiscalYearStartMonth > 12
+  ) {
+    throw new AppError("CONFLICT", "Fiscal year start month must be between 1 and 12");
+  }
+
+  return {
+    teamId: command.teamId,
+    legalName,
+    organizationNumber: command.organizationNumber?.trim() || null,
+    vatNumber: command.vatNumber?.trim() || null,
+    countryCode,
+    baseCurrency,
+    fiscalYearStartMonth,
+    status,
   };
 }
 
@@ -748,13 +1033,53 @@ function normalizeCreateAccountCommand(command: CreateAccountCommand) {
     command.accountType && validAccountTypes.includes(command.accountType)
       ? command.accountType
       : "prospect";
+  const validRelationshipStatuses: Account["relationshipStatus"][] = [
+    "active",
+    "churned",
+    "inactive",
+  ];
+  const relationshipStatus: Account["relationshipStatus"] =
+    command.relationshipStatus && validRelationshipStatuses.includes(command.relationshipStatus)
+      ? command.relationshipStatus
+      : "active";
+  const validLifecycleStages: NonNullable<Account["lifecycleStage"]>[] = [
+    "new",
+    "qualified",
+    "active",
+    "growth",
+    "at_risk",
+    "churned",
+    "inactive",
+  ];
+  const lifecycleStage =
+    command.lifecycleStage && validLifecycleStages.includes(command.lifecycleStage)
+      ? command.lifecycleStage
+      : null;
 
   return {
     teamId: command.teamId,
     organizationId: command.organizationId,
     accountType,
     legalEntityId: command.legalEntityId?.trim() || null,
+    relationshipStatus,
+    lifecycleStage,
+    segment: command.segment?.trim() || null,
+    territory: command.territory?.trim() || null,
     primaryOwnerPrincipalId: command.primaryOwnerPrincipalId?.trim() || null,
+    customerSince: normalizeOptionalDate(
+      command.customerSince,
+      "Customer since must be a valid date",
+    ),
+    churnedAt: normalizeOptionalDate(command.churnedAt, "Churned at must be a valid date"),
+  };
+}
+
+function normalizeListAccountsCommand(command: ListAccountsCommand) {
+  return {
+    teamId: command.teamId,
+    legalEntityId: command.legalEntityId?.trim() || null,
+    relationshipStatus: command.relationshipStatus ?? null,
+    accountType: command.accountType ?? null,
   };
 }
 
@@ -784,6 +1109,20 @@ function assertCommandTeamMatchesContext(
   if (context.teamId && context.teamId !== teamId) {
     throw new AppError("NOT_FOUND", message);
   }
+}
+
+function normalizeOptionalDate(value: string | null | undefined, message: string) {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    throw new AppError("CONFLICT", message);
+  }
+
+  return date.toISOString();
 }
 
 function errorMessage(error: unknown) {

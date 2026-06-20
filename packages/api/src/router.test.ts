@@ -33,6 +33,7 @@ import type {
   InvoiceLineDraft,
   InvoicePayment,
   InboxMatchSuggestion,
+  LegalEntity,
   Opportunity,
   Organization,
   Party,
@@ -140,6 +141,7 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
   crmRecords = new Map<string, CrmRecord>();
   crmParties = new Map<string, Party>();
   crmOrganizations = new Map<string, Organization>();
+  crmLegalEntities = new Map<string, LegalEntity>();
   crmAccounts = new Map<string, Account>();
   crmOpportunities = new Map<string, Opportunity>();
   crmRecordGrants: CrmRecordGrant[] = [];
@@ -2282,6 +2284,12 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       : null;
   }
 
+  async getLegalEntityForTeam(teamId: string, recordId: string) {
+    return this.crmLegalEntities.get(recordId)?.teamId === teamId
+      ? (this.crmLegalEntities.get(recordId) ?? null)
+      : null;
+  }
+
   async getCrmRecordForTeam(teamId: string, recordId: string) {
     const record = this.crmRecords.get(recordId);
     return record?.teamId === teamId ? record : null;
@@ -2319,6 +2327,21 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     return this.crmAccounts.get(recordId)?.teamId === teamId
       ? (this.crmAccounts.get(recordId) ?? null)
       : null;
+  }
+
+  async listAccountsForTeam(input: {
+    teamId: string;
+    legalEntityId?: string | null;
+    relationshipStatus?: Account["relationshipStatus"] | null;
+    accountType?: Account["accountType"] | null;
+  }) {
+    return [...this.crmAccounts.values()].filter(
+      (account) =>
+        account.teamId === input.teamId &&
+        (!input.legalEntityId || account.legalEntityId === input.legalEntityId) &&
+        (!input.relationshipStatus || account.relationshipStatus === input.relationshipStatus) &&
+        (!input.accountType || account.accountType === input.accountType),
+    );
   }
 
   async getOpportunityForTeam(teamId: string, recordId: string) {
@@ -2402,13 +2425,48 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     return organization;
   }
 
+  async createLegalEntity(input: {
+    recordId: string;
+    teamId: string;
+    legalName: string;
+    organizationNumber?: string | null;
+    vatNumber?: string | null;
+    countryCode: string;
+    baseCurrency: string;
+    fiscalYearStartMonth: number;
+    status: LegalEntity["status"];
+  }): Promise<LegalEntity> {
+    const now = new Date().toISOString();
+    const legalEntity: LegalEntity = {
+      recordId: input.recordId,
+      teamId: input.teamId,
+      legalName: input.legalName,
+      organizationNumber: input.organizationNumber ?? null,
+      vatNumber: input.vatNumber ?? null,
+      countryCode: input.countryCode,
+      baseCurrency: input.baseCurrency,
+      fiscalYearStartMonth: input.fiscalYearStartMonth,
+      status: input.status,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.crmLegalEntities.set(legalEntity.recordId, legalEntity);
+    return legalEntity;
+  }
+
   async createAccount(input: {
     recordId: string;
     teamId: string;
     organizationId: string;
     accountType?: Account["accountType"];
     legalEntityId?: string | null;
+    relationshipStatus?: Account["relationshipStatus"];
+    lifecycleStage?: Account["lifecycleStage"];
+    segment?: string | null;
+    territory?: string | null;
     primaryOwnerPrincipalId?: string | null;
+    customerSince?: string | null;
+    churnedAt?: string | null;
   }): Promise<Account> {
     const now = new Date().toISOString();
     const account: Account = {
@@ -2416,11 +2474,14 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       teamId: input.teamId,
       organizationId: input.organizationId,
       accountType: input.accountType ?? "prospect",
-      relationshipStatus: "active",
+      relationshipStatus: input.relationshipStatus ?? "active",
       legalEntityId: input.legalEntityId ?? null,
+      lifecycleStage: input.lifecycleStage ?? null,
+      segment: input.segment ?? null,
+      territory: input.territory ?? null,
       primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
-      customerSince: null,
-      churnedAt: null,
+      customerSince: input.customerSince ?? null,
+      churnedAt: input.churnedAt ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -3415,6 +3476,94 @@ describe("appRouter", () => {
     expect(invoice.timeEntries[0]?.billableStatus).toBe("invoiced");
     expect(repository.auditEvents).toHaveLength(4);
     expect(repository.outboxEvents).toHaveLength(4);
+  });
+
+  test("creates CRM legal entities and filters account relationships through protected routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+    const organization = await call(
+      router.crm.createOrganization,
+      {
+        teamId: "team_1",
+        legalName: "Acme AB",
+        idempotencyKey: "crm_org_1",
+      },
+      context,
+    );
+    const legalEntity = await call(
+      router.crm.createLegalEntity,
+      {
+        teamId: "team_1",
+        legalName: "Dawn Sverige AB",
+        organizationNumber: "559001-0001",
+        baseCurrency: "SEK",
+        idempotencyKey: "crm_legal_entity_1",
+      },
+      context,
+    );
+    await call(
+      router.crm.createAccount,
+      {
+        teamId: "team_1",
+        organizationId: organization.organization.recordId,
+        legalEntityId: legalEntity.legalEntity.recordId,
+        accountType: "customer",
+        relationshipStatus: "active",
+        lifecycleStage: "growth",
+        segment: "mid-market",
+        territory: "SE",
+        idempotencyKey: "crm_account_1",
+      },
+      context,
+    );
+    await call(
+      router.crm.createAccount,
+      {
+        teamId: "team_1",
+        organizationId: organization.organization.recordId,
+        legalEntityId: legalEntity.legalEntity.recordId,
+        accountType: "former_customer",
+        relationshipStatus: "churned",
+        churnedAt: "2026-06-01T00:00:00.000Z",
+        idempotencyKey: "crm_account_2",
+      },
+      context,
+    );
+
+    const list = await call(
+      router.crm.listAccounts,
+      {
+        teamId: "team_1",
+        legalEntityId: legalEntity.legalEntity.recordId,
+        relationshipStatus: "active",
+      },
+      context,
+    );
+
+    expect(list.accounts).toHaveLength(1);
+    expect(list.accounts[0]).toMatchObject({
+      legalEntityId: legalEntity.legalEntity.recordId,
+      accountType: "customer",
+      relationshipStatus: "active",
+      lifecycleStage: "growth",
+      segment: "mid-market",
+      territory: "SE",
+    });
+    expect(repository.outboxEvents).toMatchObject([
+      { type: "crm.organization.created" },
+      { type: "crm.legal_entity.created" },
+      {
+        type: "crm.account.created",
+        payload: {
+          legalEntityId: legalEntity.legalEntity.recordId,
+          organizationId: organization.organization.recordId,
+        },
+      },
+      { type: "crm.account.created" },
+    ]);
   });
 
   test("returns report overview metrics with drilldown sources through protected routes", async () => {

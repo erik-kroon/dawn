@@ -6,11 +6,12 @@ export type CrmPrincipal = {
   actorType: Actor["type"];
 };
 
-export type CrmObjectType = "organization" | "account" | "opportunity";
+export type CrmObjectType = "organization" | "legal_entity" | "account" | "opportunity";
 export type CrmObjectAction = "read" | "write";
 
 const crmObjectPermissionSegments = {
   organization: "organizations",
+  legal_entity: "legal_entities",
   account: "accounts",
   opportunity: "opportunities",
 } as const satisfies Record<CrmObjectType, string>;

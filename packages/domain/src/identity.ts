@@ -35,6 +35,8 @@ export type Permission =
   | "webhooks.manage"
   | "crm.organizations.read"
   | "crm.organizations.write"
+  | "crm.legal_entities.read"
+  | "crm.legal_entities.write"
   | "crm.accounts.read"
   | "crm.accounts.write"
   | "crm.opportunities.read"
@@ -186,12 +188,14 @@ export function permissionsForPublicApiScopes(scopes: readonly PublicApiScope[])
 
 const crmReadPermissions = [
   "crm.organizations.read",
+  "crm.legal_entities.read",
   "crm.accounts.read",
   "crm.opportunities.read",
 ] as const;
 
 const crmWritePermissions = [
   "crm.organizations.write",
+  "crm.legal_entities.write",
   "crm.accounts.write",
   "crm.opportunities.write",
 ] as const;

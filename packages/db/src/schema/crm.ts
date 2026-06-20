@@ -71,6 +71,37 @@ export const crmOrganization = pgTable(
   ],
 );
 
+export const crmLegalEntity = pgTable(
+  "crm_legal_entity",
+  {
+    recordId: text("record_id")
+      .primaryKey()
+      .references(() => crmRecord.id, { onDelete: "cascade" }),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    legalName: text("legal_name").notNull(),
+    organizationNumber: text("organization_number"),
+    vatNumber: text("vat_number"),
+    countryCode: text("country_code").default("SE").notNull(),
+    baseCurrency: text("base_currency").default("SEK").notNull(),
+    fiscalYearStartMonth: integer("fiscal_year_start_month").default(1).notNull(),
+    status: text("status").default("active").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("crm_legal_entity_team_status_idx").on(table.teamId, table.status),
+    uniqueIndex("crm_legal_entity_team_organization_number_idx").on(
+      table.teamId,
+      table.organizationNumber,
+    ),
+  ],
+);
+
 export const crmAccount = pgTable(
   "crm_account",
   {
@@ -80,12 +111,17 @@ export const crmAccount = pgTable(
     teamId: text("team_id")
       .notNull()
       .references(() => team.id, { onDelete: "cascade" }),
-    legalEntityId: text("legal_entity_id"),
+    legalEntityId: text("legal_entity_id").references(() => crmLegalEntity.recordId, {
+      onDelete: "restrict",
+    }),
     organizationId: text("organization_id")
       .notNull()
       .references(() => crmOrganization.recordId, { onDelete: "restrict" }),
     accountType: text("account_type").default("prospect").notNull(),
     relationshipStatus: text("relationship_status").default("active").notNull(),
+    lifecycleStage: text("lifecycle_stage"),
+    segment: text("segment"),
+    territory: text("territory"),
     primaryOwnerPrincipalId: text("primary_owner_principal_id"),
     customerSince: timestamp("customer_since"),
     churnedAt: timestamp("churned_at"),
@@ -96,8 +132,10 @@ export const crmAccount = pgTable(
       .notNull(),
   },
   (table) => [
+    index("crm_account_team_legal_entity_idx").on(table.teamId, table.legalEntityId),
     index("crm_account_team_organization_idx").on(table.teamId, table.organizationId),
     index("crm_account_team_account_type_idx").on(table.teamId, table.accountType),
+    index("crm_account_team_relationship_status_idx").on(table.teamId, table.relationshipStatus),
   ],
 );
 
@@ -201,6 +239,10 @@ export const crmRecordRelations = relations(crmRecord, ({ one, many }) => ({
     fields: [crmRecord.id],
     references: [crmOrganization.recordId],
   }),
+  legalEntity: one(crmLegalEntity, {
+    fields: [crmRecord.id],
+    references: [crmLegalEntity.recordId],
+  }),
   account: one(crmAccount, {
     fields: [crmRecord.id],
     references: [crmAccount.recordId],
@@ -236,6 +278,18 @@ export const crmOrganizationRelations = relations(crmOrganization, ({ one, many 
   accounts: many(crmAccount),
 }));
 
+export const crmLegalEntityRelations = relations(crmLegalEntity, ({ one, many }) => ({
+  record: one(crmRecord, {
+    fields: [crmLegalEntity.recordId],
+    references: [crmRecord.id],
+  }),
+  team: one(team, {
+    fields: [crmLegalEntity.teamId],
+    references: [team.id],
+  }),
+  accounts: many(crmAccount),
+}));
+
 export const crmAccountRelations = relations(crmAccount, ({ one, many }) => ({
   record: one(crmRecord, {
     fields: [crmAccount.recordId],
@@ -248,6 +302,10 @@ export const crmAccountRelations = relations(crmAccount, ({ one, many }) => ({
   organization: one(crmOrganization, {
     fields: [crmAccount.organizationId],
     references: [crmOrganization.recordId],
+  }),
+  legalEntity: one(crmLegalEntity, {
+    fields: [crmAccount.legalEntityId],
+    references: [crmLegalEntity.recordId],
   }),
   opportunities: many(crmOpportunity),
 }));
