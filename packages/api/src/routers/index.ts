@@ -120,6 +120,12 @@ import {
   type IntegrationProvider,
   type InvoiceEmailDeliveryProvider,
 } from "@dawn/integrations";
+import {
+  createAccount as createCrmAccount,
+  createOrganization as createCrmOrganization,
+  createOpportunity as createCrmOpportunity,
+  getAccountSummary as getCrmAccountSummary,
+} from "@dawn/app";
 import { z } from "zod";
 
 import { protectedProcedure, publicProcedure } from "../index";
@@ -671,6 +677,44 @@ const createInvoiceFromTimeEntriesInput = z.object({
   dueDate: z.iso.datetime().nullable().optional(),
   timeEntryIds: z.array(z.string().min(1)).min(1),
   idempotencyKey: z.string().min(1),
+});
+
+const crmCreateOrganizationInput = z.object({
+  teamId: z.string().min(1),
+  legalName: z.string().min(1),
+  displayName: z.string().nullable().optional(),
+  organizationNumber: z.string().nullable().optional(),
+  countryCode: z.string().nullable().optional(),
+  vatNumber: z.string().nullable().optional(),
+  websiteDomain: z.string().nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmCreateAccountInput = z.object({
+  teamId: z.string().min(1),
+  organizationId: z.string().min(1),
+  accountType: z
+    .enum(["prospect", "customer", "partner", "supplier", "former_customer"])
+    .optional(),
+  legalEntityId: z.string().nullable().optional(),
+  primaryOwnerPrincipalId: z.string().nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmCreateOpportunityInput = z.object({
+  teamId: z.string().min(1),
+  accountId: z.string().min(1),
+  name: z.string().min(1),
+  amountMinor: z.number().int(),
+  currencyCode: z.string().regex(/^[A-Z]{3}$/),
+  expectedCloseDate: z.iso.datetime().nullable().optional(),
+  primaryOwnerPrincipalId: z.string().nullable().optional(),
+  idempotencyKey: z.string().min(1),
+});
+
+const crmAccountSummaryInput = z.object({
+  teamId: z.string().min(1),
+  accountId: z.string().min(1),
 });
 
 const createLedgerTransactionInput = z.object({
@@ -1937,6 +1981,85 @@ export function createAppRouter(dependencies: AppRouterDependencies = createDefa
         .handler(async ({ context, input }) => {
           try {
             return await createRecurringInvoiceSchedule(
+              dawnRepository,
+              appRequestFromSession(context, { teamId: input.teamId }),
+              input,
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+    },
+    crm: {
+      createOrganization: protectedProcedure
+        .input(crmCreateOrganizationInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createCrmOrganization(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                displayName: input.displayName ?? null,
+                organizationNumber: input.organizationNumber ?? null,
+                countryCode: input.countryCode ?? null,
+                vatNumber: input.vatNumber ?? null,
+                websiteDomain: input.websiteDomain ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createAccount: protectedProcedure
+        .input(crmCreateAccountInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createCrmAccount(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                accountType: input.accountType,
+                legalEntityId: input.legalEntityId ?? null,
+                primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      createOpportunity: protectedProcedure
+        .input(crmCreateOpportunityInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await createCrmOpportunity(
+              dawnRepository,
+              appRequestFromSession(context, {
+                teamId: input.teamId,
+                idempotencyKey: input.idempotencyKey,
+              }),
+              {
+                ...input,
+                expectedCloseDate: input.expectedCloseDate ?? null,
+                primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
+              },
+            );
+          } catch (error) {
+            mapAppError(error);
+          }
+        }),
+      accountSummary: protectedProcedure
+        .input(crmAccountSummaryInput)
+        .handler(async ({ context, input }) => {
+          try {
+            return await getCrmAccountSummary(
               dawnRepository,
               appRequestFromSession(context, { teamId: input.teamId }),
               input,

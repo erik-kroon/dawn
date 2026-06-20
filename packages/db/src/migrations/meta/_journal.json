@@ -197,6 +197,20 @@
       "when": 1781599600000,
       "tag": "0027_document_extraction_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1781600000000,
+      "tag": "0028_crm_customer_graph_tracer",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1781601200000,
+      "tag": "0029_crm_permissions_request_context",
+      "breakpoints": true
     }
   ]
 }

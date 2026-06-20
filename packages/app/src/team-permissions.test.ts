@@ -276,6 +276,9 @@ describe("team permissions", () => {
         "integrations.read",
         "assistant.use",
         "automations.read",
+        "crm.organizations.read",
+        "crm.accounts.read",
+        "crm.opportunities.read",
       ],
     });
     expect(repository.defaultWorkspaceCalls).toBe(0);

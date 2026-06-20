@@ -10,6 +10,7 @@ import {
 import { MemoryAppRepository } from "@dawn/app/testkit/memory-repository";
 import type { GoogleAuthAccountTokens } from "@dawn/auth";
 import type {
+  Account,
   ApiKey,
   AutomationRule,
   AutomationRun,
@@ -18,6 +19,9 @@ import type {
   AssistantThread,
   AssistantToolCall,
   BusinessInsight,
+  CrmFieldSecurityPolicy,
+  CrmRecord,
+  CrmRecordGrant,
   Customer,
   CustomerContact,
   IntegrationCategory,
@@ -29,6 +33,10 @@ import type {
   InvoiceLineDraft,
   InvoicePayment,
   InboxMatchSuggestion,
+  Opportunity,
+  Organization,
+  Party,
+  PartyType,
   Product,
   Project,
   ProjectMember,
@@ -129,6 +137,17 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
   syncRuns: ProviderSyncRun[] = [];
   teams = new Map<string, string>();
   users = new Map<string, { email: string; name: string }>();
+  crmRecords = new Map<string, CrmRecord>();
+  crmParties = new Map<string, Party>();
+  crmOrganizations = new Map<string, Organization>();
+  crmAccounts = new Map<string, Account>();
+  crmOpportunities = new Map<string, Opportunity>();
+  crmRecordGrants: CrmRecordGrant[] = [];
+  crmFieldSecurityPolicies: CrmFieldSecurityPolicy[] = [];
+
+  async withTransaction<T>(callback: (repository: DawnRepository) => Promise<T>): Promise<T> {
+    return callback(this);
+  }
 
   async getTransactionByProviderTransactionId(teamId: string, providerTransactionId: string) {
     return (
@@ -2255,6 +2274,188 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
       userId: input.userId,
       role: input.role,
     };
+  }
+
+  async getOrganizationForTeam(teamId: string, recordId: string) {
+    return this.crmOrganizations.get(recordId)?.teamId === teamId
+      ? (this.crmOrganizations.get(recordId) ?? null)
+      : null;
+  }
+
+  async getCrmRecordForTeam(teamId: string, recordId: string) {
+    const record = this.crmRecords.get(recordId);
+    return record?.teamId === teamId ? record : null;
+  }
+
+  async listCrmRecordGrantsForPrincipal(input: {
+    teamId: string;
+    recordId: string;
+    principalId: string;
+  }) {
+    return this.crmRecordGrants.filter(
+      (grant) =>
+        grant.teamId === input.teamId &&
+        grant.recordId === input.recordId &&
+        grant.principalId === input.principalId,
+    );
+  }
+
+  async listCrmFieldSecurityPolicies(input: {
+    teamId: string;
+    objectTypeId: string;
+    recordId: string | null;
+    principalId: string;
+  }) {
+    return this.crmFieldSecurityPolicies.filter(
+      (policy) =>
+        policy.teamId === input.teamId &&
+        policy.objectTypeId === input.objectTypeId &&
+        (policy.targetRecordId === null || policy.targetRecordId === input.recordId) &&
+        (policy.principalId === null || policy.principalId === input.principalId),
+    );
+  }
+
+  async getAccountForTeam(teamId: string, recordId: string) {
+    return this.crmAccounts.get(recordId)?.teamId === teamId
+      ? (this.crmAccounts.get(recordId) ?? null)
+      : null;
+  }
+
+  async getOpportunityForTeam(teamId: string, recordId: string) {
+    return this.crmOpportunities.get(recordId)?.teamId === teamId
+      ? (this.crmOpportunities.get(recordId) ?? null)
+      : null;
+  }
+
+  async listOpenOpportunitiesForAccount(teamId: string, accountId: string) {
+    return [...this.crmOpportunities.values()].filter(
+      (opportunity) =>
+        opportunity.teamId === teamId &&
+        opportunity.accountId === accountId &&
+        opportunity.status === "open",
+    );
+  }
+
+  async createCrmRecord(input: {
+    recordId: string;
+    teamId: string;
+    objectTypeId: string;
+    createdByActorId: string;
+    ownerPrincipalId?: string | null;
+  }): Promise<CrmRecord> {
+    const record: CrmRecord = {
+      id: input.recordId,
+      teamId: input.teamId,
+      objectTypeId: input.objectTypeId,
+      ownerPrincipalId: input.ownerPrincipalId ?? input.createdByActorId,
+      lifecycleState: "active",
+      version: 1,
+      createdByActorId: input.createdByActorId,
+      updatedByActorId: input.createdByActorId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      archivedAt: null,
+      deletedAt: null,
+    };
+    this.crmRecords.set(record.id, record);
+    return record;
+  }
+
+  async createCrmParty(input: {
+    recordId: string;
+    teamId: string;
+    partyType: PartyType;
+  }): Promise<Party> {
+    const party: Party = {
+      recordId: input.recordId,
+      teamId: input.teamId,
+      partyType: input.partyType,
+    };
+    this.crmParties.set(party.recordId, party);
+    return party;
+  }
+
+  async createOrganization(input: {
+    recordId: string;
+    teamId: string;
+    legalName: string;
+    displayName?: string | null;
+    organizationNumber?: string | null;
+    countryCode?: string | null;
+    vatNumber?: string | null;
+    websiteDomain?: string | null;
+  }): Promise<Organization> {
+    const now = new Date().toISOString();
+    const organization: Organization = {
+      recordId: input.recordId,
+      teamId: input.teamId,
+      legalName: input.legalName,
+      displayName: input.displayName ?? null,
+      organizationNumber: input.organizationNumber ?? null,
+      countryCode: input.countryCode ?? null,
+      vatNumber: input.vatNumber ?? null,
+      websiteDomain: input.websiteDomain ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.crmOrganizations.set(organization.recordId, organization);
+    return organization;
+  }
+
+  async createAccount(input: {
+    recordId: string;
+    teamId: string;
+    organizationId: string;
+    accountType?: Account["accountType"];
+    legalEntityId?: string | null;
+    primaryOwnerPrincipalId?: string | null;
+  }): Promise<Account> {
+    const now = new Date().toISOString();
+    const account: Account = {
+      recordId: input.recordId,
+      teamId: input.teamId,
+      organizationId: input.organizationId,
+      accountType: input.accountType ?? "prospect",
+      relationshipStatus: "active",
+      legalEntityId: input.legalEntityId ?? null,
+      primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
+      customerSince: null,
+      churnedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.crmAccounts.set(account.recordId, account);
+    return account;
+  }
+
+  async createOpportunity(input: {
+    recordId: string;
+    teamId: string;
+    accountId: string;
+    name: string;
+    amountMinor: number;
+    currencyCode: string;
+    expectedCloseDate?: string | null;
+    primaryOwnerPrincipalId?: string | null;
+  }): Promise<Opportunity> {
+    const now = new Date().toISOString();
+    const opportunity: Opportunity = {
+      recordId: input.recordId,
+      teamId: input.teamId,
+      accountId: input.accountId,
+      name: input.name,
+      amountMinor: input.amountMinor,
+      currencyCode: input.currencyCode,
+      status: "open",
+      expectedCloseDate: input.expectedCloseDate ?? null,
+      primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
+      wonAt: null,
+      lostAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.crmOpportunities.set(opportunity.recordId, opportunity);
+    return opportunity;
   }
 }
 

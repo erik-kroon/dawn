@@ -37,12 +37,14 @@ import type { AutomationUseCaseRepository } from "./automation";
 import type { DeveloperUseCaseRepository } from "./developer";
 import type { EmailInboxUseCaseRepository } from "./email-inbox";
 import type { IntegrationUseCaseRepository } from "./integrations";
+import type { CrmRepository } from "./crm";
 
 export * from "./assistant";
 export * from "./automation";
 export * from "./accountant-packet";
 export * from "./banking-ledger";
 export * from "./billing";
+export * from "./crm";
 export * from "./developer";
 export * from "./documents-inbox";
 export * from "./email-inbox";
@@ -65,6 +67,8 @@ export type TransactionReviewContext = {
   actor: Actor;
   requestId: string;
   teamId?: string;
+  principalId?: string;
+  correlationId?: string;
 };
 
 export type AppRequestSource =
@@ -81,6 +85,14 @@ export type ResolvedAppRequest = TransactionReviewContext & {
   locale: string;
   timezone: string;
   idempotencyKey?: string;
+  session?: {
+    userId: string;
+    email?: string;
+  };
+  membership?: {
+    teamId: string;
+    role: TeamRole;
+  };
 };
 
 export type ResolveAppRequestInput = {
@@ -91,6 +103,9 @@ export type ResolveAppRequestInput = {
   locale?: string | null;
   timezone?: string | null;
   idempotencyKey?: string | null;
+  principalId?: string | null;
+  session?: ResolvedAppRequest["session"] | null;
+  membership?: ResolvedAppRequest["membership"] | null;
 };
 
 export type SessionAppRequestInput = Omit<ResolveAppRequestInput, "actor" | "source"> & {
@@ -101,14 +116,19 @@ export type SessionAppRequestInput = Omit<ResolveAppRequestInput, "actor" | "sou
 };
 
 export function resolveAppRequest(input: ResolveAppRequestInput): ResolvedAppRequest {
+  const requestId = normalizeRequestId(input.requestId);
   return {
     actor: input.actor,
     source: input.source,
-    requestId: normalizeRequestId(input.requestId),
+    requestId,
+    correlationId: requestId,
+    principalId: normalizeOptionalText(input.principalId) ?? input.actor.id,
     teamId: normalizeOptionalText(input.teamId) ?? undefined,
     locale: normalizeOptionalText(input.locale) ?? "en-US",
     timezone: normalizeOptionalText(input.timezone) ?? "UTC",
     idempotencyKey: normalizeOptionalText(input.idempotencyKey) ?? undefined,
+    session: input.session ?? undefined,
+    membership: input.membership ?? undefined,
   };
 }
 
@@ -119,6 +139,11 @@ export function resolveSessionAppRequest(input: SessionAppRequestInput): Resolve
     actor: {
       id: input.user.id,
       type: "user",
+      email: input.user.email ?? undefined,
+    },
+    principalId: input.user.id,
+    session: {
+      userId: input.user.id,
       email: input.user.email ?? undefined,
     },
   });
@@ -266,7 +291,8 @@ export type DawnRepository = BankingUseCaseRepository &
   DeveloperUseCaseRepository &
   EmailInboxUseCaseRepository &
   IntegrationUseCaseRepository &
-  OperationsRepository;
+  OperationsRepository &
+  CrmRepository;
 
 export type OutboxDispatchRepository = {
   withTransaction<T>(callback: (repository: OutboxDispatchRepository) => Promise<T>): Promise<T>;

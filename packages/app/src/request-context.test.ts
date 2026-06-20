@@ -21,10 +21,17 @@ describe("app request intake", () => {
       actor: { id: "user_1", type: "user", email: "owner@example.com" },
       source: "session",
       requestId: "request_1",
+      correlationId: "request_1",
+      principalId: "user_1",
       teamId: "team_1",
       locale: "en-US",
       timezone: "UTC",
       idempotencyKey: undefined,
+      session: {
+        userId: "user_1",
+        email: "owner@example.com",
+      },
+      membership: undefined,
     });
   });
 
@@ -53,6 +60,8 @@ describe("app request intake", () => {
       },
       source: "api_key",
       requestId: "request_1",
+      correlationId: "request_1",
+      principalId: "api_key_1",
       teamId: "team_1",
       locale: "sv-SE",
       timezone: "Europe/Stockholm",
@@ -71,6 +80,8 @@ describe("app request intake", () => {
       actor: { id: "system:bank-sync", type: "system" },
       source: "system_job",
       requestId: "bank:sync:outbox_1",
+      correlationId: "bank:sync:outbox_1",
+      principalId: "system:bank-sync",
       teamId: "team_1",
     });
   });

@@ -34,6 +34,7 @@ import type {
   TransactionImportSession,
 } from "@dawn/app";
 import type {
+  Account,
   Actor,
   ApiKey,
   AutomationRule,
@@ -45,6 +46,9 @@ import type {
   BusinessInsight,
   Category,
   Counterparty,
+  CrmFieldSecurityPolicy,
+  CrmRecord,
+  CrmRecordGrant,
   Customer,
   CustomerContact,
   IntegrationCategory,
@@ -57,6 +61,10 @@ import type {
   InvoicePayment,
   OAuthApp,
   OAuthGrant,
+  Opportunity,
+  Organization,
+  Party,
+  PartyType,
   LedgerAccount,
   LedgerTransactionDraft,
   Product,
@@ -4552,6 +4560,275 @@ export class DrizzleDawnRepository implements DrizzleRepository {
 
     return mapTeamMember(membership);
   }
+
+  async getCrmRecordForTeam(teamId: string, recordId: string): Promise<CrmRecord | null> {
+    const [record] = await this.client
+      .select()
+      .from(schema.crmRecord)
+      .where(and(eq(schema.crmRecord.teamId, teamId), eq(schema.crmRecord.id, recordId)))
+      .limit(1);
+
+    return record ? mapCrmRecord(record) : null;
+  }
+
+  async listCrmRecordGrantsForPrincipal(input: {
+    teamId: string;
+    recordId: string;
+    principalId: string;
+  }): Promise<CrmRecordGrant[]> {
+    const grants = await this.client
+      .select()
+      .from(schema.crmRecordGrant)
+      .where(
+        and(
+          eq(schema.crmRecordGrant.teamId, input.teamId),
+          eq(schema.crmRecordGrant.recordId, input.recordId),
+          eq(schema.crmRecordGrant.principalId, input.principalId),
+        ),
+      );
+
+    return grants.map(mapCrmRecordGrant);
+  }
+
+  async listCrmFieldSecurityPolicies(input: {
+    teamId: string;
+    objectTypeId: string;
+    recordId: string | null;
+    principalId: string;
+  }): Promise<CrmFieldSecurityPolicy[]> {
+    const policies = await this.client
+      .select()
+      .from(schema.crmFieldSecurityPolicy)
+      .where(
+        and(
+          eq(schema.crmFieldSecurityPolicy.teamId, input.teamId),
+          eq(schema.crmFieldSecurityPolicy.objectTypeId, input.objectTypeId),
+          input.recordId
+            ? or(
+                isNull(schema.crmFieldSecurityPolicy.targetRecordId),
+                eq(schema.crmFieldSecurityPolicy.targetRecordId, input.recordId),
+              )
+            : isNull(schema.crmFieldSecurityPolicy.targetRecordId),
+          or(
+            isNull(schema.crmFieldSecurityPolicy.principalId),
+            eq(schema.crmFieldSecurityPolicy.principalId, input.principalId),
+          ),
+        ),
+      );
+
+    return policies.map(mapCrmFieldSecurityPolicy);
+  }
+
+  async getOrganizationForTeam(teamId: string, recordId: string): Promise<Organization | null> {
+    const [organization] = await this.client
+      .select()
+      .from(schema.crmOrganization)
+      .where(
+        and(
+          eq(schema.crmOrganization.teamId, teamId),
+          eq(schema.crmOrganization.recordId, recordId),
+        ),
+      )
+      .limit(1);
+
+    return organization ? mapOrganization(organization) : null;
+  }
+
+  async getAccountForTeam(teamId: string, recordId: string): Promise<Account | null> {
+    const [account] = await this.client
+      .select()
+      .from(schema.crmAccount)
+      .where(and(eq(schema.crmAccount.teamId, teamId), eq(schema.crmAccount.recordId, recordId)))
+      .limit(1);
+
+    return account ? mapAccount(account) : null;
+  }
+
+  async getOpportunityForTeam(teamId: string, recordId: string): Promise<Opportunity | null> {
+    const [opportunity] = await this.client
+      .select()
+      .from(schema.crmOpportunity)
+      .where(
+        and(eq(schema.crmOpportunity.teamId, teamId), eq(schema.crmOpportunity.recordId, recordId)),
+      )
+      .limit(1);
+
+    return opportunity ? mapOpportunity(opportunity) : null;
+  }
+
+  async listOpenOpportunitiesForAccount(teamId: string, accountId: string): Promise<Opportunity[]> {
+    const opportunities = await this.client
+      .select()
+      .from(schema.crmOpportunity)
+      .where(
+        and(
+          eq(schema.crmOpportunity.teamId, teamId),
+          eq(schema.crmOpportunity.accountId, accountId),
+          eq(schema.crmOpportunity.status, "open"),
+        ),
+      )
+      .orderBy(desc(schema.crmOpportunity.createdAt));
+
+    return opportunities.map(mapOpportunity);
+  }
+
+  async createCrmRecord(input: {
+    recordId: string;
+    teamId: string;
+    objectTypeId: string;
+    createdByActorId: string;
+    ownerPrincipalId?: string | null;
+  }): Promise<CrmRecord> {
+    const now = new Date();
+    const [record] = await this.client
+      .insert(schema.crmRecord)
+      .values({
+        id: input.recordId,
+        teamId: input.teamId,
+        objectTypeId: input.objectTypeId,
+        ownerPrincipalId: input.ownerPrincipalId ?? input.createdByActorId,
+        lifecycleState: "active",
+        version: 1,
+        createdByActorId: input.createdByActorId,
+        updatedByActorId: input.createdByActorId,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        deletedAt: null,
+      })
+      .returning();
+
+    if (!record) {
+      throw new Error("CRM record was not created");
+    }
+
+    return mapCrmRecord(record);
+  }
+
+  async createCrmParty(input: {
+    recordId: string;
+    teamId: string;
+    partyType: PartyType;
+  }): Promise<Party> {
+    const [party] = await this.client
+      .insert(schema.crmParty)
+      .values({
+        recordId: input.recordId,
+        teamId: input.teamId,
+        partyType: input.partyType,
+      })
+      .returning();
+
+    if (!party) {
+      throw new Error("CRM party was not created");
+    }
+
+    return mapParty(party);
+  }
+
+  async createOrganization(input: {
+    recordId: string;
+    teamId: string;
+    legalName: string;
+    displayName?: string | null;
+    organizationNumber?: string | null;
+    countryCode?: string | null;
+    vatNumber?: string | null;
+    websiteDomain?: string | null;
+  }): Promise<Organization> {
+    const now = new Date();
+    const [organization] = await this.client
+      .insert(schema.crmOrganization)
+      .values({
+        recordId: input.recordId,
+        teamId: input.teamId,
+        legalName: input.legalName,
+        displayName: input.displayName ?? null,
+        organizationNumber: input.organizationNumber ?? null,
+        countryCode: input.countryCode ?? null,
+        vatNumber: input.vatNumber ?? null,
+        websiteDomain: input.websiteDomain ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!organization) {
+      throw new Error("Organization was not created");
+    }
+
+    return mapOrganization(organization);
+  }
+
+  async createAccount(input: {
+    recordId: string;
+    teamId: string;
+    organizationId: string;
+    accountType?: Account["accountType"];
+    legalEntityId?: string | null;
+    primaryOwnerPrincipalId?: string | null;
+  }): Promise<Account> {
+    const now = new Date();
+    const [account] = await this.client
+      .insert(schema.crmAccount)
+      .values({
+        recordId: input.recordId,
+        teamId: input.teamId,
+        organizationId: input.organizationId,
+        accountType: input.accountType ?? "prospect",
+        relationshipStatus: "active",
+        legalEntityId: input.legalEntityId ?? null,
+        primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
+        customerSince: null,
+        churnedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!account) {
+      throw new Error("Account was not created");
+    }
+
+    return mapAccount(account);
+  }
+
+  async createOpportunity(input: {
+    recordId: string;
+    teamId: string;
+    accountId: string;
+    name: string;
+    amountMinor: number;
+    currencyCode: string;
+    expectedCloseDate?: string | null;
+    primaryOwnerPrincipalId?: string | null;
+  }): Promise<Opportunity> {
+    const now = new Date();
+    const [opportunity] = await this.client
+      .insert(schema.crmOpportunity)
+      .values({
+        recordId: input.recordId,
+        teamId: input.teamId,
+        accountId: input.accountId,
+        name: input.name,
+        amountMinor: input.amountMinor,
+        currencyCode: input.currencyCode,
+        status: "open",
+        expectedCloseDate: input.expectedCloseDate ? new Date(input.expectedCloseDate) : null,
+        primaryOwnerPrincipalId: input.primaryOwnerPrincipalId ?? null,
+        wonAt: null,
+        lostAt: null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    if (!opportunity) {
+      throw new Error("Opportunity was not created");
+    }
+
+    return mapOpportunity(opportunity);
+  }
 }
 
 function mapCategory(category: typeof schema.transactionCategory.$inferSelect): Category {
@@ -5412,5 +5689,107 @@ function mapTeamMember(membership: typeof schema.teamMembership.$inferSelect): T
   return {
     id: membership.id,
     ...mapTeamMembership(membership),
+  };
+}
+
+function mapCrmRecord(record: typeof schema.crmRecord.$inferSelect): CrmRecord {
+  return {
+    id: record.id,
+    teamId: record.teamId,
+    objectTypeId: record.objectTypeId,
+    ownerPrincipalId: record.ownerPrincipalId,
+    lifecycleState: record.lifecycleState as CrmRecord["lifecycleState"],
+    version: record.version,
+    createdByActorId: record.createdByActorId,
+    updatedByActorId: record.updatedByActorId,
+    createdAt: record.createdAt.toISOString(),
+    updatedAt: record.updatedAt.toISOString(),
+    archivedAt: record.archivedAt?.toISOString() ?? null,
+    deletedAt: record.deletedAt?.toISOString() ?? null,
+  };
+}
+
+function mapCrmRecordGrant(grant: typeof schema.crmRecordGrant.$inferSelect): CrmRecordGrant {
+  return {
+    id: grant.id,
+    teamId: grant.teamId,
+    recordId: grant.recordId,
+    principalId: grant.principalId,
+    action: grant.action as CrmRecordGrant["action"],
+    grantedByActorId: grant.grantedByActorId,
+    createdAt: grant.createdAt.toISOString(),
+    expiresAt: grant.expiresAt?.toISOString() ?? null,
+  };
+}
+
+function mapCrmFieldSecurityPolicy(
+  policy: typeof schema.crmFieldSecurityPolicy.$inferSelect,
+): CrmFieldSecurityPolicy {
+  return {
+    id: policy.id,
+    teamId: policy.teamId,
+    targetRecordId: policy.targetRecordId,
+    objectTypeId: policy.objectTypeId,
+    principalId: policy.principalId,
+    fieldId: policy.fieldId,
+    action: policy.action as CrmFieldSecurityPolicy["action"],
+    effect: policy.effect as CrmFieldSecurityPolicy["effect"],
+  };
+}
+
+function mapParty(party: typeof schema.crmParty.$inferSelect): Party {
+  return {
+    recordId: party.recordId,
+    teamId: party.teamId,
+    partyType: party.partyType as PartyType,
+  };
+}
+
+function mapOrganization(organization: typeof schema.crmOrganization.$inferSelect): Organization {
+  return {
+    recordId: organization.recordId,
+    teamId: organization.teamId,
+    legalName: organization.legalName,
+    displayName: organization.displayName,
+    organizationNumber: organization.organizationNumber,
+    countryCode: organization.countryCode,
+    vatNumber: organization.vatNumber,
+    websiteDomain: organization.websiteDomain,
+    createdAt: organization.createdAt.toISOString(),
+    updatedAt: organization.updatedAt.toISOString(),
+  };
+}
+
+function mapAccount(account: typeof schema.crmAccount.$inferSelect): Account {
+  return {
+    recordId: account.recordId,
+    teamId: account.teamId,
+    legalEntityId: account.legalEntityId,
+    organizationId: account.organizationId,
+    accountType: account.accountType as Account["accountType"],
+    relationshipStatus: account.relationshipStatus as Account["relationshipStatus"],
+    primaryOwnerPrincipalId: account.primaryOwnerPrincipalId,
+    customerSince: account.customerSince?.toISOString() ?? null,
+    churnedAt: account.churnedAt?.toISOString() ?? null,
+    createdAt: account.createdAt.toISOString(),
+    updatedAt: account.updatedAt.toISOString(),
+  };
+}
+
+function mapOpportunity(opportunity: typeof schema.crmOpportunity.$inferSelect): Opportunity {
+  return {
+    recordId: opportunity.recordId,
+    teamId: opportunity.teamId,
+    accountId: opportunity.accountId,
+    name: opportunity.name,
+    amountMinor: opportunity.amountMinor,
+    currencyCode: opportunity.currencyCode,
+    status: opportunity.status as Opportunity["status"],
+    expectedCloseDate: opportunity.expectedCloseDate?.toISOString() ?? null,
+    primaryOwnerPrincipalId: opportunity.primaryOwnerPrincipalId,
+    wonAt: opportunity.wonAt?.toISOString() ?? null,
+    lostAt: opportunity.lostAt?.toISOString() ?? null,
+    createdAt: opportunity.createdAt.toISOString(),
+    updatedAt: opportunity.updatedAt.toISOString(),
   };
 }

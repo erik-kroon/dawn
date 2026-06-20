@@ -47,6 +47,9 @@ describe("team role permissions", () => {
       "integrations.read",
       "assistant.use",
       "automations.read",
+      "crm.organizations.read",
+      "crm.accounts.read",
+      "crm.opportunities.read",
     ]);
     expect(roleHasPermission("viewer", "operations.read")).toBe(false);
   });

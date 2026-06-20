@@ -8,6 +8,8 @@ export * from "./projects";
 export * from "./reports";
 export * from "./assistant";
 export * from "./automations";
+export * from "./crm";
+export * from "./crm-permissions";
 export * from "./developer";
 export * from "./integrations";
 export * from "./inbox-matching";

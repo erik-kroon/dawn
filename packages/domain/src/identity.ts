@@ -32,7 +32,13 @@ export type Permission =
   | "automations.write"
   | "automations.run"
   | "operations.read"
-  | "webhooks.manage";
+  | "webhooks.manage"
+  | "crm.organizations.read"
+  | "crm.organizations.write"
+  | "crm.accounts.read"
+  | "crm.accounts.write"
+  | "crm.opportunities.read"
+  | "crm.opportunities.write";
 
 export const publicApiScopes = [
   "transactions.read",
@@ -178,6 +184,18 @@ export function permissionsForPublicApiScopes(scopes: readonly PublicApiScope[])
   return [...new Set(scopes.flatMap(permissionsForPublicApiScope))];
 }
 
+const crmReadPermissions = [
+  "crm.organizations.read",
+  "crm.accounts.read",
+  "crm.opportunities.read",
+] as const;
+
+const crmWritePermissions = [
+  "crm.organizations.write",
+  "crm.accounts.write",
+  "crm.opportunities.write",
+] as const;
+
 export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
   owner: [
     "transactions.read",
@@ -204,6 +222,8 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "automations.run",
     "operations.read",
     "webhooks.manage",
+    ...crmReadPermissions,
+    ...crmWritePermissions,
   ],
   admin: [
     "transactions.read",
@@ -229,6 +249,8 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "automations.run",
     "operations.read",
     "webhooks.manage",
+    ...crmReadPermissions,
+    ...crmWritePermissions,
   ],
   member: [
     "transactions.read",
@@ -244,6 +266,8 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "integrations.read",
     "assistant.use",
     "automations.read",
+    ...crmReadPermissions,
+    ...crmWritePermissions,
   ],
   accountant: [
     "transactions.read",
@@ -254,6 +278,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "integrations.read",
     "assistant.use",
     "automations.read",
+    ...crmReadPermissions,
   ],
   viewer: [
     "transactions.read",
@@ -263,6 +288,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "integrations.read",
     "assistant.use",
     "automations.read",
+    ...crmReadPermissions,
   ],
 };
 
