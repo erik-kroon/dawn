@@ -8,6 +8,7 @@ import {
 } from "node:crypto";
 
 import {
+  type InvoiceHandoffProviderPayload,
   normalizeFortnoxArticleNumber,
   normalizeFortnoxCustomerNumber,
   normalizeSwedishOrganizationNumber,
@@ -359,6 +360,76 @@ export type TicSignatureProvider = {
   displayName: string;
   createSignatureRequest(input: TicSignatureRequestInput): Promise<TicSignatureSession>;
   parseCompletionWebhook(input: { body: string }): TicSignatureCompletion;
+};
+
+export type TicCompanyRolesRequestInput = {
+  teamId: string;
+  providerSessionId: string;
+  signatureRequestId: string;
+  signatureEvidenceId: string;
+  sourceOrganizationNumber: string | null;
+  idempotencyKey: string;
+};
+
+export type TicCompanyRole = {
+  positionType: string | null;
+  positionDescription: string;
+  positionStart: string | null;
+  positionEnd: string | null;
+};
+
+export type TicCompanyRolesEnrichment = {
+  provider: "tic";
+  providerRequestId: string;
+  providerEventId: string | null;
+  providerSessionId: string;
+  status: "completed" | "partially_completed" | "failed" | "unavailable";
+  companyRegistrationNumber: string | null;
+  legalName: string | null;
+  legalEntityType: string | null;
+  companyStatus: string | null;
+  roles: TicCompanyRole[];
+  signatureDescription: string | null;
+  signingAuthorityAnalysis: {
+    summary: string;
+    confidence?: "low" | "medium" | "high" | null;
+    reasons?: readonly string[];
+  } | null;
+  requestedAt: string;
+  completedAt: string | null;
+  rawPayload: ProviderRawPayload;
+  rawPayloadReference?: string | null;
+};
+
+export type TicCompanyRolesProvider = {
+  provider: "tic";
+  displayName: string;
+  requestCompanyRoles(input: TicCompanyRolesRequestInput): Promise<TicCompanyRolesEnrichment>;
+};
+
+export type FortnoxInvoiceCreateInput = {
+  teamId: string;
+  connectionId: string;
+  providerConnectionId: string;
+  token?: IntegrationProviderToken | null;
+  payload: InvoiceHandoffProviderPayload;
+  idempotencyKey: string;
+};
+
+export type FortnoxInvoiceCreateResult = {
+  provider: "fortnox";
+  providerInvoiceId: string;
+  invoiceNumber: string;
+  invoiceUrl: string | null;
+  providerStatus: "created" | "booked" | "sent" | "paid" | "cancelled";
+  paymentStatus: "unpaid" | "partially_paid" | "paid";
+  rawPayload: ProviderRawPayload;
+};
+
+export type FortnoxInvoiceProvider = {
+  provider: "fortnox";
+  displayName: string;
+  createInvoice(input: FortnoxInvoiceCreateInput): Promise<FortnoxInvoiceCreateResult>;
 };
 
 export type FortnoxTokenBundle = {
@@ -1276,6 +1347,53 @@ export function createMockFortnoxIntegrationProvider(
       };
     },
   };
+}
+
+export function createMockFortnoxInvoiceProvider(input: { now?: () => Date } = {}) {
+  const now = input.now ?? (() => new Date("2026-06-15T10:00:00.000Z"));
+
+  return {
+    provider: "fortnox" as const,
+    displayName: "Fortnox invoice writer",
+    async createInvoice(command: FortnoxInvoiceCreateInput): Promise<FortnoxInvoiceCreateResult> {
+      const suffix = hashProviderPayload({
+        teamId: command.teamId,
+        connectionId: command.connectionId,
+        documentVersionId: command.payload.documentVersionId,
+      });
+      const providerInvoiceId = `invoice_${suffix}`;
+      const invoiceNumber = `${command.payload.customerNumber}-${suffix.slice(0, 6)}`;
+
+      return {
+        provider: "fortnox",
+        providerInvoiceId,
+        invoiceNumber,
+        invoiceUrl: `https://app.fortnox.se/invoices/${providerInvoiceId}`,
+        providerStatus: "created",
+        paymentStatus: "unpaid",
+        rawPayload: {
+          mock: true,
+          provider: "fortnox",
+          providerConnectionId: command.providerConnectionId,
+          connectionId: command.connectionId,
+          idempotencyKey: command.idempotencyKey,
+          createdAt: now().toISOString(),
+          invoice: {
+            id: providerInvoiceId,
+            number: invoiceNumber,
+            status: "created",
+            paymentStatus: "unpaid",
+            customerNumber: command.payload.customerNumber,
+            total: command.payload.totals.total,
+            currency: command.payload.currency,
+            paymentTerms: command.payload.paymentTerms,
+            documentVersionId: command.payload.documentVersionId,
+            pdfSha256: command.payload.pdfSha256,
+          },
+        },
+      };
+    },
+  } satisfies FortnoxInvoiceProvider;
 }
 
 export function createMockIntegrationProvider(input: {
@@ -2543,6 +2661,80 @@ export function createMockTicSignatureProvider(): TicSignatureProvider {
         evidenceObjectKey:
           typeof payload.evidenceObjectKey === "string" ? payload.evidenceObjectKey : null,
         rawPayload: payload,
+      };
+    },
+  };
+}
+
+export function createMockTicCompanyRolesProvider(input?: {
+  fixtures?: Record<string, Partial<TicCompanyRolesEnrichment>>;
+}): TicCompanyRolesProvider {
+  const fixtures = input?.fixtures ?? {};
+
+  return {
+    provider: "tic",
+    displayName: "Mock TIC CompanyRoles",
+    async requestCompanyRoles(request) {
+      const fixture = fixtures[request.providerSessionId] ?? fixtures[request.idempotencyKey] ?? {};
+      const requestedAt = new Date().toISOString();
+      const status = fixture.status ?? "completed";
+      const providerRequestId =
+        fixture.providerRequestId ??
+        `tic_company_roles_${hashMockDelivery([
+          request.teamId,
+          request.providerSessionId,
+          request.signatureEvidenceId,
+          request.idempotencyKey,
+        ])}`;
+      const providerEventId = fixture.providerEventId ?? `${providerRequestId}_completed`;
+      const companyRegistrationNumber =
+        fixture.companyRegistrationNumber ?? request.sourceOrganizationNumber;
+      const roles =
+        fixture.roles ??
+        (status === "completed"
+          ? [
+              {
+                positionType: "signatory",
+                positionDescription: "Firmatecknare",
+                positionStart: null,
+                positionEnd: null,
+              },
+            ]
+          : []);
+
+      return {
+        provider: "tic",
+        providerRequestId,
+        providerEventId: status === "completed" ? providerEventId : null,
+        providerSessionId: request.providerSessionId,
+        status,
+        companyRegistrationNumber: companyRegistrationNumber ?? null,
+        legalName: fixture.legalName ?? "Buyer AB",
+        legalEntityType: fixture.legalEntityType ?? "Aktiebolag",
+        companyStatus: fixture.companyStatus ?? (status === "completed" ? "Aktiv" : null),
+        roles,
+        signatureDescription: fixture.signatureDescription ?? roles[0]?.positionDescription ?? null,
+        signingAuthorityAnalysis:
+          fixture.signingAuthorityAnalysis ??
+          (status === "completed"
+            ? {
+                summary: "Mock analysis based on CompanyRoles evidence.",
+                confidence: "medium",
+                reasons: ["CompanyRoles returned an active signatory role."],
+              }
+            : null),
+        requestedAt,
+        completedAt: status === "completed" ? requestedAt : null,
+        rawPayload: {
+          mock: true,
+          provider: "tic",
+          capability: "CompanyRoles",
+          providerRequestId,
+          providerSessionId: request.providerSessionId,
+          status,
+          ...fixture.rawPayload,
+        },
+        rawPayloadReference: fixture.rawPayloadReference ?? null,
       };
     },
   };

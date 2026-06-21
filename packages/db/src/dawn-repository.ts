@@ -69,6 +69,8 @@ import type {
   IntegrationConnection,
   IntegrationSyncRun,
   IntegrationSyncRunStatus,
+  InvoiceHandoff,
+  InvoiceHandoffPolicy,
   InvoiceEvent,
   InvoiceDraft,
   InvoiceLineDraft,
@@ -104,6 +106,8 @@ import type {
   Transaction,
   TransactionAccountantStatus,
   TransactionTag,
+  TrustCheck,
+  TrustCheckPolicy,
   WebhookDelivery,
   WebhookSubscription,
   InboxMatchCandidate,
@@ -6788,6 +6792,543 @@ export class DrizzleDawnRepository implements DrizzleRepository {
     return mapSignatureEvidence(evidence);
   }
 
+  async getTrustPolicy(teamId: string): Promise<TrustCheckPolicy | null> {
+    const [policy] = await this.client
+      .select()
+      .from(schema.trustPolicy)
+      .where(eq(schema.trustPolicy.teamId, teamId))
+      .limit(1);
+
+    return policy ? mapTrustPolicy(policy) : null;
+  }
+
+  async upsertTrustPolicy(input: {
+    teamId: string;
+    mode: TrustCheckPolicy["mode"];
+    updatedByActorId: string;
+    updatedAt: string;
+  }): Promise<TrustCheckPolicy> {
+    const [policy] = await this.client
+      .insert(schema.trustPolicy)
+      .values({
+        teamId: input.teamId,
+        mode: input.mode,
+        updatedByActorId: input.updatedByActorId,
+        updatedAt: new Date(input.updatedAt),
+      })
+      .onConflictDoUpdate({
+        target: schema.trustPolicy.teamId,
+        set: {
+          mode: input.mode,
+          updatedByActorId: input.updatedByActorId,
+          updatedAt: new Date(input.updatedAt),
+        },
+      })
+      .returning();
+
+    if (!policy) {
+      throw new Error("Trust policy was not saved");
+    }
+
+    return mapTrustPolicy(policy);
+  }
+
+  async getTrustCheckForTeam(teamId: string, trustCheckId: string): Promise<TrustCheck | null> {
+    const [trustCheck] = await this.client
+      .select()
+      .from(schema.trustCheck)
+      .where(and(eq(schema.trustCheck.teamId, teamId), eq(schema.trustCheck.id, trustCheckId)))
+      .limit(1);
+
+    return trustCheck ? mapTrustCheck(trustCheck) : null;
+  }
+
+  async getLatestTrustCheckForSignatureRequest(input: {
+    teamId: string;
+    signatureRequestId: string;
+  }): Promise<TrustCheck | null> {
+    const [trustCheck] = await this.client
+      .select()
+      .from(schema.trustCheck)
+      .where(
+        and(
+          eq(schema.trustCheck.teamId, input.teamId),
+          eq(schema.trustCheck.signatureRequestId, input.signatureRequestId),
+        ),
+      )
+      .orderBy(desc(schema.trustCheck.requestedAt))
+      .limit(1);
+
+    return trustCheck ? mapTrustCheck(trustCheck) : null;
+  }
+
+  async getLatestTrustCheckForSignatureEvidence(input: {
+    teamId: string;
+    signatureEvidenceId: string;
+  }): Promise<TrustCheck | null> {
+    const [trustCheck] = await this.client
+      .select()
+      .from(schema.trustCheck)
+      .where(
+        and(
+          eq(schema.trustCheck.teamId, input.teamId),
+          eq(schema.trustCheck.signatureEvidenceId, input.signatureEvidenceId),
+        ),
+      )
+      .orderBy(desc(schema.trustCheck.requestedAt))
+      .limit(1);
+
+    return trustCheck ? mapTrustCheck(trustCheck) : null;
+  }
+
+  async listTrustChecksForDocument(input: {
+    teamId: string;
+    documentId: string;
+  }): Promise<TrustCheck[]> {
+    const checks = await this.client
+      .select()
+      .from(schema.trustCheck)
+      .where(
+        and(
+          eq(schema.trustCheck.teamId, input.teamId),
+          eq(schema.trustCheck.documentId, input.documentId),
+        ),
+      )
+      .orderBy(desc(schema.trustCheck.requestedAt));
+
+    return checks.map(mapTrustCheck);
+  }
+
+  async createTrustCheck(input: {
+    trustCheckId: string;
+    teamId: string;
+    accountId: string;
+    opportunityId: string;
+    documentId: string;
+    documentVersionId: string;
+    signatureRequestId: string;
+    signatureEvidenceId: string;
+    signaturePartyId: string | null;
+    provider: "tic";
+    providerSessionId: string;
+    sourceOrganizationNumber: string | null;
+    signerName: string;
+    signerEmail: string | null;
+    signerPersonalNumberMasked: string | null;
+    legalBasis: string;
+    purpose: string;
+    retentionUntil: string | null;
+    requestedAt: string;
+  }): Promise<TrustCheck> {
+    const requestedAt = new Date(input.requestedAt);
+    const [trustCheck] = await this.client
+      .insert(schema.trustCheck)
+      .values({
+        id: input.trustCheckId,
+        teamId: input.teamId,
+        accountId: input.accountId,
+        opportunityId: input.opportunityId,
+        documentId: input.documentId,
+        documentVersionId: input.documentVersionId,
+        signatureRequestId: input.signatureRequestId,
+        signatureEvidenceId: input.signatureEvidenceId,
+        signaturePartyId: input.signaturePartyId,
+        provider: input.provider,
+        providerSessionId: input.providerSessionId,
+        sourceOrganizationNumber: input.sourceOrganizationNumber,
+        signerName: input.signerName,
+        signerEmail: input.signerEmail,
+        signerPersonalNumberMasked: input.signerPersonalNumberMasked,
+        status: "pending",
+        resultReason: "pending",
+        roleEvidence: [],
+        originalSourceDescriptions: [],
+        rawPayload: {},
+        legalBasis: input.legalBasis,
+        purpose: input.purpose,
+        retentionUntil: input.retentionUntil ? new Date(input.retentionUntil) : null,
+        requestedAt,
+        createdAt: requestedAt,
+        updatedAt: requestedAt,
+      })
+      .returning();
+
+    if (!trustCheck) {
+      throw new Error("Trust check was not created");
+    }
+
+    return mapTrustCheck(trustCheck);
+  }
+
+  async markTrustCheckCompleted(input: {
+    teamId: string;
+    trustCheckId: string;
+    status: TrustCheck["status"];
+    resultReason: string;
+    providerRequestId: string | null;
+    providerEventId: string | null;
+    companyRegistrationNumber: string | null;
+    companyLegalName: string | null;
+    companyStatus: string | null;
+    roleEvidence: TrustCheck["roleEvidence"];
+    signatureDescription: string | null;
+    advisoryAnalysis: TrustCheck["advisoryAnalysis"];
+    originalSourceDescriptions: string[];
+    rawPayload: Record<string, unknown>;
+    rawPayloadReference: string | null;
+    completedAt: string | null;
+  }): Promise<TrustCheck | null> {
+    const completedAt = input.completedAt ? new Date(input.completedAt) : null;
+    const updatedAt = completedAt ?? new Date();
+    const [trustCheck] = await this.client
+      .update(schema.trustCheck)
+      .set({
+        status: input.status,
+        resultReason: input.resultReason,
+        providerRequestId: input.providerRequestId,
+        providerEventId: input.providerEventId,
+        companyRegistrationNumber: input.companyRegistrationNumber,
+        companyLegalName: input.companyLegalName,
+        companyStatus: input.companyStatus,
+        roleEvidence: input.roleEvidence,
+        signatureDescription: input.signatureDescription,
+        advisoryAnalysis: input.advisoryAnalysis,
+        originalSourceDescriptions: input.originalSourceDescriptions,
+        rawPayload: input.rawPayload,
+        rawPayloadReference: input.rawPayloadReference,
+        completedAt,
+        updatedAt,
+      })
+      .where(
+        and(
+          eq(schema.trustCheck.teamId, input.teamId),
+          eq(schema.trustCheck.id, input.trustCheckId),
+        ),
+      )
+      .returning();
+
+    return trustCheck ? mapTrustCheck(trustCheck) : null;
+  }
+
+  async markTrustCheckReviewed(input: {
+    teamId: string;
+    trustCheckId: string;
+    status: Extract<TrustCheck["status"], "approved" | "rejected">;
+    decision: TrustCheck["reviewDecision"];
+    reviewedAt: string;
+    reviewerActorId: string;
+    rationale: string;
+  }): Promise<TrustCheck | null> {
+    const reviewedAt = new Date(input.reviewedAt);
+    const [trustCheck] = await this.client
+      .update(schema.trustCheck)
+      .set({
+        status: input.status,
+        reviewedAt,
+        reviewerActorId: input.reviewerActorId,
+        reviewDecision: input.decision,
+        reviewRationale: input.rationale,
+        updatedAt: reviewedAt,
+      })
+      .where(
+        and(
+          eq(schema.trustCheck.teamId, input.teamId),
+          eq(schema.trustCheck.id, input.trustCheckId),
+        ),
+      )
+      .returning();
+
+    return trustCheck ? mapTrustCheck(trustCheck) : null;
+  }
+
+  async getInvoiceHandoffPolicy(teamId: string): Promise<InvoiceHandoffPolicy | null> {
+    const [policy] = await this.client
+      .select()
+      .from(schema.invoiceHandoffPolicy)
+      .where(eq(schema.invoiceHandoffPolicy.teamId, teamId))
+      .limit(1);
+
+    return policy ? mapInvoiceHandoffPolicy(policy) : null;
+  }
+
+  async upsertInvoiceHandoffPolicy(input: {
+    teamId: string;
+    mode: InvoiceHandoffPolicy["mode"];
+    updatedByActorId: string;
+    updatedAt: string;
+  }): Promise<InvoiceHandoffPolicy> {
+    const updatedAt = new Date(input.updatedAt);
+    const [policy] = await this.client
+      .insert(schema.invoiceHandoffPolicy)
+      .values({
+        teamId: input.teamId,
+        mode: input.mode,
+        updatedByActorId: input.updatedByActorId,
+        updatedAt,
+      })
+      .onConflictDoUpdate({
+        target: schema.invoiceHandoffPolicy.teamId,
+        set: {
+          mode: input.mode,
+          updatedByActorId: input.updatedByActorId,
+          updatedAt,
+        },
+      })
+      .returning();
+
+    if (!policy) {
+      throw new Error("Invoice handoff policy was not saved");
+    }
+
+    return mapInvoiceHandoffPolicy(policy);
+  }
+
+  async getInvoiceHandoffForTeam(
+    teamId: string,
+    handoffId: string,
+  ): Promise<InvoiceHandoff | null> {
+    const [handoff] = await this.client
+      .select()
+      .from(schema.invoiceHandoff)
+      .where(and(eq(schema.invoiceHandoff.teamId, teamId), eq(schema.invoiceHandoff.id, handoffId)))
+      .limit(1);
+
+    return handoff ? mapInvoiceHandoff(handoff) : null;
+  }
+
+  async getActiveInvoiceHandoffForDocumentVersion(input: {
+    teamId: string;
+    provider: "fortnox";
+    documentVersionId: string;
+  }): Promise<InvoiceHandoff | null> {
+    const [handoff] = await this.client
+      .select()
+      .from(schema.invoiceHandoff)
+      .where(
+        and(
+          eq(schema.invoiceHandoff.teamId, input.teamId),
+          eq(schema.invoiceHandoff.provider, input.provider),
+          eq(schema.invoiceHandoff.documentVersionId, input.documentVersionId),
+          ne(schema.invoiceHandoff.status, "failed"),
+        ),
+      )
+      .orderBy(desc(schema.invoiceHandoff.createdAt))
+      .limit(1);
+
+    return handoff ? mapInvoiceHandoff(handoff) : null;
+  }
+
+  async listInvoiceHandoffsForDocument(input: {
+    teamId: string;
+    documentId: string;
+  }): Promise<InvoiceHandoff[]> {
+    const handoffs = await this.client
+      .select()
+      .from(schema.invoiceHandoff)
+      .where(
+        and(
+          eq(schema.invoiceHandoff.teamId, input.teamId),
+          eq(schema.invoiceHandoff.documentId, input.documentId),
+        ),
+      )
+      .orderBy(desc(schema.invoiceHandoff.createdAt));
+
+    return handoffs.map(mapInvoiceHandoff);
+  }
+
+  async createInvoiceHandoff(input: {
+    handoffId: string;
+    teamId: string;
+    accountId: string;
+    opportunityId: string;
+    documentId: string;
+    documentVersionId: string;
+    signatureRequestId: string;
+    provider: "fortnox";
+    connectionId: string;
+    status: InvoiceHandoff["status"];
+    requestedByActorId: string;
+    requestedAt: string;
+    requestPayload: Record<string, unknown>;
+  }): Promise<InvoiceHandoff> {
+    const requestedAt = new Date(input.requestedAt);
+    const [handoff] = await this.client
+      .insert(schema.invoiceHandoff)
+      .values({
+        id: input.handoffId,
+        teamId: input.teamId,
+        accountId: input.accountId,
+        opportunityId: input.opportunityId,
+        documentId: input.documentId,
+        documentVersionId: input.documentVersionId,
+        signatureRequestId: input.signatureRequestId,
+        provider: input.provider,
+        connectionId: input.connectionId,
+        status: input.status,
+        requestedByActorId: input.requestedByActorId,
+        requestedAt,
+        requestPayload: input.requestPayload,
+        rawPayload: {},
+        createdAt: requestedAt,
+        updatedAt: requestedAt,
+      })
+      .returning();
+
+    if (!handoff) {
+      throw new Error("Invoice handoff was not created");
+    }
+
+    return mapInvoiceHandoff(handoff);
+  }
+
+  async markInvoiceHandoffApproved(input: {
+    teamId: string;
+    handoffId: string;
+    approvedByActorId: string;
+    approvedAt: string;
+  }): Promise<InvoiceHandoff | null> {
+    const approvedAt = new Date(input.approvedAt);
+    const [handoff] = await this.client
+      .update(schema.invoiceHandoff)
+      .set({
+        status: "approved",
+        approvedByActorId: input.approvedByActorId,
+        approvedAt,
+        failureCode: null,
+        failureMessage: null,
+        updatedAt: approvedAt,
+      })
+      .where(
+        and(
+          eq(schema.invoiceHandoff.teamId, input.teamId),
+          eq(schema.invoiceHandoff.id, input.handoffId),
+          eq(schema.invoiceHandoff.status, "waiting_manual_approval"),
+        ),
+      )
+      .returning();
+
+    return handoff ? mapInvoiceHandoff(handoff) : null;
+  }
+
+  async markInvoiceHandoffRetryRequested(input: {
+    teamId: string;
+    handoffId: string;
+    requestedAt: string;
+  }): Promise<InvoiceHandoff | null> {
+    const requestedAt = new Date(input.requestedAt);
+    const [handoff] = await this.client
+      .update(schema.invoiceHandoff)
+      .set({
+        status: "requested",
+        failureCode: null,
+        failureMessage: null,
+        updatedAt: requestedAt,
+      })
+      .where(
+        and(
+          eq(schema.invoiceHandoff.teamId, input.teamId),
+          eq(schema.invoiceHandoff.id, input.handoffId),
+          eq(schema.invoiceHandoff.status, "failed"),
+        ),
+      )
+      .returning();
+
+    return handoff ? mapInvoiceHandoff(handoff) : null;
+  }
+
+  async markInvoiceHandoffCreating(input: {
+    teamId: string;
+    handoffId: string;
+    lastAttemptAt: string;
+  }): Promise<InvoiceHandoff | null> {
+    const lastAttemptAt = new Date(input.lastAttemptAt);
+    const [handoff] = await this.client
+      .update(schema.invoiceHandoff)
+      .set({
+        status: "creating",
+        lastAttemptAt,
+        failureCode: null,
+        failureMessage: null,
+        updatedAt: lastAttemptAt,
+      })
+      .where(
+        and(
+          eq(schema.invoiceHandoff.teamId, input.teamId),
+          eq(schema.invoiceHandoff.id, input.handoffId),
+        ),
+      )
+      .returning();
+
+    return handoff ? mapInvoiceHandoff(handoff) : null;
+  }
+
+  async markInvoiceHandoffCreated(input: {
+    teamId: string;
+    handoffId: string;
+    providerObjectRecordId: string | null;
+    providerInvoiceId: string;
+    providerInvoiceNumber: string;
+    providerInvoiceUrl: string | null;
+    providerStatus: string;
+    rawPayload: Record<string, unknown>;
+    completedAt: string;
+  }): Promise<InvoiceHandoff | null> {
+    const completedAt = new Date(input.completedAt);
+    const [handoff] = await this.client
+      .update(schema.invoiceHandoff)
+      .set({
+        status: "created",
+        providerObjectRecordId: input.providerObjectRecordId,
+        providerInvoiceId: input.providerInvoiceId,
+        providerInvoiceNumber: input.providerInvoiceNumber,
+        providerInvoiceUrl: input.providerInvoiceUrl,
+        providerStatus: input.providerStatus,
+        failureCode: null,
+        failureMessage: null,
+        rawPayload: input.rawPayload,
+        completedAt,
+        updatedAt: completedAt,
+      })
+      .where(
+        and(
+          eq(schema.invoiceHandoff.teamId, input.teamId),
+          eq(schema.invoiceHandoff.id, input.handoffId),
+        ),
+      )
+      .returning();
+
+    return handoff ? mapInvoiceHandoff(handoff) : null;
+  }
+
+  async markInvoiceHandoffFailed(input: {
+    teamId: string;
+    handoffId: string;
+    failureCode: string;
+    failureMessage: string;
+    rawPayload?: Record<string, unknown> | null;
+    failedAt: string;
+  }): Promise<InvoiceHandoff | null> {
+    const failedAt = new Date(input.failedAt);
+    const [handoff] = await this.client
+      .update(schema.invoiceHandoff)
+      .set({
+        status: "failed",
+        failureCode: input.failureCode,
+        failureMessage: input.failureMessage,
+        rawPayload: input.rawPayload ?? {},
+        updatedAt: failedAt,
+      })
+      .where(
+        and(
+          eq(schema.invoiceHandoff.teamId, input.teamId),
+          eq(schema.invoiceHandoff.id, input.handoffId),
+        ),
+      )
+      .returning();
+
+    return handoff ? mapInvoiceHandoff(handoff) : null;
+  }
+
   private async insertCommercialDocumentLines(input: {
     teamId: string;
     documentId: string;
@@ -8087,6 +8628,102 @@ function mapSignatureEvidence(
     evidenceObjectKey: evidence.evidenceObjectKey,
     rawPayload: evidence.rawPayload,
     createdAt: evidence.createdAt.toISOString(),
+  };
+}
+
+function mapTrustPolicy(policy: typeof schema.trustPolicy.$inferSelect): TrustCheckPolicy {
+  return {
+    teamId: policy.teamId,
+    mode: policy.mode as TrustCheckPolicy["mode"],
+    updatedByActorId: policy.updatedByActorId,
+    updatedAt: policy.updatedAt.toISOString(),
+  };
+}
+
+function mapInvoiceHandoffPolicy(
+  policy: typeof schema.invoiceHandoffPolicy.$inferSelect,
+): InvoiceHandoffPolicy {
+  return {
+    teamId: policy.teamId,
+    mode: policy.mode as InvoiceHandoffPolicy["mode"],
+    updatedByActorId: policy.updatedByActorId,
+    updatedAt: policy.updatedAt.toISOString(),
+  };
+}
+
+function mapTrustCheck(check: typeof schema.trustCheck.$inferSelect): TrustCheck {
+  return {
+    id: check.id,
+    teamId: check.teamId,
+    accountId: check.accountId,
+    opportunityId: check.opportunityId,
+    documentId: check.documentId,
+    documentVersionId: check.documentVersionId,
+    signatureRequestId: check.signatureRequestId,
+    signatureEvidenceId: check.signatureEvidenceId,
+    signaturePartyId: check.signaturePartyId,
+    provider: check.provider as TrustCheck["provider"],
+    providerSessionId: check.providerSessionId,
+    providerRequestId: check.providerRequestId,
+    providerEventId: check.providerEventId,
+    sourceOrganizationNumber: check.sourceOrganizationNumber,
+    signerName: check.signerName,
+    signerEmail: check.signerEmail,
+    signerPersonalNumberMasked: check.signerPersonalNumberMasked,
+    status: check.status as TrustCheck["status"],
+    resultReason: check.resultReason,
+    companyRegistrationNumber: check.companyRegistrationNumber,
+    companyLegalName: check.companyLegalName,
+    companyStatus: check.companyStatus,
+    roleEvidence: check.roleEvidence as TrustCheck["roleEvidence"],
+    signatureDescription: check.signatureDescription,
+    advisoryAnalysis: check.advisoryAnalysis as TrustCheck["advisoryAnalysis"],
+    originalSourceDescriptions: check.originalSourceDescriptions,
+    rawPayload: check.rawPayload,
+    rawPayloadReference: check.rawPayloadReference,
+    legalBasis: check.legalBasis,
+    purpose: check.purpose,
+    retentionUntil: check.retentionUntil?.toISOString() ?? null,
+    requestedAt: check.requestedAt.toISOString(),
+    completedAt: check.completedAt?.toISOString() ?? null,
+    reviewedAt: check.reviewedAt?.toISOString() ?? null,
+    reviewerActorId: check.reviewerActorId,
+    reviewDecision: check.reviewDecision as TrustCheck["reviewDecision"],
+    reviewRationale: check.reviewRationale,
+    createdAt: check.createdAt.toISOString(),
+    updatedAt: check.updatedAt.toISOString(),
+  };
+}
+
+function mapInvoiceHandoff(handoff: typeof schema.invoiceHandoff.$inferSelect): InvoiceHandoff {
+  return {
+    id: handoff.id,
+    teamId: handoff.teamId,
+    accountId: handoff.accountId,
+    opportunityId: handoff.opportunityId,
+    documentId: handoff.documentId,
+    documentVersionId: handoff.documentVersionId,
+    signatureRequestId: handoff.signatureRequestId,
+    provider: handoff.provider as InvoiceHandoff["provider"],
+    connectionId: handoff.connectionId,
+    status: handoff.status as InvoiceHandoff["status"],
+    requestedByActorId: handoff.requestedByActorId,
+    requestedAt: handoff.requestedAt.toISOString(),
+    approvedByActorId: handoff.approvedByActorId,
+    approvedAt: handoff.approvedAt?.toISOString() ?? null,
+    providerObjectRecordId: handoff.providerObjectRecordId,
+    providerInvoiceId: handoff.providerInvoiceId,
+    providerInvoiceNumber: handoff.providerInvoiceNumber,
+    providerInvoiceUrl: handoff.providerInvoiceUrl,
+    providerStatus: handoff.providerStatus,
+    failureCode: handoff.failureCode,
+    failureMessage: handoff.failureMessage,
+    requestPayload: handoff.requestPayload,
+    rawPayload: handoff.rawPayload,
+    lastAttemptAt: handoff.lastAttemptAt?.toISOString() ?? null,
+    completedAt: handoff.completedAt?.toISOString() ?? null,
+    createdAt: handoff.createdAt.toISOString(),
+    updatedAt: handoff.updatedAt.toISOString(),
   };
 }
 

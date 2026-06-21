@@ -61,6 +61,9 @@ Parked product surfaces for the first beta:
 Dawn's core rule is simple: every surface calls the application layer, and the
 application layer owns business behavior.
 
+- **Feature-aligned modular monolith**: keep the current packages, use consistent
+  feature filenames across them, and split broad files only when they become
+  painful.
 - **One domain, many surfaces**: web, desktop, public API, internal oRPC,
   webhooks, workers, automations, and AI tools should all share the same use
   cases.

@@ -26,6 +26,7 @@ export type Permission =
   | "api_keys.manage"
   | "integrations.read"
   | "integrations.write"
+  | "trust.review"
   | "assistant.use"
   | "assistant.mutate"
   | "automations.read"
@@ -227,6 +228,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "api_keys.manage",
     "integrations.read",
     "integrations.write",
+    "trust.review",
     "assistant.use",
     "assistant.mutate",
     "automations.read",
@@ -254,6 +256,7 @@ export const rolePermissions: Record<TeamRole, readonly Permission[]> = {
     "api_keys.manage",
     "integrations.read",
     "integrations.write",
+    "trust.review",
     "assistant.use",
     "assistant.mutate",
     "automations.read",

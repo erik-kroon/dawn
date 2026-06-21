@@ -8,6 +8,8 @@ For executable Fortnox/TIC sales-flow work, use `docs/work/FORTNOX-SALES-OS-VERT
 
 For durable architecture decisions, use `docs/adr/`.
 
+For feature-file organization, use `docs/adr/0014-feature-file-organization.md`.
+
 ## Current Repo Map
 
 ### `apps/web`
@@ -54,7 +56,10 @@ Look here for:
 - Procedure/context setup: `packages/api/src/index.ts`, `packages/api/src/context.ts`
 - Router definitions: `packages/api/src/routers`
 
-Target direction: this package becomes transport contracts and route schemas. It should call application use cases rather than database queries directly.
+Target direction: this package owns transport contracts, route schemas, and
+feature router composition. It may import DB schema/types for DTOs, zod helpers,
+tests, admin serialization, or debug routes, but business mutations should call
+application use cases.
 
 ### `packages/app`
 
@@ -90,6 +95,9 @@ Look here for:
 - Drizzle config: `packages/db/drizzle.config.ts`
 
 Target direction: schema, migrations, repository primitives, transaction helpers, outbox persistence, audit log, and idempotency state.
+
+Database adapters may import narrow app repository types, but business rules
+stay in `packages/domain` and `packages/app`.
 
 ### `packages/env`
 
@@ -129,12 +137,17 @@ UI component direction:
 ## Shared Package Direction
 
 - `packages/domain`: pure entities, value objects, financial math, domain events, invariants, and state machines.
-- `packages/app`: use cases, authorization, transactions, idempotency, audit, outbox writes, and provider port calls.
+- `packages/app`: use cases, authorization, transactions, idempotency, audit, outbox writes, and feature-local repository types.
 - `packages/jobs`: job names, queue names, payload schemas, retry policy, and idempotency policy.
-- `packages/integrations`: provider adapter contracts and implementations, including Fortnox and TIC behind app-owned use cases.
+- `packages/integrations`: provider contracts and implementations, including Fortnox and TIC behind app-owned use cases.
 - `packages/sync`: TanStack DB collection definitions, sync protocol, cursor policy, and conflict policy.
 - `packages/ai`: AI runtime, tools, prompts, permissions, retrieval, and evals. User-facing copilot remains parked for MVP.
 - Worker execution currently routes through `apps/server/src/worker-runtime.ts`; add a separate `apps/worker` only when deployment/runtime boundaries require it.
+
+The architecture is a feature-aligned modular monolith. Keep the current package
+shell and use consistent feature names across packages: `crm`,
+`commercial-documents`, `signatures`, `trust`, `invoice-handoff`, `market`,
+`fortnox`, `solo`, and `agents`.
 
 ## Reference Repo Map
 
@@ -161,4 +174,5 @@ Use Midday to understand product surface and provider workflows. Do not copy its
 - For terminology: start with `CONTEXT.md`.
 - For implementation location: start with this file.
 - For decisions: check `docs/adr/`.
+- For feature-file organization: check `docs/adr/0014-feature-file-organization.md`.
 - For agent workflow conventions: check `AGENTS.md`.

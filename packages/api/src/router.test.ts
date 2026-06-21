@@ -7,6 +7,8 @@ import {
   createDeterministicInvoicePdfRenderer,
   createEmailInboxOAuthStateCodec,
   createFortnoxOAuthStateCodec,
+  processFortnoxInvoiceCreation,
+  resolveSystemAppRequest,
   runStoredDocumentExtraction,
 } from "@dawn/app";
 import { MemoryAppRepository } from "@dawn/app/testkit/memory-repository";
@@ -44,6 +46,8 @@ import type {
   IntegrationConnection,
   IntegrationSyncRun,
   IntegrationSyncRunStatus,
+  InvoiceHandoff,
+  InvoiceHandoffPolicy,
   InvoiceEvent,
   InvoiceDraft,
   InvoiceLineDraft,
@@ -72,6 +76,8 @@ import type {
   TeamRole,
   TimeEntry,
   Transaction,
+  TrustCheck,
+  TrustCheckPolicy,
   OAuthApp,
   OAuthGrant,
   WebhookDelivery,
@@ -102,9 +108,11 @@ import {
   createMockBankingProvider,
   createEmailInboxTokenCodec,
   createMockEmailInboxProvider,
+  createMockFortnoxInvoiceProvider,
   createSandboxBankingProvider,
   createMockIntegrationProviders,
   createMockInvoiceEmailDeliveryProvider,
+  createMockTicCompanyRolesProvider,
   createMockTicSignatureProvider,
   InboxConnector,
 } from "@dawn/integrations";
@@ -191,6 +199,10 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
   signatureRequests = new Map<string, SignatureRequest>();
   signatureParties = new Map<string, SignatureParty>();
   signatureEvidence = new Map<string, SignatureEvidence>();
+  trustPolicies = new Map<string, TrustCheckPolicy>();
+  trustChecks = new Map<string, TrustCheck>();
+  invoiceHandoffPolicies = new Map<string, InvoiceHandoffPolicy>();
+  invoiceHandoffs = new Map<string, InvoiceHandoff>();
 
   async withTransaction<T>(callback: (repository: DawnRepository) => Promise<T>): Promise<T> {
     return callback(this);
@@ -3373,6 +3385,361 @@ class MemoryTransactionReviewRepository extends MemoryAppRepository implements D
     return evidence;
   }
 
+  async getTrustPolicy(teamId: string) {
+    return this.trustPolicies.get(teamId) ?? null;
+  }
+
+  async upsertTrustPolicy(input: Parameters<DawnRepository["upsertTrustPolicy"]>[0]) {
+    const policy: TrustCheckPolicy = {
+      teamId: input.teamId,
+      mode: input.mode,
+      updatedByActorId: input.updatedByActorId,
+      updatedAt: input.updatedAt,
+    };
+    this.trustPolicies.set(policy.teamId, policy);
+    return policy;
+  }
+
+  async getTrustCheckForTeam(teamId: string, trustCheckId: string) {
+    const check = this.trustChecks.get(trustCheckId);
+    return check?.teamId === teamId ? check : null;
+  }
+
+  async getLatestTrustCheckForSignatureRequest(
+    input: Parameters<DawnRepository["getLatestTrustCheckForSignatureRequest"]>[0],
+  ) {
+    return (
+      [...this.trustChecks.values()]
+        .filter(
+          (check) =>
+            check.teamId === input.teamId && check.signatureRequestId === input.signatureRequestId,
+        )
+        .sort((left, right) => right.requestedAt.localeCompare(left.requestedAt))[0] ?? null
+    );
+  }
+
+  async getLatestTrustCheckForSignatureEvidence(
+    input: Parameters<DawnRepository["getLatestTrustCheckForSignatureEvidence"]>[0],
+  ) {
+    return (
+      [...this.trustChecks.values()]
+        .filter(
+          (check) =>
+            check.teamId === input.teamId &&
+            check.signatureEvidenceId === input.signatureEvidenceId,
+        )
+        .sort((left, right) => right.requestedAt.localeCompare(left.requestedAt))[0] ?? null
+    );
+  }
+
+  async listTrustChecksForDocument(
+    input: Parameters<DawnRepository["listTrustChecksForDocument"]>[0],
+  ) {
+    return [...this.trustChecks.values()]
+      .filter((check) => check.teamId === input.teamId && check.documentId === input.documentId)
+      .sort((left, right) => right.requestedAt.localeCompare(left.requestedAt));
+  }
+
+  async createTrustCheck(input: Parameters<DawnRepository["createTrustCheck"]>[0]) {
+    const check: TrustCheck = {
+      id: input.trustCheckId,
+      teamId: input.teamId,
+      accountId: input.accountId,
+      opportunityId: input.opportunityId,
+      documentId: input.documentId,
+      documentVersionId: input.documentVersionId,
+      signatureRequestId: input.signatureRequestId,
+      signatureEvidenceId: input.signatureEvidenceId,
+      signaturePartyId: input.signaturePartyId,
+      provider: input.provider,
+      providerSessionId: input.providerSessionId,
+      providerRequestId: null,
+      providerEventId: null,
+      sourceOrganizationNumber: input.sourceOrganizationNumber,
+      signerName: input.signerName,
+      signerEmail: input.signerEmail,
+      signerPersonalNumberMasked: input.signerPersonalNumberMasked,
+      status: "pending",
+      resultReason: "pending",
+      companyRegistrationNumber: null,
+      companyLegalName: null,
+      companyStatus: null,
+      roleEvidence: [],
+      signatureDescription: null,
+      advisoryAnalysis: null,
+      originalSourceDescriptions: [],
+      rawPayload: {},
+      rawPayloadReference: null,
+      legalBasis: input.legalBasis,
+      purpose: input.purpose,
+      retentionUntil: input.retentionUntil,
+      requestedAt: input.requestedAt,
+      completedAt: null,
+      reviewedAt: null,
+      reviewerActorId: null,
+      reviewDecision: null,
+      reviewRationale: null,
+      createdAt: input.requestedAt,
+      updatedAt: input.requestedAt,
+    };
+    this.trustChecks.set(check.id, check);
+    return check;
+  }
+
+  async markTrustCheckCompleted(input: Parameters<DawnRepository["markTrustCheckCompleted"]>[0]) {
+    const current = this.trustChecks.get(input.trustCheckId);
+
+    if (!current || current.teamId !== input.teamId) {
+      return null;
+    }
+
+    const check: TrustCheck = {
+      ...current,
+      status: input.status,
+      resultReason: input.resultReason,
+      providerRequestId: input.providerRequestId,
+      providerEventId: input.providerEventId,
+      companyRegistrationNumber: input.companyRegistrationNumber,
+      companyLegalName: input.companyLegalName,
+      companyStatus: input.companyStatus,
+      roleEvidence: [...input.roleEvidence],
+      signatureDescription: input.signatureDescription,
+      advisoryAnalysis: input.advisoryAnalysis,
+      originalSourceDescriptions: [...input.originalSourceDescriptions],
+      rawPayload: input.rawPayload,
+      rawPayloadReference: input.rawPayloadReference,
+      completedAt: input.completedAt,
+      updatedAt: input.completedAt ?? new Date().toISOString(),
+    };
+    this.trustChecks.set(check.id, check);
+    return check;
+  }
+
+  async markTrustCheckReviewed(input: Parameters<DawnRepository["markTrustCheckReviewed"]>[0]) {
+    const current = this.trustChecks.get(input.trustCheckId);
+
+    if (!current || current.teamId !== input.teamId) {
+      return null;
+    }
+
+    const check: TrustCheck = {
+      ...current,
+      status: input.status,
+      reviewedAt: input.reviewedAt,
+      reviewerActorId: input.reviewerActorId,
+      reviewDecision: input.decision,
+      reviewRationale: input.rationale,
+      updatedAt: input.reviewedAt,
+    };
+    this.trustChecks.set(check.id, check);
+    return check;
+  }
+
+  async getInvoiceHandoffPolicy(teamId: string) {
+    return this.invoiceHandoffPolicies.get(teamId) ?? null;
+  }
+
+  async upsertInvoiceHandoffPolicy(
+    input: Parameters<DawnRepository["upsertInvoiceHandoffPolicy"]>[0],
+  ) {
+    const policy: InvoiceHandoffPolicy = {
+      teamId: input.teamId,
+      mode: input.mode,
+      updatedByActorId: input.updatedByActorId,
+      updatedAt: input.updatedAt,
+    };
+    this.invoiceHandoffPolicies.set(policy.teamId, policy);
+    return policy;
+  }
+
+  async getInvoiceHandoffForTeam(teamId: string, handoffId: string) {
+    const handoff = this.invoiceHandoffs.get(handoffId);
+    return handoff?.teamId === teamId ? handoff : null;
+  }
+
+  async getActiveInvoiceHandoffForDocumentVersion(
+    input: Parameters<DawnRepository["getActiveInvoiceHandoffForDocumentVersion"]>[0],
+  ) {
+    return (
+      [...this.invoiceHandoffs.values()]
+        .filter(
+          (handoff) =>
+            handoff.teamId === input.teamId &&
+            handoff.provider === input.provider &&
+            handoff.documentVersionId === input.documentVersionId &&
+            handoff.status !== "failed",
+        )
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null
+    );
+  }
+
+  async listInvoiceHandoffsForDocument(
+    input: Parameters<DawnRepository["listInvoiceHandoffsForDocument"]>[0],
+  ) {
+    return [...this.invoiceHandoffs.values()]
+      .filter(
+        (handoff) => handoff.teamId === input.teamId && handoff.documentId === input.documentId,
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  async createInvoiceHandoff(input: Parameters<DawnRepository["createInvoiceHandoff"]>[0]) {
+    const existing = await this.getActiveInvoiceHandoffForDocumentVersion({
+      teamId: input.teamId,
+      provider: input.provider,
+      documentVersionId: input.documentVersionId,
+    });
+
+    if (existing) {
+      throw new Error("Active invoice handoff already exists for document version");
+    }
+
+    const handoff: InvoiceHandoff = {
+      id: input.handoffId,
+      teamId: input.teamId,
+      accountId: input.accountId,
+      opportunityId: input.opportunityId,
+      documentId: input.documentId,
+      documentVersionId: input.documentVersionId,
+      signatureRequestId: input.signatureRequestId,
+      provider: input.provider,
+      connectionId: input.connectionId,
+      status: input.status,
+      requestedByActorId: input.requestedByActorId,
+      requestedAt: input.requestedAt,
+      approvedByActorId: null,
+      approvedAt: null,
+      providerObjectRecordId: null,
+      providerInvoiceId: null,
+      providerInvoiceNumber: null,
+      providerInvoiceUrl: null,
+      providerStatus: null,
+      failureCode: null,
+      failureMessage: null,
+      requestPayload: input.requestPayload,
+      rawPayload: {},
+      lastAttemptAt: null,
+      completedAt: null,
+      createdAt: input.requestedAt,
+      updatedAt: input.requestedAt,
+    };
+    this.invoiceHandoffs.set(handoff.id, handoff);
+    return handoff;
+  }
+
+  async markInvoiceHandoffApproved(
+    input: Parameters<DawnRepository["markInvoiceHandoffApproved"]>[0],
+  ) {
+    const current = this.invoiceHandoffs.get(input.handoffId);
+
+    if (
+      !current ||
+      current.teamId !== input.teamId ||
+      current.status !== "waiting_manual_approval"
+    ) {
+      return null;
+    }
+
+    const handoff: InvoiceHandoff = {
+      ...current,
+      status: "approved",
+      approvedByActorId: input.approvedByActorId,
+      approvedAt: input.approvedAt,
+      failureCode: null,
+      failureMessage: null,
+      updatedAt: input.approvedAt,
+    };
+    this.invoiceHandoffs.set(handoff.id, handoff);
+    return handoff;
+  }
+
+  async markInvoiceHandoffRetryRequested(
+    input: Parameters<DawnRepository["markInvoiceHandoffRetryRequested"]>[0],
+  ) {
+    const current = this.invoiceHandoffs.get(input.handoffId);
+
+    if (!current || current.teamId !== input.teamId || current.status !== "failed") {
+      return null;
+    }
+
+    const handoff: InvoiceHandoff = {
+      ...current,
+      status: "requested",
+      failureCode: null,
+      failureMessage: null,
+      updatedAt: input.requestedAt,
+    };
+    this.invoiceHandoffs.set(handoff.id, handoff);
+    return handoff;
+  }
+
+  async markInvoiceHandoffCreating(
+    input: Parameters<DawnRepository["markInvoiceHandoffCreating"]>[0],
+  ) {
+    const current = this.invoiceHandoffs.get(input.handoffId);
+
+    if (!current || current.teamId !== input.teamId) {
+      return null;
+    }
+
+    const handoff: InvoiceHandoff = {
+      ...current,
+      status: "creating",
+      failureCode: null,
+      failureMessage: null,
+      lastAttemptAt: input.lastAttemptAt,
+      updatedAt: input.lastAttemptAt,
+    };
+    this.invoiceHandoffs.set(handoff.id, handoff);
+    return handoff;
+  }
+
+  async markInvoiceHandoffCreated(
+    input: Parameters<DawnRepository["markInvoiceHandoffCreated"]>[0],
+  ) {
+    const current = this.invoiceHandoffs.get(input.handoffId);
+
+    if (!current || current.teamId !== input.teamId) {
+      return null;
+    }
+
+    const handoff: InvoiceHandoff = {
+      ...current,
+      status: "created",
+      providerObjectRecordId: input.providerObjectRecordId,
+      providerInvoiceId: input.providerInvoiceId,
+      providerInvoiceNumber: input.providerInvoiceNumber,
+      providerInvoiceUrl: input.providerInvoiceUrl,
+      providerStatus: input.providerStatus,
+      failureCode: null,
+      failureMessage: null,
+      rawPayload: input.rawPayload,
+      completedAt: input.completedAt,
+      updatedAt: input.completedAt,
+    };
+    this.invoiceHandoffs.set(handoff.id, handoff);
+    return handoff;
+  }
+
+  async markInvoiceHandoffFailed(input: Parameters<DawnRepository["markInvoiceHandoffFailed"]>[0]) {
+    const current = this.invoiceHandoffs.get(input.handoffId);
+
+    if (!current || current.teamId !== input.teamId) {
+      return null;
+    }
+
+    const handoff: InvoiceHandoff = {
+      ...current,
+      status: "failed",
+      failureCode: input.failureCode,
+      failureMessage: input.failureMessage,
+      rawPayload: input.rawPayload ?? {},
+      updatedAt: input.failedAt,
+    };
+    this.invoiceHandoffs.set(handoff.id, handoff);
+    return handoff;
+  }
+
   private buildCommercialDocumentLines(
     document: CommercialDocument,
     lines: readonly CommercialDocumentLineDraft[],
@@ -3867,6 +4234,7 @@ async function createTestRouter(
   options: {
     emailInboxConnectors?: readonly InboxConnector[];
     googleAuthAccountTokensForUser?: (userId: string) => Promise<GoogleAuthAccountTokens | null>;
+    ticCompanyRolesProvider?: ReturnType<typeof createMockTicCompanyRolesProvider>;
   } = {},
 ) {
   process.env.DATABASE_URL ??= "postgres://test";
@@ -3910,6 +4278,7 @@ async function createTestRouter(
     documentUrlSigner: testDocumentUrlSigner,
     commercialDocumentPdfRenderer: createDeterministicCommercialDocumentPdfRenderer(),
     ticSignatureProvider: createMockTicSignatureProvider(),
+    ticCompanyRolesProvider: options.ticCompanyRolesProvider ?? createMockTicCompanyRolesProvider(),
     ticWebhookSecret: "tic_webhook_secret_abcdefghijklmnopqrstuvwxyz",
     invoicePdfRenderer: createDeterministicInvoicePdfRenderer(),
     invoiceEmailDeliveryProvider: createMockInvoiceEmailDeliveryProvider(),
@@ -5356,8 +5725,19 @@ describe("appRouter", () => {
   test("runs TIC signature request, webhook completion, evidence, and receipt through routes", async () => {
     const repository = new MemoryTransactionReviewRepository();
     repository.teams.set("team_1", "Test Team");
-    repository.memberships.set("user_1:team_1", "member");
-    const router = await createTestRouter(repository);
+    repository.memberships.set("user_1:team_1", "owner");
+    const router = await createTestRouter(repository, {
+      ticCompanyRolesProvider: createMockTicCompanyRolesProvider({
+        fixtures: {
+          trust_request_1: {
+            companyRegistrationNumber: "5590001111",
+            legalName: "Other Buyer AB",
+            companyStatus: "Aktiv",
+            signatureDescription: "Firmatecknare enligt TIC CompanyRoles",
+          },
+        },
+      }),
+    });
     const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
     const recipientContext = { context: createUnauthenticatedApiTestContext() };
     const legalEntity = await call(
@@ -5395,6 +5775,26 @@ describe("appRouter", () => {
       },
       context,
     );
+    repository.integrationConnections.set("fortnox_conn_1", {
+      id: "fortnox_conn_1",
+      teamId: "team_1",
+      category: "accounting",
+      provider: "fortnox",
+      providerConnectionId: "fortnox:team_1",
+      displayName: "Fortnox Demo AB",
+      status: "connected",
+      capabilities: ["connect", "sync", "disable"],
+      tokenKeyId: "fortnox-token",
+      tokenLastFour: "1234",
+      tokenCiphertext: "encrypted-fortnox-token",
+      rawPayload: {},
+      lastSyncAt: null,
+      lastError: null,
+      disabledAt: null,
+      createdByActorId: "user_1",
+      createdAt: "2026-06-15T10:00:00.000Z",
+      updatedAt: "2026-06-15T10:00:00.000Z",
+    });
     await repository.upsertProviderObject({
       teamId: "team_1",
       provider: "fortnox",
@@ -5536,6 +5936,127 @@ describe("appRouter", () => {
       },
       recipientContext,
     );
+    const updatedPolicy = await call(
+      router.trust.updatePolicy,
+      {
+        teamId: "team_1",
+        mode: "blocking",
+        idempotencyKey: "trust_policy_1",
+      },
+      context,
+    );
+    const trustCheck = await call(
+      router.trust.request,
+      {
+        teamId: "team_1",
+        signatureRequestId: started.signatureRequest.id,
+        signatureEvidenceId: evidence.evidence[0]?.id,
+        idempotencyKey: "trust_request_1",
+      },
+      context,
+    );
+    const fetchedTrustCheck = await call(
+      router.trust.forSignature,
+      {
+        teamId: "team_1",
+        signatureRequestId: started.signatureRequest.id,
+      },
+      context,
+    );
+    const invoicePolicy = await call(
+      router.invoiceHandoff.updatePolicy,
+      {
+        teamId: "team_1",
+        mode: "automatic",
+        idempotencyKey: "invoice_handoff_policy_1",
+      },
+      context,
+    );
+
+    await expect(
+      call(
+        router.invoiceHandoff.request,
+        {
+          teamId: "team_1",
+          documentId: created.document.id,
+          connectionId: "fortnox_conn_1",
+          idempotencyKey: "invoice_handoff_blocked_1",
+        },
+        context,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    const reviewedTrustCheck = await call(
+      router.trust.review,
+      {
+        teamId: "team_1",
+        trustCheckId: trustCheck.trustCheck.id,
+        decision: "approved",
+        rationale: "Reviewer confirmed authority from original source descriptions.",
+        idempotencyKey: "trust_review_1",
+      },
+      context,
+    );
+    const invoiceHandoff = await call(
+      router.invoiceHandoff.request,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        connectionId: "fortnox_conn_1",
+        idempotencyKey: "invoice_handoff_request_1",
+      },
+      context,
+    );
+    const duplicateInvoiceHandoff = await call(
+      router.invoiceHandoff.request,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        connectionId: "fortnox_conn_1",
+        idempotencyKey: "invoice_handoff_request_2",
+      },
+      context,
+    );
+    const processedInvoice = await processFortnoxInvoiceCreation(
+      repository,
+      createMockFortnoxInvoiceProvider(),
+      resolveSystemAppRequest({
+        actorId: "system:fortnox-invoice",
+        requestId: "fortnox_invoice_job_1",
+        teamId: "team_1",
+      }),
+      {
+        teamId: "team_1",
+        handoffId: invoiceHandoff.handoff.id,
+        sourceOutboxEventId: "outbox_invoice_handoff_request_1",
+        idempotencyKey: "fortnox_invoice_job_1",
+        enforceCallerPermission: false,
+      },
+    );
+    const replayedProcessedInvoice = await processFortnoxInvoiceCreation(
+      repository,
+      createMockFortnoxInvoiceProvider(),
+      resolveSystemAppRequest({
+        actorId: "system:fortnox-invoice",
+        requestId: "fortnox_invoice_job_1",
+        teamId: "team_1",
+      }),
+      {
+        teamId: "team_1",
+        handoffId: invoiceHandoff.handoff.id,
+        sourceOutboxEventId: "outbox_invoice_handoff_request_1",
+        idempotencyKey: "fortnox_invoice_job_1",
+        enforceCallerPermission: false,
+      },
+    );
+    const handoffForDocument = await call(
+      router.invoiceHandoff.forDocument,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+      },
+      context,
+    );
     const timeline = await call(
       router.crm.accountTimeline,
       {
@@ -5561,7 +6082,7 @@ describe("appRouter", () => {
     });
     expect(duplicate.replayed).toBe(true);
     expect(repository.crmOpportunities.get(opportunity.opportunity.recordId)).toMatchObject({
-      stage: "won_pending_invoice",
+      stage: "won",
       status: "won",
     });
     expect(evidence.evidence).toHaveLength(1);
@@ -5570,9 +6091,347 @@ describe("appRouter", () => {
       version: { id: finalized.version.id },
       evidence: [{ providerEventId: "tic_evt_api_1" }],
     });
-    expect(timeline.entries.map((entry) => entry.action)).toEqual(
-      expect.arrayContaining(["signature.requested", "signature.completed"]),
+    expect(updatedPolicy.policy.mode).toBe("blocking");
+    expect(trustCheck).toMatchObject({
+      replayed: false,
+      policy: { mode: "blocking" },
+      trustCheck: {
+        status: "needs_review",
+        resultReason: "organization_number_mismatch",
+        companyRegistrationNumber: "5590001111",
+        advisoryAnalysis: { label: "advisory" },
+        rawPayload: expect.any(Object),
+        permissions: { canReview: true, sensitiveFieldsRedacted: false },
+      },
+    });
+    expect(fetchedTrustCheck.trustCheck).toMatchObject({
+      id: trustCheck.trustCheck.id,
+      status: "needs_review",
+    });
+    expect(reviewedTrustCheck.trustCheck).toMatchObject({
+      status: "approved",
+      reviewDecision: "approved",
+      reviewerActorId: "user_1",
+      reviewRationale: "Reviewer confirmed authority from original source descriptions.",
+    });
+    expect(invoicePolicy.policy.mode).toBe("automatic");
+    expect(invoiceHandoff).toMatchObject({
+      replayed: false,
+      handoff: {
+        status: "requested",
+        provider: "fortnox",
+        connectionId: "fortnox_conn_1",
+        documentVersionId: finalized.version.id,
+      },
+      policy: { mode: "automatic" },
+    });
+    expect(duplicateInvoiceHandoff).toMatchObject({
+      replayed: true,
+      handoff: { id: invoiceHandoff.handoff.id },
+    });
+    const providerInvoiceId = processedInvoice.handoff.providerInvoiceId;
+    const providerInvoiceNumber = processedInvoice.handoff.providerInvoiceNumber;
+
+    expect(providerInvoiceId).toEqual(expect.any(String));
+    expect(providerInvoiceNumber).toEqual(expect.any(String));
+    expect(processedInvoice).toMatchObject({
+      replayed: false,
+      handoff: {
+        status: "created",
+        providerInvoiceId,
+        providerInvoiceNumber,
+        providerInvoiceUrl: expect.stringContaining("fortnox"),
+      },
+      providerObject: {
+        provider: "fortnox",
+        providerObjectType: "invoice",
+        internalEntityType: "commercial_document",
+        internalEntityId: created.document.id,
+      },
+    });
+    expect(replayedProcessedInvoice.replayed).toBe(true);
+    expect(repository.crmOpportunities.get(opportunity.opportunity.recordId)).toMatchObject({
+      stage: "won",
+      status: "won",
+    });
+    expect(handoffForDocument.handoffs).toHaveLength(1);
+    expect(handoffForDocument.handoffs[0]).toMatchObject({
+      id: invoiceHandoff.handoff.id,
+      status: "created",
+      providerInvoiceId,
+    });
+    expect(repository.providerObjects.get(`fortnox:invoice:${providerInvoiceId}`)).toMatchObject({
+      invoiceHandoffId: invoiceHandoff.handoff.id,
+      documentVersionId: finalized.version.id,
+      invoiceNumber: providerInvoiceNumber,
+      paymentStatus: "unpaid",
+    });
+    expect(repository.outboxEvents.map((event) => event.type)).toEqual(
+      expect.arrayContaining(["invoice_handoff.requested", "invoice_handoff.created"]),
     );
+    expect(timeline.entries.map((entry) => entry.action)).toEqual(
+      expect.arrayContaining([
+        "signature.requested",
+        "signature.completed",
+        "trust_check.requested",
+        "trust_check.completed",
+        "trust_check.reviewed",
+        "invoice_handoff.requested",
+        "invoice_handoff.created",
+      ]),
+    );
+  });
+
+  test("runs recipient-token signing read, start, status, and receipt through public routes", async () => {
+    const repository = new MemoryTransactionReviewRepository();
+    repository.teams.set("team_1", "Test Team");
+    repository.memberships.set("user_1:team_1", "member");
+    const router = await createTestRouter(repository);
+    const context = { context: testContext({ id: "user_1", email: "member@example.com" }) };
+    const recipientContext = { context: createUnauthenticatedApiTestContext() };
+    const legalEntity = await call(
+      router.crm.createLegalEntity,
+      {
+        teamId: "team_1",
+        legalName: "Seller AB",
+        organizationNumber: "5599998888",
+        countryCode: "SE",
+        baseCurrency: "SEK",
+        fiscalYearStartMonth: 1,
+        idempotencyKey: "recipient_signature_legal_entity_1",
+      },
+      context,
+    );
+    const organization = await call(
+      router.crm.createOrganization,
+      {
+        teamId: "team_1",
+        legalName: "Buyer AB",
+        organizationNumber: "5561234567",
+        countryCode: "SE",
+        idempotencyKey: "recipient_signature_org_1",
+      },
+      context,
+    );
+    const account = await call(
+      router.crm.createAccount,
+      {
+        teamId: "team_1",
+        organizationId: organization.organization.recordId,
+        legalEntityId: legalEntity.legalEntity.recordId,
+        accountType: "customer",
+        idempotencyKey: "recipient_signature_account_1",
+      },
+      context,
+    );
+    await repository.upsertProviderObject({
+      teamId: "team_1",
+      provider: "fortnox",
+      providerObjectType: "customer",
+      providerObjectId: "2002",
+      connectionId: "fortnox_conn_2",
+      internalEntityType: "account",
+      internalEntityId: account.account.recordId,
+      rawPayload: { integrationConnectionId: "fortnox_conn_2", customerNumber: "2002" },
+    });
+    const opportunity = await call(
+      router.crm.createOpportunity,
+      {
+        teamId: "team_1",
+        accountId: account.account.recordId,
+        name: "Recipient signed package",
+        amountMinor: 175_000,
+        currencyCode: "SEK",
+        stage: "proposal_sent",
+        idempotencyKey: "recipient_signature_opportunity_1",
+      },
+      context,
+    );
+    const created = await call(
+      router.commercialDocuments.create,
+      {
+        teamId: "team_1",
+        opportunityId: opportunity.opportunity.recordId,
+        title: "Recipient signature quote",
+        validUntil: "2026-07-20T00:00:00.000Z",
+        paymentTerms: "30 dagar",
+        termsVersion: "2026.1",
+        recipientEmail: "buyer@example.com",
+        lines: [
+          {
+            source: "freeform",
+            description: "Implementation",
+            quantityMilli: 1_000,
+            unitPrice: { amountMinor: 140_000, currency: "SEK" },
+            vatRateBasisPoints: 2_500,
+          },
+        ],
+        idempotencyKey: "recipient_signature_quote_create_1",
+      },
+      context,
+    );
+    const finalized = await call(
+      router.commercialDocuments.finalize,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        idempotencyKey: "recipient_signature_quote_finalize_1",
+      },
+      context,
+    );
+    const sent = await call(
+      router.commercialDocuments.send,
+      {
+        teamId: "team_1",
+        documentId: created.document.id,
+        expiresAt: "2099-08-20T00:00:00.000Z",
+        idempotencyKey: "recipient_signature_quote_send_1",
+      },
+      context,
+    );
+    const storedSentDocument = repository.commercialDocuments.get(created.document.id)!;
+
+    await expect(
+      call(
+        router.commercialDocuments.recipientSigningStatus,
+        {
+          accessToken: sent.recipientAccessToken,
+          teamId: "team_2",
+        } as any,
+        recipientContext,
+      ),
+    ).rejects.toThrow();
+
+    repository.commercialDocuments.set(created.document.id, {
+      ...storedSentDocument,
+      recipientAccessTokenExpiresAt: "2000-01-01T00:00:00.000Z",
+    });
+    await expect(
+      call(
+        router.commercialDocuments.recipientSigningStatus,
+        { accessToken: sent.recipientAccessToken },
+        recipientContext,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    repository.commercialDocuments.set(created.document.id, storedSentDocument);
+
+    await expect(
+      call(
+        router.commercialDocuments.recipientSigningRead,
+        { accessToken: "missing_token" },
+        recipientContext,
+      ),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const read = await call(
+      router.commercialDocuments.recipientSigningRead,
+      { accessToken: sent.recipientAccessToken },
+      recipientContext,
+    );
+    const started = await call(
+      router.commercialDocuments.recipientSigningStart,
+      {
+        accessToken: sent.recipientAccessToken,
+        idempotencyKey: "recipient_signature_start_1",
+      },
+      recipientContext,
+    );
+    const status = await call(
+      router.commercialDocuments.recipientSigningStatus,
+      { accessToken: sent.recipientAccessToken },
+      recipientContext,
+    );
+
+    expect(read).toMatchObject({
+      state: "ready",
+      document: { status: "viewed", versionNumber: 1, pdfSha256: finalized.version.pdfSha256 },
+      pdf: { sha256: finalized.version.pdfSha256 },
+      sender: { legalName: "Seller AB" },
+      customer: { legalName: "Buyer AB" },
+    });
+    expect(started).toMatchObject({
+      replayed: false,
+      surface: { state: "pending", pdf: null },
+      signatureRequest: {
+        teamId: "team_1",
+        documentId: created.document.id,
+        documentVersionId: finalized.version.id,
+        createdByActorId: `recipient:${created.document.id}`,
+        hiddenSignedData: {
+          seller: { legalName: "Seller AB" },
+          account: { customerLegalName: "Buyer AB" },
+          signer: { email: "buyer@example.com", role: "external_signer" },
+          fortnoxCustomerMapping: { providerCustomerId: "2002" },
+        },
+      },
+    });
+    expect(status).toMatchObject({
+      state: "pending",
+      pdf: null,
+      signature: {
+        status: "requested",
+        signingUrl: started.signatureRequest.signingUrl,
+      },
+    });
+
+    const body = JSON.stringify({
+      providerEventId: "tic_evt_recipient_api_1",
+      providerSessionId: started.signatureRequest.providerSessionId,
+      documentPdfSha256: finalized.version.pdfSha256,
+      signedAt: "2026-06-20T12:00:00.000Z",
+      signerName: "Ada Buyer",
+      signerEmail: "buyer@example.com",
+      signerPersonalNumberMasked: "********1234",
+      signatureValue: "signature-value",
+      xmlDsig: "<Signature />",
+      ocspResponse: "ocsp-response",
+      evidenceObjectKey: "signatures/team_1/tic_evt_recipient_api_1.json",
+    });
+    const timestamp = Math.floor(Date.now() / 1_000).toString();
+    const signature = await signWebhookPayload({
+      secret: "tic_webhook_secret_abcdefghijklmnopqrstuvwxyz",
+      timestamp,
+      body,
+    });
+    await call(
+      router.commercialDocuments.ticSignatureWebhook,
+      {
+        rawBody: body,
+        timestamp,
+        signature,
+      },
+      recipientContext,
+    );
+    const signedStatus = await call(
+      router.commercialDocuments.recipientSigningStatus,
+      { accessToken: sent.recipientAccessToken },
+      recipientContext,
+    );
+    const receipt = await call(
+      router.commercialDocuments.recipientSigningReceipt,
+      { accessToken: sent.recipientAccessToken },
+      recipientContext,
+    );
+
+    expect(signedStatus).toMatchObject({
+      state: "signed",
+      pdf: null,
+      receipt: {
+        signatureRequestId: started.signatureRequest.id,
+        evidence: [{ verificationStatus: "verified" }],
+      },
+    });
+    expect(receipt).toMatchObject({
+      state: "signed",
+      pdf: { sha256: finalized.version.pdfSha256 },
+      receipt: {
+        signatureRequestId: started.signatureRequest.id,
+        downloads: expect.arrayContaining([
+          expect.objectContaining({ kind: "signed_pdf" }),
+          expect.objectContaining({ kind: "evidence_receipt" }),
+        ]),
+      },
+    });
   });
 
   test("promotes market prospect and snapshots lineage into commercial documents", async () => {

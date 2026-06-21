@@ -2,12 +2,13 @@
 
 Dawn's active product focus is a Fortnox-native quote-to-cash CRM for Swedish SMBs. It should help a seller create or sync an account/contact, manage a deal, build a quote or contract, verify/sign with TIC BankID, create a linked Fortnox invoice, and follow status on the customer/deal timeline.
 
-The broader business-OS codebase remains valuable as reusable infrastructure, but banking ledger, accountant handoff, projects/time, public API, AI copilot, generic automations, and generic CRM metadata are parked product surfaces for the first beta.
+The broader business-OS codebase remains valuable as reusable infrastructure, but banking ledger, accountant handoff, projects/time, public API, AI copilot, generic automations, and generic CRM metadata are parked product surfaces for the first beta. Many Midday-like modules should map to future Solo or shared platform capabilities rather than being treated as random cleanup.
 
 Current product source of truth:
 
 - Dawn quote-to-cash PRD: `docs/product/FORTNOX-SALES-OS-PRD.md`
 - Dawn quote-to-cash slices: `docs/work/FORTNOX-SALES-OS-VERTICAL-SLICES.md`
+- Feature-file organization ADR: `docs/adr/0014-feature-file-organization.md`
 
 Use ADRs for durable architecture decisions. Keep detailed product scope in the Fortnox PRD, not scattered work plans.
 

@@ -49,6 +49,7 @@
     "staged": "vp staged",
     "hooks:setup": "vp config",
     "dev:web": "vp run --filter web dev",
+    "dev:sign": "vp run --filter sign dev",
     "dev:desktop": "vp run --filter desktop dev:hmr",
     "build:desktop": "vp run --filter desktop build:stable",
     "build:desktop:canary": "vp run --filter desktop build:canary",

@@ -1,0 +1,36 @@
+{
+  "name": "sign",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vp build",
+    "dev": "vp dev",
+    "serve": "vp preview",
+    "start": "vp dev",
+    "check-types": "vp build && tsgo --noEmit",
+    "dev:bare": "vp dev"
+  },
+  "dependencies": {
+    "@dawn/api": "workspace:*",
+    "@dawn/domain": "workspace:*",
+    "@dawn/env": "workspace:*",
+    "@dawn/ui": "workspace:*",
+    "@orpc/client": "catalog:",
+    "@tailwindcss/vite": "^4.2.2",
+    "@tanstack/react-query": "^5.90.12",
+    "lucide-react": "^1.8.0",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@dawn/config": "workspace:*",
+    "@types/node": "^22.13.14",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "catalog:",
+    "vite": "^8.0.8"
+  }
+}

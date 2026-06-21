@@ -1,0 +1,6 @@
+@import "@dawn/ui/globals.css";
+
+#app {
+  min-height: 100svh;
+  background: var(--background);
+}

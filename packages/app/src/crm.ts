@@ -752,6 +752,15 @@ const accountTimelineActions = new Set([
   "signature.requested",
   "signature.completed",
   "signature.invalid",
+  "trust_check.requested",
+  "trust_check.completed",
+  "trust_check.reviewed",
+  "invoice_handoff.requested",
+  "invoice_handoff.awaiting_approval",
+  "invoice_handoff.approved",
+  "invoice_handoff.retry_requested",
+  "invoice_handoff.created",
+  "invoice_handoff.failed",
   "market.company.seeded",
   "market.prospect.created",
   "market.prospect.promoted",
@@ -2998,6 +3007,12 @@ export async function listAccountTimeline(
       metadata: { accountId: account.recordId },
       limit,
     }),
+    repository.listAuditEvents({
+      teamId: command.teamId,
+      entityType: "invoice_handoff",
+      metadata: { accountId: account.recordId },
+      limit,
+    }),
   ]);
   const seen = new Set<string>();
   const entries = auditBatches
@@ -3430,6 +3445,81 @@ function timelineEventDetails(
       signerName: event.metadata.signerName,
       expectedPdfSha256: event.metadata.expectedPdfSha256,
       receivedPdfSha256: event.metadata.receivedPdfSha256,
+    });
+  }
+
+  if (event.action.startsWith("trust_check.")) {
+    if (event.metadata.accountId !== context.account.recordId) {
+      return null;
+    }
+
+    const opportunity =
+      typeof event.metadata.opportunityId === "string"
+        ? context.visibleOpportunities.get(event.metadata.opportunityId)
+        : null;
+
+    if (event.metadata.opportunityId && !opportunity) {
+      return null;
+    }
+
+    return pickDefined({
+      trustCheckId: event.metadata.trustCheckId,
+      documentId: event.metadata.documentId ?? event.entityId,
+      accountId: event.metadata.accountId,
+      opportunityId: event.metadata.opportunityId,
+      opportunityName: opportunity?.name,
+      documentType: event.metadata.documentType,
+      title: event.metadata.title,
+      status: event.metadata.status,
+      signatureRequestId: event.metadata.signatureRequestId,
+      signatureEvidenceId: event.metadata.signatureEvidenceId,
+      provider: event.metadata.provider,
+      providerSessionId: event.metadata.providerSessionId,
+      trustStatus: event.metadata.trustStatus,
+      resultReason: event.metadata.resultReason,
+      companyRegistrationNumber: event.metadata.companyRegistrationNumber,
+      companyStatus: event.metadata.companyStatus,
+      roleDescriptions: event.metadata.roleDescriptions,
+      signatureDescription: event.metadata.signatureDescription,
+      advisoryAnalysisLabel: event.metadata.advisoryAnalysisLabel,
+      originalSourceDescriptions: event.metadata.originalSourceDescriptions,
+      decision: event.metadata.decision,
+      reviewerActorId: event.metadata.reviewerActorId,
+    });
+  }
+
+  if (event.action.startsWith("invoice_handoff.")) {
+    if (event.metadata.accountId !== context.account.recordId) {
+      return null;
+    }
+
+    const opportunity =
+      typeof event.metadata.opportunityId === "string"
+        ? context.visibleOpportunities.get(event.metadata.opportunityId)
+        : null;
+
+    if (event.metadata.opportunityId && !opportunity) {
+      return null;
+    }
+
+    return pickDefined({
+      invoiceHandoffId: event.metadata.invoiceHandoffId ?? event.entityId,
+      documentId: event.metadata.documentId,
+      documentVersionId: event.metadata.documentVersionId,
+      signatureRequestId: event.metadata.signatureRequestId,
+      accountId: event.metadata.accountId,
+      opportunityId: event.metadata.opportunityId,
+      opportunityName: opportunity?.name,
+      provider: event.metadata.provider,
+      connectionId: event.metadata.connectionId,
+      status: event.metadata.status,
+      providerInvoiceId: event.metadata.providerInvoiceId,
+      providerInvoiceNumber: event.metadata.providerInvoiceNumber,
+      providerInvoiceUrl: event.metadata.providerInvoiceUrl,
+      providerStatus: event.metadata.providerStatus,
+      paymentStatus: event.metadata.paymentStatus,
+      failureCode: event.metadata.failureCode,
+      failureMessage: event.metadata.failureMessage,
     });
   }
 

@@ -18,8 +18,12 @@ import { createMockTicSignatureProvider } from "@dawn/integrations";
 import { signWebhookPayload } from "./webhook-signature";
 import {
   completeTicSignatureWebhook,
+  getRecipientSigningReceipt,
+  getRecipientSigningStatus,
   getRecipientSignatureReceipt,
   getSignatureEvidence,
+  readRecipientSigningSurface,
+  startRecipientTicSignatureRequest,
   startTicSignatureRequest,
   type SignatureUseCaseRepository,
 } from "./signatures";
@@ -245,6 +249,27 @@ class MemorySignatureRepository
     }
 
     const document = { ...current, status: "signing" as const, updatedAt: input.signingAt };
+    this.commercialDocuments.set(document.id, document);
+    return document;
+  }
+
+  async markCommercialDocumentViewed(input: {
+    teamId: string;
+    documentId: string;
+    viewedAt: string;
+  }) {
+    const current = this.commercialDocuments.get(input.documentId);
+
+    if (!current || current.teamId !== input.teamId) {
+      throw new Error("Commercial document was not viewed");
+    }
+
+    const document = {
+      ...current,
+      status: "viewed" as const,
+      viewedAt: input.viewedAt,
+      updatedAt: input.viewedAt,
+    };
     this.commercialDocuments.set(document.id, document);
     return document;
   }
@@ -508,6 +533,199 @@ describe("signature use cases", () => {
         "team_1:provider:tic:signature.tic.webhook.completed:tic_evt_1",
       ]),
     );
+  });
+
+  test("supports recipient-token signing read, start, status, and receipt", async () => {
+    const repository = new MemorySignatureRepository();
+    const provider = createMockTicSignatureProvider();
+    repository.seed();
+    repository.commercialDocuments.set("doc_1", {
+      ...document,
+      status: "sent",
+      recipientAccessTokenExpiresAt: "2099-08-20T00:00:00.000Z",
+    });
+
+    const read = await readRecipientSigningSurface(
+      repository as unknown as SignatureUseCaseRepository,
+      { accessToken: recipientToken },
+    );
+    const started = await startRecipientTicSignatureRequest(
+      repository as unknown as SignatureUseCaseRepository,
+      provider,
+      {
+        accessToken: recipientToken,
+        idempotencyKey: "recipient_start_1",
+      },
+    );
+    const replayedStart = await startRecipientTicSignatureRequest(
+      repository as unknown as SignatureUseCaseRepository,
+      provider,
+      {
+        accessToken: recipientToken,
+        idempotencyKey: "recipient_start_1",
+      },
+    );
+    const pending = await getRecipientSigningStatus(
+      repository as unknown as SignatureUseCaseRepository,
+      { accessToken: recipientToken },
+    );
+
+    expect(read).toMatchObject({
+      state: "ready",
+      document: { status: "viewed", versionNumber: 1, pdfSha256: version.pdfSha256 },
+      sender: { legalName: "Seller AB" },
+      customer: { legalName: "Customer AB" },
+      pdf: { sha256: version.pdfSha256 },
+    });
+    expect(repository.commercialDocuments.get("doc_1")?.status).toBe("signing");
+    expect(started.replayed).toBe(false);
+    expect(replayedStart.replayed).toBe(true);
+    expect(started.signingUrl).toStartWith("https://tic.example/sign/");
+    expect(started.signatureRequest).toMatchObject({
+      teamId: "team_1",
+      documentId: "doc_1",
+      documentVersionId: "version_1",
+      createdByActorId: "recipient:doc_1",
+    });
+    expect(started.signatureRequest.hiddenSignedData).toMatchObject({
+      deal: { opportunityId: "opp_1" },
+      account: { accountId: "account_1", customerLegalName: "Customer AB" },
+      seller: { legalName: "Seller AB" },
+      signer: { name: "ada", email: "ada@example.com", role: "external_signer" },
+      fortnoxCustomerMapping: { providerCustomerId: "1001" },
+    });
+    expect(pending).toMatchObject({
+      state: "pending",
+      pdf: null,
+      signature: {
+        status: "requested",
+        signingUrl: started.signatureRequest.signingUrl,
+      },
+      receipt: null,
+    });
+
+    const body = JSON.stringify({
+      providerEventId: "tic_evt_recipient_1",
+      providerSessionId: started.signatureRequest.providerSessionId,
+      documentPdfSha256: version.pdfSha256,
+      signedAt: "2026-06-20T12:00:00.000Z",
+      signerName: "Ada Recipient",
+      signerEmail: "ada@example.com",
+      signerPersonalNumberMasked: "********1234",
+      signatureValue: "signature-value",
+      xmlDsig: "<Signature />",
+      ocspResponse: "ocsp-response",
+      evidenceObjectKey: "signatures/team_1/evidence/tic_evt_recipient_1.json",
+    });
+    const timestamp = "1781956800";
+    const signature = await signWebhookPayload({ secret: webhookSecret, timestamp, body });
+    await completeTicSignatureWebhook(
+      repository as unknown as SignatureUseCaseRepository,
+      provider,
+      {
+        rawBody: body,
+        signature,
+        timestamp,
+        webhookSecret,
+        now: new Date("2026-06-20T12:00:00.000Z"),
+      },
+    );
+
+    const signedStatus = await getRecipientSigningStatus(
+      repository as unknown as SignatureUseCaseRepository,
+      { accessToken: recipientToken },
+    );
+    const receipt = await getRecipientSigningReceipt(
+      repository as unknown as SignatureUseCaseRepository,
+      { accessToken: recipientToken },
+    );
+
+    expect(signedStatus).toMatchObject({
+      state: "signed",
+      pdf: null,
+      receipt: {
+        signatureRequestId: started.signatureRequest.id,
+        evidence: [{ documentPdfSha256: version.pdfSha256, verificationStatus: "verified" }],
+      },
+    });
+    expect(receipt).toMatchObject({
+      state: "signed",
+      pdf: { sha256: version.pdfSha256 },
+      receipt: {
+        signatureRequestId: started.signatureRequest.id,
+        downloads: expect.arrayContaining([
+          expect.objectContaining({ kind: "signed_pdf" }),
+          expect.objectContaining({ kind: "evidence_receipt" }),
+        ]),
+      },
+    });
+    expect(repository.signatureEvidence).toHaveLength(1);
+    expect([...repository.idempotency.keys()]).toContain(
+      "team_1:recipient:doc_1:signature.tic.recipient.start:recipient_start_1",
+    );
+  });
+
+  test("scopes recipient signing access to live sent tokens and terminal states", async () => {
+    const repository = new MemorySignatureRepository();
+    const provider = createMockTicSignatureProvider();
+    repository.seed();
+
+    await expect(
+      readRecipientSigningSurface(repository as unknown as SignatureUseCaseRepository, {
+        accessToken: "missing_token",
+      }),
+    ).rejects.toThrow("Recipient signing link not found");
+
+    repository.commercialDocuments.set("doc_1", {
+      ...document,
+      status: "sent",
+      recipientAccessTokenExpiresAt: "2000-01-01T00:00:00.000Z",
+    });
+    await expect(
+      getRecipientSigningStatus(repository as unknown as SignatureUseCaseRepository, {
+        accessToken: recipientToken,
+      }),
+    ).rejects.toThrow("Commercial document recipient link expired");
+    await expect(
+      startRecipientTicSignatureRequest(
+        repository as unknown as SignatureUseCaseRepository,
+        provider,
+        {
+          accessToken: recipientToken,
+          idempotencyKey: "recipient_expired_start",
+        },
+      ),
+    ).rejects.toThrow("Commercial document recipient link expired");
+
+    for (const status of ["draft", "finalised"] as const) {
+      repository.commercialDocuments.set("doc_1", {
+        ...document,
+        status,
+        recipientAccessTokenExpiresAt: "2099-08-20T00:00:00.000Z",
+      });
+      await expect(
+        readRecipientSigningSurface(repository as unknown as SignatureUseCaseRepository, {
+          accessToken: recipientToken,
+        }),
+      ).rejects.toThrow("Commercial document is not available for recipient signing");
+    }
+
+    for (const [status, state] of [
+      ["declined", "declined"],
+      ["expired", "expired"],
+      ["error", "failed"],
+    ] as const) {
+      repository.commercialDocuments.set("doc_1", {
+        ...document,
+        status,
+        recipientAccessTokenExpiresAt: "2099-08-20T00:00:00.000Z",
+      });
+      await expect(
+        getRecipientSigningStatus(repository as unknown as SignatureUseCaseRepository, {
+          accessToken: recipientToken,
+        }),
+      ).resolves.toMatchObject({ state });
+    }
   });
 
   test("rejects invalid webhook signatures and hash mismatches without signing", async () => {

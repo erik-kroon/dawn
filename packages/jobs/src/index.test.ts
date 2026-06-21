@@ -705,6 +705,34 @@ describe("job contracts", () => {
     });
   });
 
+  test("maps invoice handoff requests to Fortnox invoice creation jobs", () => {
+    expect(
+      outboxEventToQueueMessages({
+        ...event,
+        type: "invoice_handoff.requested",
+        payload: {
+          provider: "fortnox",
+          handoffId: "handoff_1",
+          documentId: "doc_1",
+          documentVersionId: "version_1",
+          signatureRequestId: "sig_1",
+          connectionId: "fortnox_conn_1",
+        },
+      }),
+    ).toContainEqual({
+      type: "fortnox.create_invoice",
+      teamId: "team_1",
+      handoffId: "handoff_1",
+      documentId: "doc_1",
+      documentVersionId: "version_1",
+      signatureRequestId: "sig_1",
+      connectionId: "fortnox_conn_1",
+      provider: "fortnox",
+      sourceOutboxEventId: "outbox_1",
+      idempotencyKey: "fortnox:create-invoice:outbox_1:handoff_1",
+    });
+  });
+
   test("calculates capped exponential retry delays", () => {
     const now = new Date("2026-06-15T10:00:00.000Z");
 
@@ -731,6 +759,7 @@ describe("job contracts", () => {
       "automation.run": record("automation.run"),
       "bank.sync": record("bank.sync"),
       "fortnox.sync": record("fortnox.sync"),
+      "fortnox.create_invoice": record("fortnox.create_invoice"),
       "webhook.deliver": record("webhook.deliver"),
       "team_data.export": record("team_data.export"),
       "accountant_packet.export": record("accountant_packet.export"),

@@ -11,6 +11,7 @@ import {
   requestDueEmailInboxSyncs,
   resolveSystemAppRequest,
   runAutomationsForOutboxEvent,
+  processFortnoxInvoiceCreation,
   syncIntegration,
   syncEmailInbox,
   syncBankConnection,
@@ -35,6 +36,7 @@ import {
   createMockBankingProvider,
   createMockEmailInboxProvider,
   createConfiguredIntegrationProviders,
+  createMockFortnoxInvoiceProvider,
   createSandboxBankingProvider,
   InboxConnector,
   type IntegrationProvider,
@@ -272,6 +274,24 @@ export function createDawnWorkerJobHandlers(env: DawnCloudflareBindings): DawnQu
           connectionId: message.connectionId,
           syncMode: message.syncMode,
           cursor: message.cursor ?? null,
+          idempotencyKey: message.idempotencyKey,
+          enforceCallerPermission: false,
+        },
+      );
+    },
+    "fortnox.create_invoice": async (message) => {
+      await processFortnoxInvoiceCreation(
+        new DrizzleDawnRepository(),
+        createMockFortnoxInvoiceProvider(),
+        resolveSystemAppRequest({
+          actorId: "system:fortnox-invoice",
+          requestId: message.idempotencyKey,
+          teamId: message.teamId,
+        }),
+        {
+          teamId: message.teamId,
+          handoffId: message.handoffId,
+          sourceOutboxEventId: message.sourceOutboxEventId,
           idempotencyKey: message.idempotencyKey,
           enforceCallerPermission: false,
         },

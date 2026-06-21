@@ -16,6 +16,7 @@ For the first beta, do not make generic CRM metadata, banking ledger, accountant
 ## Architecture Posture
 
 - Keep business rules out of route handlers, UI components, workers, and provider adapters.
+- Keep the repo as a modular monolith: use feature-aligned files across the existing packages, and avoid big-bang package moves.
 - Add shared business behavior through `packages/domain` and `packages/app` as the system grows.
 - Public API, internal oRPC, webhooks, workers, automations, and AI tools should all call application use cases rather than touching database queries directly.
 - Postgres is the authoritative store. Durable Objects, TanStack DB, KV, cache, search, and vector indexes are projections or coordination layers.

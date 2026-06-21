@@ -1,4 +1,4 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   boolean,
   index,
@@ -10,7 +10,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
-import { providerObject, team } from "./core";
+import { integrationConnection, providerObject, team } from "./core";
 
 export const crmRecord = pgTable(
   "crm_record",
@@ -563,6 +563,165 @@ export const signatureEvidence = pgTable(
     uniqueIndex("signature_evidence_provider_event_idx").on(table.provider, table.providerEventId),
     index("signature_evidence_request_idx").on(table.teamId, table.signatureRequestId),
     index("signature_evidence_session_idx").on(table.provider, table.providerSessionId),
+  ],
+);
+
+export const trustPolicy = pgTable("trust_policy", {
+  teamId: text("team_id")
+    .primaryKey()
+    .references(() => team.id, { onDelete: "cascade" }),
+  mode: text("mode").default("advisory").notNull(),
+  updatedByActorId: text("updated_by_actor_id"),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => /* @__PURE__ */ new Date())
+    .notNull(),
+});
+
+export const trustCheck = pgTable(
+  "trust_check",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    accountId: text("account_id")
+      .notNull()
+      .references(() => crmAccount.recordId, { onDelete: "cascade" }),
+    opportunityId: text("opportunity_id")
+      .notNull()
+      .references(() => crmOpportunity.recordId, { onDelete: "cascade" }),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => commercialDocument.id, { onDelete: "cascade" }),
+    documentVersionId: text("document_version_id")
+      .notNull()
+      .references(() => commercialDocumentVersion.id, { onDelete: "restrict" }),
+    signatureRequestId: text("signature_request_id")
+      .notNull()
+      .references(() => signatureRequest.id, { onDelete: "cascade" }),
+    signatureEvidenceId: text("signature_evidence_id")
+      .notNull()
+      .references(() => signatureEvidence.id, { onDelete: "cascade" }),
+    signaturePartyId: text("signature_party_id").references(() => signatureParty.id, {
+      onDelete: "set null",
+    }),
+    provider: text("provider").notNull(),
+    providerSessionId: text("provider_session_id").notNull(),
+    providerRequestId: text("provider_request_id"),
+    providerEventId: text("provider_event_id"),
+    sourceOrganizationNumber: text("source_organization_number"),
+    signerName: text("signer_name").notNull(),
+    signerEmail: text("signer_email"),
+    signerPersonalNumberMasked: text("signer_personal_number_masked"),
+    status: text("status").default("pending").notNull(),
+    resultReason: text("result_reason").default("pending").notNull(),
+    companyRegistrationNumber: text("company_registration_number"),
+    companyLegalName: text("company_legal_name"),
+    companyStatus: text("company_status"),
+    roleEvidence: jsonb("role_evidence").$type<Record<string, unknown>[]>().default([]).notNull(),
+    signatureDescription: text("signature_description"),
+    advisoryAnalysis: jsonb("advisory_analysis").$type<Record<string, unknown> | null>(),
+    originalSourceDescriptions: jsonb("original_source_descriptions")
+      .$type<string[]>()
+      .default([])
+      .notNull(),
+    rawPayload: jsonb("raw_payload").$type<Record<string, unknown>>().default({}).notNull(),
+    rawPayloadReference: text("raw_payload_reference"),
+    legalBasis: text("legal_basis").notNull(),
+    purpose: text("purpose").notNull(),
+    retentionUntil: timestamp("retention_until"),
+    requestedAt: timestamp("requested_at").notNull(),
+    completedAt: timestamp("completed_at"),
+    reviewedAt: timestamp("reviewed_at"),
+    reviewerActorId: text("reviewer_actor_id"),
+    reviewDecision: text("review_decision"),
+    reviewRationale: text("review_rationale"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("trust_check_team_account_idx").on(table.teamId, table.accountId),
+    index("trust_check_team_document_idx").on(table.teamId, table.documentId),
+    index("trust_check_team_signature_idx").on(table.teamId, table.signatureRequestId),
+    index("trust_check_team_evidence_idx").on(table.teamId, table.signatureEvidenceId),
+    index("trust_check_team_status_idx").on(table.teamId, table.status),
+  ],
+);
+
+export const invoiceHandoffPolicy = pgTable("invoice_handoff_policy", {
+  teamId: text("team_id")
+    .primaryKey()
+    .references(() => team.id, { onDelete: "cascade" }),
+  mode: text("mode").default("manual").notNull(),
+  updatedByActorId: text("updated_by_actor_id"),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => /* @__PURE__ */ new Date())
+    .notNull(),
+});
+
+export const invoiceHandoff = pgTable(
+  "invoice_handoff",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id")
+      .notNull()
+      .references(() => team.id, { onDelete: "cascade" }),
+    accountId: text("account_id")
+      .notNull()
+      .references(() => crmAccount.recordId, { onDelete: "cascade" }),
+    opportunityId: text("opportunity_id")
+      .notNull()
+      .references(() => crmOpportunity.recordId, { onDelete: "cascade" }),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => commercialDocument.id, { onDelete: "cascade" }),
+    documentVersionId: text("document_version_id")
+      .notNull()
+      .references(() => commercialDocumentVersion.id, { onDelete: "restrict" }),
+    signatureRequestId: text("signature_request_id")
+      .notNull()
+      .references(() => signatureRequest.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    connectionId: text("connection_id")
+      .notNull()
+      .references(() => integrationConnection.id, { onDelete: "restrict" }),
+    status: text("status").default("waiting_manual_approval").notNull(),
+    requestedByActorId: text("requested_by_actor_id").notNull(),
+    requestedAt: timestamp("requested_at").notNull(),
+    approvedByActorId: text("approved_by_actor_id"),
+    approvedAt: timestamp("approved_at"),
+    providerObjectRecordId: text("provider_object_record_id").references(() => providerObject.id, {
+      onDelete: "set null",
+    }),
+    providerInvoiceId: text("provider_invoice_id"),
+    providerInvoiceNumber: text("provider_invoice_number"),
+    providerInvoiceUrl: text("provider_invoice_url"),
+    providerStatus: text("provider_status"),
+    failureCode: text("failure_code"),
+    failureMessage: text("failure_message"),
+    requestPayload: jsonb("request_payload").$type<Record<string, unknown>>().notNull(),
+    rawPayload: jsonb("raw_payload").$type<Record<string, unknown>>().default({}).notNull(),
+    lastAttemptAt: timestamp("last_attempt_at"),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at")
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("invoice_handoff_active_document_version_idx")
+      .on(table.teamId, table.provider, table.documentVersionId)
+      .where(sql`${table.status} <> 'failed'`),
+    index("invoice_handoff_team_document_idx").on(table.teamId, table.documentId),
+    index("invoice_handoff_team_status_idx").on(table.teamId, table.status),
+    index("invoice_handoff_team_connection_idx").on(table.teamId, table.connectionId),
+    index("invoice_handoff_provider_invoice_idx").on(table.provider, table.providerInvoiceId),
   ],
 );
 

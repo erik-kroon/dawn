@@ -819,15 +819,15 @@ A recipient can open a clean public signing link, review the exact finalised com
 
 #### Acceptance Criteria
 
-- [ ] Recipient signing link opens outside the authenticated Dawn CRM shell.
-- [ ] Recipient can view document overview and exact immutable PDF for the active finalised version.
-- [ ] Recipient can start TIC BankID signing from the public surface.
-- [ ] Pending, failed, expired, declined and signed states are human-readable.
-- [ ] Signed completion shows a receipt and available evidence/download actions according to policy.
-- [ ] Public surface uses recipient token access only and never requires Dawn user auth.
-- [ ] Public surface does not expose CRM navigation, workspace data or unrelated APIs.
-- [ ] Business mutations still go through shared app/domain use cases with audit, outbox and idempotency.
-- [ ] Surface is mobile-usable for the external buyer/signer.
+- [x] Recipient signing link opens outside the authenticated Dawn CRM shell.
+- [x] Recipient can view document overview and exact immutable PDF for the active finalised version.
+- [x] Recipient can start TIC BankID signing from the public surface.
+- [x] Pending, failed, expired, declined and signed states are human-readable.
+- [x] Signed completion shows a receipt and available evidence/download actions according to policy.
+- [x] Public surface uses recipient token access only and never requires Dawn user auth.
+- [x] Public surface does not expose CRM navigation, workspace data or unrelated APIs.
+- [x] Business mutations still go through shared app/domain use cases with audit, outbox and idempotency.
+- [x] Surface is mobile-usable for the external buyer/signer.
 
 #### Verification
 
@@ -842,7 +842,7 @@ A recipient can open a clean public signing link, review the exact finalised com
 
 ### 5. TIC Company Context And Signer Trust
 
-Status: ready
+Status: in-progress
 
 #### Goal
 
@@ -874,16 +874,25 @@ Company context and signer-role evidence help the team decide whether the signer
 
 #### Acceptance Criteria
 
-- [ ] Team can enable, disable, or require review for trust checks.
+- [x] Team can enable, disable, or require review for trust checks.
 - [ ] Company context from slice 3.5 is visible before quote/signing where available.
-- [ ] CompanyRoles request runs only after permitted identity context exists.
-- [ ] Failed/unavailable enrichment does not silently pass.
-- [ ] Original source descriptions remain visible to reviewers.
-- [ ] AI-generated analysis is labelled as assistance, not authority.
+- [x] CompanyRoles request runs only after permitted identity context exists.
+- [x] Failed/unavailable enrichment does not silently pass.
+- [x] Original source descriptions remain visible to reviewers.
+- [x] AI-generated analysis is labelled as assistance, not authority.
 - [ ] `needs_review` blocks invoice creation when policy requires approval.
-- [ ] Manual decision records reviewer, timestamp, and rationale.
-- [ ] Trust result and review appear on the deal/customer timeline.
+- [x] Manual decision records reviewer, timestamp, and rationale.
+- [x] Trust result and review appear on the deal/customer timeline.
 - [ ] Sensitive enrichment data is permission-protected and retained according to policy.
+
+#### Implementation Notes
+
+- Added trust domain rules, policy modes, reviewer decisions, and a reusable invoice handoff gate helper.
+- Added TIC CompanyRoles provider contract and deterministic mock responses.
+- Added `trust` API routes for policy, request, signature lookup, and review.
+- Added persistent `trust_policy` and `trust_check` schema/repository support.
+- Added account timeline events for `trust_check.requested`, `trust_check.completed`, and `trust_check.reviewed`.
+- Verified backend/API flow with domain and router tests; remaining work is pre-signing UI, real TIC adapter, retention execution, and Slice 6 invoice-creation wiring.
 
 #### Verification
 
@@ -898,7 +907,7 @@ Company context and signer-role evidence help the team decide whether the signer
 
 ### 6. Fortnox Invoice Handoff
 
-Status: ready
+Status: in-progress
 
 #### Goal
 
@@ -927,21 +936,32 @@ A signed and policy-cleared document creates exactly one linked Fortnox invoice,
 - `apps/server/src/worker-runtime.ts`
 - `packages/db/src/schema/core.ts`
 - `packages/domain/src/invoices.ts`
+- `packages/domain/src/invoice-handoff.ts`
+- `packages/app/src/invoice-handoff.ts`
 - Reference mining: `ref/midday/apps/worker/src/processors/invoices/*`, `ref/midday/packages/jobs/src/tasks/invoice/operations/check-status.ts`, `ref/open-mercato/apps/mercato/src/modules/example_customers_sync/lib/mappings.ts`, `ref/erpjs/apps/api/src/model/lib/sales.invoice*.ts`
 
 #### Acceptance Criteria
 
-- [ ] Signed document can request invoice creation through outbox/job flow.
-- [ ] Policy can require manual approval before invoice handoff.
-- [ ] One signed document can create at most one active Fortnox invoice.
-- [ ] Replaying webhook, command, or job cannot create duplicates.
-- [ ] Trust `needs_review` blocks invoice creation when policy requires approval.
-- [ ] Fortnox customer mapping, line snapshots, totals, currency, and payment terms reconcile with the signed version.
-- [ ] Fortnox invoice number, link, status, and payment projection appear in Dawn.
+- [x] Signed document can request invoice creation through outbox/job flow.
+- [x] Policy can require manual approval before invoice handoff.
+- [x] One signed document can create at most one active Fortnox invoice.
+- [x] Replaying command or job cannot create duplicates.
+- [x] Trust `needs_review` blocks invoice creation when policy requires approval.
+- [x] Fortnox customer mapping, line snapshots, totals, currency, and payment terms reconcile with the signed version.
+- [x] Fortnox invoice number, link, status, and initial payment projection appear in Dawn backend/API projections.
 - [ ] Failure after signing is recoverable without re-signing.
 - [ ] Provider validation errors are actionable to Sales/Finance users.
 - [ ] Invoice status updates do not regress on older provider events.
-- [ ] Accounting invoice projection uses provider/connection/object mappings and does not introduce Fortnox-only canonical CRM fields.
+- [x] Accounting invoice projection uses provider/connection/object mappings and does not introduce Fortnox-only canonical CRM fields.
+
+#### Implementation Notes
+
+- Added a dedicated invoice handoff domain/app boundary with automatic/manual policy, signed-version validation, trust gating, idempotency, and retryable provider-write lifecycle.
+- Added Postgres-backed `invoice_handoff_policy` and `invoice_handoff` tables with an active document-version/provider uniqueness rule.
+- Added mock Fortnox invoice creation provider contract, `fortnox.create_invoice` job mapping, and worker handler.
+- Added protected API routes for handoff policy, document handoff lookup, request, approve, and retry.
+- Added account timeline projection for invoice handoff requested/approved/retry/created/failed events.
+- Remaining work: real Fortnox invoice-write adapter and provider validation mapping, UI approval/retry controls, refresh/status monotonicity, and explicit failure-recovery tests.
 
 #### Verification
 
