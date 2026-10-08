@@ -1,4 +1,6 @@
-# Dawn
+# Dawn (Pivoted)
+
+Financial workspace prototype. Development stopped after I moved on to other projects.
 
 Dawn is a business operating system for owner-operators, freelancers, agencies,
 consultants, and small teams.
@@ -14,10 +16,9 @@ Cloudflare-native operations, server-authorized sync, and auditable AI tools.
 
 ## Status
 
-Dawn is in active product and architecture buildout. The current repo is a
-TypeScript monorepo foundation with the target package boundaries being filled
-in. Some product areas described here are product direction rather than finished
-runtime behavior.
+This repository retains the implementation and design direction from the prototype.
+It is no longer under active development. Some product areas described below are
+unfinished plans rather than implemented runtime behavior.
 
 Start with:
 
